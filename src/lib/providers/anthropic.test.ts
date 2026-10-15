@@ -26,3 +26,22 @@ describe('OpenAI explicit caching', () => {
     for (const m of ['gpt-5.5', 'gpt-5', 'gpt-4.1', 'o3', 'gpt-mock-1']) expect(supportsExplicitCaching(m), m).toBe(false);
   });
 });
+
+import { effortChoices, pickEffort } from './index';
+describe('temperature and effort', () => {
+  const base = (model: string, temperature: number | null) =>
+    anthropicAdapter.buildRequestBase({ model: { ...DEFAULT_MODEL_SETTINGS, model, temperature }, options: DEFAULT_RUN_OPTIONS, system: '', outputSchema: null, promptHash: 'h' });
+  it('never sends a temperature to models that reject it', () => {
+    expect(base('claude-opus-5-5', 0.2).temperature).toBeUndefined();
+    expect(base('claude-sonnet-4-6', 0.2).temperature).toBeUndefined();
+    expect(base('claude-haiku-4-5', 0.2).temperature).toBe(0.2);
+  });
+  it('starts at medium and keeps only levels the model supports', () => {
+    expect(DEFAULT_MODEL_SETTINGS.effort).toBe('medium');
+    expect(pickEffort('xhigh', ['low', 'medium', 'high', 'max'])).toBe('medium');
+    expect(pickEffort('high', ['low', 'medium', 'high'])).toBe('high');
+    expect(pickEffort('medium', [])).toBe('');
+    expect(effortChoices('anthropic', { id: 'claude-haiku-4-5', label: '', effortLevels: [] })).toEqual([]);
+    expect(effortChoices('anthropic', undefined)).toContain('medium');
+  });
+});

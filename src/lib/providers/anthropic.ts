@@ -25,6 +25,14 @@ export function supportsAdaptiveThinking(model: string): boolean {
   return /^claude-(fable|mythos)/.test(model) || /^claude-(opus|sonnet|haiku)-([5-9]|4-[6-9])(\b|-|$)/.test(model);
 }
 
+/**
+ * Temperature can't be set on these models: models after Opus 4.6 reject any value but 1, and on
+ * Opus/Sonnet 4.6 it is incompatible with the thinking this app always sends.
+ */
+export function rejectsTemperature(model: string): boolean {
+  return supportsAdaptiveThinking(model);
+}
+
 /** Human-readable thinking setting, for exports. */
 export function thinkingLabel(model: string, summary: boolean): string {
   if (!supportsAdaptiveThinking(model)) return 'not used (model has no adaptive thinking)';
@@ -135,7 +143,7 @@ export const anthropicAdapter: ProviderAdapter = {
     if (model.effort) outputConfig.effort = model.effort;
     if (outputSchema) outputConfig.format = { type: 'json_schema', schema: outputSchema };
     if (Object.keys(outputConfig).length) body.output_config = outputConfig;
-    if (model.temperature !== null) body.temperature = model.temperature;
+    if (model.temperature !== null && !rejectsTemperature(model.model)) body.temperature = model.temperature;
     if (model.refusalFallback && FALLBACK_MODELS.includes(model.model)) body.fallbacks = 'default';
     return body;
   },

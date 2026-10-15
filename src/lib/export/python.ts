@@ -186,12 +186,15 @@ def build_request(prefix, rest):
 def call_model(client, body):
     """Send one request; return (text, reasoning_summary, model, stop_reason, usage, raw_response)."""
     if PROVIDER == "anthropic":
+        body = dict(body)
+        # Parameters the SDK has no argument for (e.g. temperature) are sent unchanged in the request body.
+        extra = {k: body.pop(k) for k in ("temperature",) if k in body}
         if "fallbacks" in body:
             # Server-side refusal fallback (beta): a refused request is re-run on a fallback model.
-            with client.beta.messages.stream(**body, betas=["server-side-fallback-2026-07-01"]) as stream:
+            with client.beta.messages.stream(**body, betas=["server-side-fallback-2026-07-01"], extra_body=extra or None) as stream:
                 msg = stream.get_final_message()
         else:
-            with client.messages.stream(**body) as stream:
+            with client.messages.stream(**body, extra_body=extra or None) as stream:
                 msg = stream.get_final_message()
         text = "".join(b.text for b in msg.content if b.type == "text")
         thinking = "\\n\\n".join(b.thinking for b in msg.content if b.type == "thinking" and b.thinking)
@@ -202,21 +205,48 @@ def call_model(client, body):
             "cache_read_tokens": u.cache_read_input_tokens or 0,
             "cache_write_tokens": u.cache_creation_input_tokens or 0,
         }
-        return text, thinking, msg.model, msg.stop_reason, usage, msg.model_dump()
+        stop = msg.stop_reason or ""
+        category = getattr(getattr(msg, "stop_details", None), "category", None)
+        if stop == "refusal" and category:
+            stop += f" ({category})"
+        return text, thinking, msg.model, stop, usage, msg.model_dump()
     resp = client.responses.create(**body)
     text = resp.output_text or ""
     summary = []
+    refusal = ""
     for item in resp.output or []:
         if item.type == "reasoning":
             summary += [s.text for s in (item.summary or []) if getattr(s, "text", None)]
+        if item.type == "message":
+            refusal += "".join(c.refusal for c in item.content if c.type == "refusal")
     u = resp.usage
+    details = u.input_tokens_details if u else None
     usage = {
         "input_tokens": u.input_tokens if u else 0,
         "output_tokens": u.output_tokens if u else 0,
-        "cache_read_tokens": (u.input_tokens_details.cached_tokens if u and u.input_tokens_details else 0),
-        "cache_write_tokens": 0,
+        "cache_read_tokens": (getattr(details, "cached_tokens", 0) or 0) if details else 0,
+        "cache_write_tokens": (getattr(details, "cache_write_tokens", 0) or 0) if details else 0,
     }
-    return text, "\\n\\n".join(summary), resp.model, resp.status, usage, resp.model_dump()
+    stop = resp.status or ""
+    reason = getattr(resp.incomplete_details, "reason", None) if resp.incomplete_details else None
+    if reason:
+        stop += f" ({reason})"
+    if refusal:
+        stop = "refusal: " + refusal
+    return text, "\\n\\n".join(summary), resp.model, stop, usage, resp.model_dump()
+
+
+def as_text(v):
+    """Field value as text, written the way Annotation Desk writes it (3.0 -> "3", True -> "true")."""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return str(v).lower()
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
 
 
 def parse_output(text):
@@ -227,12 +257,11 @@ def parse_output(text):
         obj = json.loads(cleaned)
     except json.JSONDecodeError:
         return {}, "Response was not valid JSON"
-    values = {}
-    for f in FIELDS:
-        v = obj.get(f, "")
-        values[f] = json.dumps(v) if isinstance(v, (dict, list)) else ("" if v is None else str(v).lower() if isinstance(v, bool) else str(v))
+    if not isinstance(obj, dict):
+        return {}, "Response was not a JSON object"
+    values = {f: as_text(obj.get(f)) for f in FIELDS}
     if "rationale" in obj:
-        values["rationale"] = obj["rationale"]
+        values["rationale"] = as_text(obj["rationale"])
     missing = [f for f in FIELDS if f not in obj]
     return values, ("Missing field(s): " + ", ".join(missing)) if missing else ""
 
@@ -292,7 +321,11 @@ def main():
                     values, parse_error = parse_output(text)
                     record.update(values)
                     record.update(usage)
-                    record.update(status="ok", parse_error=parse_error, model_reported=model, stop_reason=stop)
+                    # As in Annotation Desk: an empty or unreadable answer counts as failed.
+                    empty = not text and stop not in ("", "end_turn", "completed")
+                    record.update(status="error" if empty or parse_error else "ok", parse_error=parse_error,
+                                  error=f"Empty response (stop reason: {stop})" if empty else "",
+                                  model_reported=model, stop_reason=stop)
                     log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "request": body, "response": raw,
                                           "reasoning_summary": summary}, ensure_ascii=False, default=str) + "\\n")
                 except Exception as e:  # keep going; failed requests are recorded

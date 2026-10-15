@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { RATIONALE_KEY, renderMessageParts, templatePlaceholders, uniqueKey } from '../lib/prompt';
-import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS } from '../lib/providers/anthropic';
+import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceholders, uniqueKey } from '../lib/prompt';
+import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
-import { PROVIDERS, provider } from '../lib/providers';
+import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
 import type { ProviderId, Variable, VariableType } from '../lib/types';
 import { RequestView } from './RequestView';
@@ -73,19 +73,35 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const list = models[m.provider] ?? (m.provider === 'anthropic' ? FALLBACK_ANTHROPIC_MODELS : KNOWN_OPENAI_MODELS);
   const info = list.find((x) => x.id === m.model);
   const showCustom = customModel || !list.length || (!!m.model && !info);
-  const effortChoices = info?.effortLevels?.length ? info.effortLevels : adapter.effortOptions;
+  const effortChoices = effortChoicesFor(m.provider, info);
   const effortLabel = m.provider === 'anthropic' ? 'Effort' : 'Reasoning effort';
+  const noTemperature = m.provider === 'anthropic' && rejectsTemperature(m.model);
   const metaColumns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))].slice(0, 30), [docs]);
-  const unknownPlaceholders = templatePlaceholders(p.userTemplate).filter(
-    (k) => k !== 'text' && k !== 'id' && !(k.startsWith('meta.') && metaColumns.includes(k.slice(5))),
-  );
+  const allMetaColumns = useMemo(() => new Set(docs.flatMap((d) => Object.keys(d.meta))), [docs]);
+  const unknownPlaceholders = [
+    ...templatePlaceholders(p.userTemplate).filter((k) => k !== 'text' && k !== 'id' && !(k.startsWith('meta.') && allMetaColumns.has(k.slice(5)))),
+    ...invalidPlaceholders(p.userTemplate),
+  ];
+
+  // Keep the settings valid for the chosen model: an effort it supports (medium by default) and no
+  // temperature where the model rejects one. The dropdowns then always show what is sent.
+  const effortKey = effortChoices.join(',');
+  useEffect(() => {
+    const effort = pickEffort(m.effort, effortChoices);
+    if (effort !== m.effort || (noTemperature && m.temperature !== null)) {
+      updateStudy((s) => {
+        s.model.effort = effort;
+        if (noTemperature) s.model.temperature = null;
+      });
+    }
+  }, [m.effort, effortKey, noTemperature, m.temperature]);
 
   const setProvider = (id: ProviderId) =>
     updateStudy((s) => {
       if (s.model.provider === id) return;
       s.model.provider = id;
       s.model.model = id === 'anthropic' ? 'claude-opus-5-5' : 'gpt-6.1-sol';
-      s.model.effort = '';
+      s.model.effort = 'medium';
     });
 
   const showPreview = async () => {
@@ -96,7 +112,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     setPreview({ ...snap.requestBase, ...part });
   };
 
-  const modelSummary = [m.model || 'no model', m.effort ? `${effortLabel.toLowerCase()} ${m.effort}` : null, m.temperature !== null ? `temp ${m.temperature}` : null]
+  const modelSummary = [m.model || 'no model', m.effort ? `${effortLabel.toLowerCase()} ${m.effort}` : null, m.temperature !== null && !noTemperature ? `temp ${m.temperature}` : null]
     .filter(Boolean)
     .join(' · ');
   const outputSummary =
@@ -170,8 +186,14 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             <label htmlFor="effort" title="How much the model reasons before answering">
               {effortLabel}
             </label>
-            <select id="effort" className="select" value={m.effort} onChange={(e) => updateStudy((s) => void (s.model.effort = e.target.value))}>
-              <option value="">Default</option>
+            <select
+              id="effort"
+              className="select"
+              value={m.effort}
+              disabled={!effortChoices.length}
+              onChange={(e) => updateStudy((s) => void (s.model.effort = e.target.value))}
+            >
+              {!effortChoices.length && <option value="">Not supported by this model</option>}
               {effortChoices.map((e) => (
                 <option key={e} value={e}>
                   {e}
@@ -225,7 +247,8 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
                   step="0.1"
                   min="0"
                   max="2"
-                  placeholder="Model default"
+                  placeholder={noTemperature ? 'Not supported by this model' : 'Model default'}
+                  disabled={noTemperature}
                   value={m.temperature ?? ''}
                   onChange={(e) => updateStudy((s) => void (s.model.temperature = e.target.value === '' ? null : Number(e.target.value)))}
                 />
@@ -243,7 +266,11 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
                 />
               </div>
             </div>
-            <div className="hint tight">Leave temperature empty unless needed: many reasoning models reject anything but their default.</div>
+            <div className="hint tight">
+              {noTemperature
+                ? 'Current Claude models do not accept a temperature setting, so none is sent.'
+                : 'Leave temperature empty unless needed: many reasoning models reject anything but their default.'}
+            </div>
             {m.provider === 'anthropic' && (
               <label className="check" style={{ marginTop: 12 }}>
                 <input type="checkbox" checked={m.refusalFallback} onChange={(e) => updateStudy((s) => void (s.model.refusalFallback = e.target.checked))} />
@@ -369,7 +396,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             </span>
             <div className="hint">
               {m.provider === 'anthropic'
-                ? 'Reuses the fixed part of the prompt between requests: cheaper and faster. Only applies to long prompts (roughly 500+ words).'
+                ? 'Reuses the fixed part of the prompt (before the text) between requests: cheaper and faster. Only applies when that part is long enough: about 400 words on Claude 5 models, 800–3,000 words on older ones. Shorter prompts are simply not cached.'
                 : supportsExplicitCaching(m.model)
                   ? 'Caches only the fixed part of your prompt (not the texts). Off: nothing is cached or written.'
                   : 'This OpenAI model caches long prompts automatically and it cannot be turned off.'}

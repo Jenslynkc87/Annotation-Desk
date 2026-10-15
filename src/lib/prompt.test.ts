@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldLabel, flattenJsonResponse, slugKey, uniqueKey } from './prompt';
+import { fieldLabel, flattenJsonResponse, invalidPlaceholders, normalizeLabel, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
 import { DEFAULT_PROMPT } from './types';
 
 describe('field names', () => {
@@ -32,5 +32,25 @@ describe('flattenJsonResponse', () => {
     expect(flattenJsonResponse('Positive')).toBeNull();
     expect(flattenJsonResponse('[1,2]')).toBeNull();
     expect(flattenJsonResponse('')).toBeNull();
+  });
+});
+
+describe('placeholders', () => {
+  const doc = { docId: 'd1', text: 'T', meta: { køn: 'kvinde', 'Gender (self)': 'x' } };
+  it('fills names with any letters, e.g. {{meta.køn}}', () => {
+    expect(renderMessage('Køn: {{meta.køn}}\n{{text}}', doc)).toBe('Køn: kvinde\nT');
+    expect(renderMessageParts('Intro {{ meta.køn }} {{text}}', doc).prefix).toBe('Intro ');
+  });
+  it('lists markers that cannot be filled in', () => {
+    expect(invalidPlaceholders('{{meta.Gender (self)}} {{text}} {{meta.køn}}')).toEqual(['{{meta.Gender (self)}}']);
+  });
+});
+
+describe('normalizeLabel', () => {
+  it('treats 1/0 as yes/no only for yes/no fields', () => {
+    expect(normalizeLabel('1', true)).toBe('true');
+    expect(normalizeLabel('0', true)).toBe('false');
+    expect(normalizeLabel('1')).toBe('1');
+    expect(normalizeLabel(' Yes ')).toBe('true');
   });
 });

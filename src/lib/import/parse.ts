@@ -81,9 +81,10 @@ export async function parseFile(file: File): Promise<ParsedFile> {
   const e = ext(file.name);
   try {
     switch (e) {
+      // Plain-text and Word files are kept exactly as written (no trimming).
       case '.txt':
       case '.md':
-        return { kind: 'text', file: { name: file.name, text: (await file.text()).trim() } };
+        return { kind: 'text', file: { name: file.name, text: await file.text() } };
       case '.html':
       case '.htm': {
         const doc = new DOMParser().parseFromString(await file.text(), 'text/html');
@@ -99,7 +100,7 @@ export async function parseFile(file: File): Promise<ParsedFile> {
       case '.docx': {
         const mammoth = (await import('mammoth/mammoth.browser.js')).default;
         const { value } = await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() });
-        return { kind: 'text', file: { name: file.name, text: value.trim() } };
+        return { kind: 'text', file: { name: file.name, text: value } };
       }
       case '.csv':
       case '.tsv': {

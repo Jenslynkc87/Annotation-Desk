@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
 import { effectiveTemplate, fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
-import { goldColumnsFor } from '../lib/export/tables';
+import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
 import { cancelBatch, checkBatch, deleteRunById, renameRun, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
@@ -112,7 +112,12 @@ export function RunsView() {
                           <button
                             className="btn small danger"
                             disabled={r.status === 'running'}
-                            onClick={() => confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results? This cannot be undone.`) && deleteRunById(r.id)}
+                            onClick={async () => {
+                              const pending = r.status === 'submitted' ? ' The batch is still running at the provider and will be cancelled.' : '';
+                              if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending} This cannot be undone.`)) return;
+                              if (pending) await cancelBatch(r.id);
+                              await deleteRunById(r.id);
+                            }}
                           >
                             Delete
                           </button>
@@ -143,7 +148,7 @@ export function RunsView() {
             <dt>Mode</dt>
             <dd>{inspect.mode === 'batch' ? `Batch (${inspect.batch?.batchId ?? ''})` : 'Immediate'}</dd>
             <dt>Caching</dt>
-            <dd>{inspect.snapshot.options.caching ? `On${inspect.snapshot.model.provider === 'anthropic' ? ` (${inspect.snapshot.options.cacheTtl})` : ''}` : 'Off'}</dd>
+            <dd>{cachingLabel(inspect)}</dd>
             <dt>Runs per text</dt>
             <dd>{inspect.snapshot.options.replicates}</dd>
             <dt>App version</dt>
@@ -199,16 +204,17 @@ function AgreementPanel() {
   const [levelOverride, setLevelOverride] = useState<'' | Level>('');
   const level = levelOverride || autoLevel;
 
+  const yesNo = variable?.type === 'boolean';
   const valuesFor = (src: Source | null): Map<string, string> => {
     const out = new Map<string, string>();
     if (!src) return out;
     if (src.kind === 'meta') {
-      for (const d of docs) out.set(d.id, normalizeLabel(d.meta[src.col]));
+      for (const d of docs) out.set(d.id, normalizeLabel(d.meta[src.col], yesNo));
     } else if (src.kind === 'run') {
       const views = buildDocViews(docs, runs, results, src.id);
-      for (const [id, v] of views) if (v.status !== 'none') out.set(id, normalizeLabel(v.values[f]));
+      for (const [id, v] of views) if (v.status !== 'none') out.set(id, normalizeLabel(v.values[f], yesNo));
     } else {
-      for (const r of results) if (r.runId === src.runId && r.replicate === src.rep && r.status === 'ok') out.set(r.docId, normalizeLabel(r.values[f]));
+      for (const r of results) if (r.runId === src.runId && r.replicate === src.rep && r.status === 'ok') out.set(r.docId, normalizeLabel(r.values[f], yesNo));
     }
     return out;
   };
@@ -228,7 +234,7 @@ function AgreementPanel() {
     }
     const allowed = variable && (variable.type === 'category' || variable.type === 'ordinal') ? variable.values.map((x) => normalizeLabel(x)).filter(Boolean) : [];
     return agreement(xs, ys, level, allowed);
-  }, [a, b, f, level, docs, runs, results]);
+  }, [a, b, f, level, yesNo, docs, runs, results]);
 
   const sourceOptions = (allowMeta: boolean) => (
     <>
@@ -340,7 +346,7 @@ function AgreementPanel() {
             {stats.mae !== null && <Stat k="Mean abs. error" v={fmtStat(stats.mae)} />}
           </div>
           <p className="hint">
-            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike). Texts missing from either source are left out. When
+            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). Texts missing from either source are left out. When
             you iterate on prompts, keep a held-out set of labelled texts for the final estimate so the reported agreement isn't inflated by prompt selection.
           </p>
           {showMatrix && (

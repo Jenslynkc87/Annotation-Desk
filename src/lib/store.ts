@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import * as dbApi from './db';
 import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
 import { describeApiError, provider } from './providers';
+import { rejectsTemperature } from './providers/anthropic';
 import type { BatchLine, CallOutcome, ModelInfo } from './providers/types';
 import { ZERO_USAGE } from './providers/types';
 import {
@@ -129,7 +130,7 @@ export function newStudy(name = 'Untitled study'): Study {
 }
 
 export async function init() {
-  let studies = await migrateStudies(await dbApi.listStudies());
+  let studies = await dbApi.listStudies();
   if (!studies.length) {
     const s = newStudy('My first study');
     await dbApi.putStudy(s);
@@ -147,24 +148,8 @@ export async function init() {
   startBatchPolling();
 }
 
-/**
- * Studies created before the single prompt box had the instructions in `system` and the
- * placeholder "{{text}}" as the prompt. Move the instructions into the prompt box.
- */
-async function migrateStudies(studies: Study[]): Promise<Study[]> {
-  for (const s of studies) {
-    const p = s.prompt;
-    if (p.userTemplate.trim() === '{{text}}') {
-      p.userTemplate = p.system;
-      p.system = '';
-      await dbApi.putStudy(s);
-    }
-  }
-  return studies;
-}
-
 export async function refreshStudies() {
-  set({ studies: await migrateStudies(await dbApi.listStudies()) });
+  set({ studies: await dbApi.listStudies() });
 }
 
 export async function selectStudy(id: string) {
@@ -173,6 +158,8 @@ export async function selectStudy(id: string) {
     return;
   }
   const data = await dbApi.loadStudyData(id);
+  // Older versions stored unreadable answers as "ok"; count them as failed like new ones.
+  for (const r of data.results) if (r.status === 'ok' && r.parseError) r.status = 'error';
   // Runs left "running" by a closed tab can't continue: mark them interrupted.
   for (const r of data.runs) {
     if (r.status === 'running') {
@@ -256,11 +243,13 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
   const taken = new Set(state.docs.map((d) => d.docId));
   let order = state.docs.reduce((m, d) => Math.max(m, d.order), 0);
   const t = nowIso();
+  const renamed: string[] = [];
   const docs: Doc[] = items.map((it) => {
     let docId = it.docId.trim() || `text_${order + 1}`;
     if (taken.has(docId)) {
       let k = 2;
       while (taken.has(`${docId}_${k}`)) k++;
+      renamed.push(`${docId} → ${docId}_${k}`);
       docId = `${docId}_${k}`;
     }
     taken.add(docId);
@@ -270,6 +259,9 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
   await dbApi.putDocs(docs);
   set((s) => ({ docs: [...s.docs, ...docs] }));
   toast(`Added ${docs.length} text${docs.length === 1 ? '' : 's'}.`, 'success');
+  if (renamed.length) {
+    toast(`${renamed.length} ID${renamed.length === 1 ? ' was' : 's were'} already in use and got a suffix: ${renamed.slice(0, 3).join(', ')}${renamed.length > 3 ? ', …' : ''}`, 'error');
+  }
 }
 
 export async function removeDocs(ids: string[]) {
@@ -337,16 +329,19 @@ export async function buildSnapshot(st: Study): Promise<RunSnapshot> {
   const promptHash = await promptFingerprint(st);
   const outputSchema = buildOutputSchema(st.prompt);
   const adapter = provider(st.model.provider);
+  const model = structuredClone(st.model);
+  // Record only what is sent: these models take no temperature.
+  if (model.provider === 'anthropic' && rejectsTemperature(model.model)) model.temperature = null;
   return {
     appVersion: __APP_VERSION__,
-    model: structuredClone(st.model),
+    model,
     options: structuredClone(st.options),
     prompt: structuredClone(st.prompt),
     promptVersion: versionFor(promptHash, state.runs),
     promptHash,
     outputSchema,
     requestBase: adapter.buildRequestBase({
-      model: st.model,
+      model,
       options: st.options,
       system: st.prompt.system,
       outputSchema,
@@ -357,7 +352,9 @@ export async function buildSnapshot(st: Study): Promise<RunSnapshot> {
 
 function makeResult(run: Run, doc: Doc, replicate: number, requestedAt: string, outcome: CallOutcome | null, error: string | null, latencyMs: number | null): Result {
   const parsed = outcome ? parseModelOutput(outcome.rawText, run.snapshot.prompt) : { values: {}, rationale: '', parseError: null };
-  const failed = !!error || (outcome?.rawText === '' && !!outcome.stopReason && outcome.stopReason !== 'end_turn' && outcome.stopReason !== 'completed');
+  const empty = outcome?.rawText === '' && !!outcome.stopReason && outcome.stopReason !== 'end_turn' && outcome.stopReason !== 'completed';
+  // An answer that can't be read (e.g. cut off at the token limit) has no usable labels: it counts as failed.
+  const failed = !!error || empty || !!parsed.parseError;
   return {
     id: `${run.id}:${doc.id}:${replicate}`,
     runId: run.id,
@@ -370,7 +367,7 @@ function makeResult(run: Run, doc: Doc, replicate: number, requestedAt: string, 
     reasoningSummary: outcome?.reasoningSummary ?? '',
     rawText: outcome?.rawText ?? '',
     parseError: parsed.parseError,
-    error: error ?? (failed ? `Empty response (stop reason: ${outcome?.stopReason})` : null),
+    error: error ?? (empty ? `Empty response (stop reason: ${outcome?.stopReason})` : null),
     usage: outcome?.usage ?? { ...ZERO_USAGE },
     latencyMs,
     requestedAt,
@@ -552,11 +549,11 @@ export async function checkBatch(runId: string, quiet = false) {
     const updated: Run = { ...run, batch: { ...run.batch, lastStatus: `${st.status} · ${st.completed + st.failed}/${st.total}`, lastCheckedAt: nowIso() } };
     if (st.done) {
       const lines = await adapter.fetchBatchResults(key, run.batch.batchId);
-      await storeBatchResults(updated, lines);
+      const counts = await storeBatchResults(updated, lines);
       updated.status = 'completed';
       updated.finishedAt = nowIso();
       if (!lines.length) updated.error = `Batch ended with status "${st.status}" and returned no results.`;
-      toast(`Batch run #${run.number} finished: ${lines.filter((l) => l.ok).length} ok, ${lines.filter((l) => !l.ok).length} failed.`, 'success');
+      toast(`Batch run #${run.number} finished: ${counts.ok} ok, ${counts.failed} failed.`, counts.failed || !lines.length ? 'error' : 'success');
     } else if (!quiet) {
       toast(`Batch run #${run.number}: ${st.status}, ${st.completed + st.failed} of ${st.total} done.`);
     }
@@ -568,9 +565,10 @@ export async function checkBatch(runId: string, quiet = false) {
   }
 }
 
-async function storeBatchResults(run: Run, lines: BatchLine[]) {
+async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: number; failed: number }> {
   const docsById = new Map(state.docs.map((d) => [d.id, d]));
   const adapter = provider(run.snapshot.model.provider);
+  const counts = { ok: 0, failed: 0 };
   for (const line of lines) {
     const ref = run.batch!.map[line.customId];
     if (!ref) continue;
@@ -587,8 +585,10 @@ async function storeBatchResults(run: Run, lines: BatchLine[]) {
     };
     await dbApi.putResult(result, log);
     queueResult(result);
+    counts[result.status === 'ok' ? 'ok' : 'failed']++;
   }
   flushResults();
+  return counts;
 }
 
 export async function cancelBatch(runId: string) {

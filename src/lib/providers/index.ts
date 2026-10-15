@@ -1,7 +1,7 @@
 import type { ProviderId } from '../types';
 import { anthropicAdapter } from './anthropic';
 import { openaiAdapter } from './openai';
-import type { ProviderAdapter } from './types';
+import type { ModelInfo, ProviderAdapter } from './types';
 
 export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   anthropic: anthropicAdapter,
@@ -10,6 +10,18 @@ export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
 
 export function provider(id: ProviderId): ProviderAdapter {
   return PROVIDERS[id];
+}
+
+/** Effort levels to offer for a model; [] = the model has no effort setting (nothing is sent). */
+export function effortChoices(p: ProviderId, info: ModelInfo | undefined): string[] {
+  return info?.effortLevels ?? provider(p).effortOptions;
+}
+
+/** Keep the current effort if the model supports it; otherwise medium (or the nearest available). */
+export function pickEffort(current: string, choices: string[]): string {
+  if (!choices.length) return '';
+  if (choices.includes(current)) return current;
+  return choices.includes('medium') ? 'medium' : choices[0];
 }
 
 /** Turn SDK errors into one readable line. */

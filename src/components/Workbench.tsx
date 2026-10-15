@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
-import { fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
+import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/prompt';
 import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
+import { provider } from '../lib/providers';
 import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
 import { CorpusImport } from './CorpusImport';
@@ -30,6 +31,7 @@ function TextsAndResults() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
   const job = useStore((s) => s.job);
+  const keys = useStore((s) => s.keys);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'done' | 'todo' | 'error' | 'mismatch'>('all');
@@ -49,6 +51,7 @@ function TextsAndResults() {
     return f;
   }, [study.prompt, runFilter, runs]);
   const compareField = fields[0];
+  const compareYesNo = isYesNoField(study.prompt, compareField);
   // Display names: look the key up in the current prompt, then in the viewed run's prompt.
   const fieldName = (key: string) => {
     const viewedRun = runFilter === 'latest' ? null : runs.find((r) => r.id === runFilter);
@@ -65,12 +68,12 @@ function TextsAndResults() {
       if (statusFilter === 'error' && v.status !== 'error' && v.status !== 'partial') return false;
       if (statusFilter === 'mismatch') {
         if (!compareCol || v.status === 'none') return false;
-        if (normalizeLabel(v.values[compareField]) === normalizeLabel(d.meta[compareCol])) return false;
+        if (normalizeLabel(v.values[compareField], compareYesNo) === normalizeLabel(d.meta[compareCol], compareYesNo)) return false;
       }
       if (!q) return true;
       return d.docId.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) || Object.values(v.values).some((x) => x.toLowerCase().includes(q));
     });
-  }, [docs, views, query, statusFilter, compareCol, compareField]);
+  }, [docs, views, query, statusFilter, compareCol, compareField, compareYesNo]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
   const curPage = Math.min(page, pageCount - 1);
@@ -189,7 +192,11 @@ function TextsAndResults() {
             <div className="notice" key={r.id} style={{ marginTop: 10 }}>
               <div className="row">
                 <span>
-                  Batch run {runTitle(r)} is processing ({r.batch?.lastStatus ?? 'submitted'}). Results appear here automatically while this page is open.
+                  Batch run {runTitle(r)} is processing ({r.batch?.lastStatus ?? 'submitted'}).{' '}
+                  {r.batch && keys[r.batch.provider]
+                    ? 'Results appear here automatically while this page is open.'
+                    : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
+                  Unfinished requests expire 24 hours after submission.
                 </span>
                 <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
                   Check now
@@ -317,7 +324,7 @@ function TextsAndResults() {
                       </td>
                       {fields.map((f) => {
                         const val = v.values[f] ?? '';
-                        const cmp = compareCol && f === compareField && val && gold ? (normalizeLabel(val) === normalizeLabel(gold) ? 'match' : 'mismatch') : '';
+                        const cmp = compareCol && f === compareField && val && gold ? (normalizeLabel(val, compareYesNo) === normalizeLabel(gold, compareYesNo) ? 'match' : 'mismatch') : '';
                         return (
                           <td key={f}>
                             {v.status === 'error' ? (

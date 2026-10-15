@@ -24,7 +24,8 @@ const TRICKY = 'Line one with "quotes" and \'single\' quotes.\nA backslash \\ an
 
 const promptWithMarkers: PromptSpec = {
   system: TRICKY,
-  userTemplate: TRICKY + '\nID {{id}} ({{meta.year}}):\n{{text}}\nAnswer now.',
+  // A non-English column name comes first, so it also decides where the cached prefix ends.
+  userTemplate: TRICKY + '\nKøn: {{meta.køn}}. ID {{id}} ({{meta.year}}):\n{{text}}\nAnswer now.',
   outputMode: 'structured',
   variables: [
     { name: 'stance', type: 'category', values: ['for', 'against'], description: 'Stance "towards" X' },
@@ -76,9 +77,9 @@ describe('exported script', () => {
       const { study, run } = makeRun(provider, prompt);
       const dir = mkdtempSync(join(tmpdir(), 'annot-'));
       writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
-      writeFileSync(join(dir, 'corpus.csv'), 'doc_id,text,year\nd1,"Some text, with ""quotes""\nand a newline",2024\n');
+      writeFileSync(join(dir, 'corpus.csv'), 'doc_id,text,year,køn\nd1,"Some text, with ""quotes""\nand a newline",2024,kvinde\n');
       const out = execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run']).toString();
-      const doc = { docId: 'd1', text: 'Some text, with "quotes"\nand a newline', meta: { year: '2024' } };
+      const doc = { docId: 'd1', text: 'Some text, with "quotes"\nand a newline', meta: { year: '2024', køn: 'kvinde' } };
       const adapter = provider === 'anthropic' ? anthropicAdapter : openaiAdapter;
       const expected = { ...run.snapshot.requestBase, ...adapter.buildRequestPart(renderMessageParts(prompt.userTemplate, doc), run.snapshot.options, run.snapshot.model.model) };
       expect(JSON.parse(out)).toEqual(expected);

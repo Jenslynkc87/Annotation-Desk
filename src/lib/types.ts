@@ -21,7 +21,8 @@ export type OutputMode = 'structured' | 'text';
 export interface ModelSettings {
   provider: ProviderId;
   model: string;
-  /** '' = provider/model default (parameter not sent). */
+  /** Always set explicitly (starts at "medium"). '' = not sent: the model has no effort setting
+   *  (runs made before effort became explicit used '' for the provider's default). */
   effort: string;
   /** Ask the provider to return a readable reasoning summary (stored per result). */
   reasoningSummary: boolean;
@@ -165,7 +166,7 @@ export interface ResultLog {
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   provider: 'anthropic',
   model: 'claude-opus-5-5',
-  effort: '',
+  effort: 'medium',
   reasoningSummary: false,
   temperature: null,
   maxOutputTokens: 16000,

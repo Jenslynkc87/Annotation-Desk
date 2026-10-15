@@ -3,7 +3,10 @@ import type { Doc, PromptSpec, Variable } from './types';
 export const RATIONALE_KEY = 'rationale';
 export const TEXT_RESPONSE_KEY = 'response';
 
-const PLACEHOLDER = /\{\{\s*([\w.\- ]+?)\s*\}\}/g;
+// Names may use any letter (e.g. {{meta.køn}}), like Python's \w in the exported script.
+const PLACEHOLDER = /\{\{\s*([\p{L}\p{N}_.\- ]+?)\s*\}\}/gu;
+/** Anything written as {{...}}, whether or not it is a valid placeholder. */
+const ANY_BRACES = /\{\{([^{}]*)\}\}/gu;
 
 /** Appended to a prompt that doesn't say where the text goes. The tags mark where the text starts and ends. */
 export const TEXT_SUFFIX = '\n\n<text>\n{{text}}\n</text>';
@@ -25,7 +28,7 @@ export interface MessageParts {
 /** Split the prompt at its first placeholder and fill in the text. Mirrored exactly by the exported Python script. */
 export function renderMessageParts(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): MessageParts {
   const t = effectiveTemplate(prompt);
-  const m = new RegExp(PLACEHOLDER.source).exec(t);
+  const m = new RegExp(PLACEHOLDER.source, 'u').exec(t);
   const idx = m ? m.index : t.length;
   return { prefix: t.slice(0, idx), rest: fillPlaceholders(t.slice(idx), doc) };
 }
@@ -50,6 +53,12 @@ function fillPlaceholders(template: string, doc: Pick<Doc, 'docId' | 'text' | 'm
 
 export function templatePlaceholders(template: string): string[] {
   return [...template.matchAll(PLACEHOLDER)].map((m) => m[1]);
+}
+
+/** {{...}} markers that can't be filled in (e.g. a name with brackets); they are sent as written. */
+export function invalidPlaceholders(template: string): string[] {
+  const valid = new RegExp(`^${PLACEHOLDER.source}$`, 'u');
+  return [...template.matchAll(ANY_BRACES)].map((m) => m[0]).filter((s) => !valid.test(s));
 }
 
 /** Machine key from a display name: "Positive score" → "positive_score". */
@@ -130,6 +139,10 @@ export function buildOutputSchema(p: PromptSpec): Record<string, unknown> | null
   };
 }
 
+export function isYesNoField(p: PromptSpec, key: string): boolean {
+  return p.variables.find((v) => v.name === key)?.type === 'boolean';
+}
+
 /** Field names the results table shows, in order. */
 export function outputFields(p: PromptSpec): string[] {
   return p.outputMode === 'structured' ? p.variables.map((v) => v.name) : [TEXT_RESPONSE_KEY];
@@ -203,12 +216,13 @@ export function flattenJsonResponse(raw: string | undefined): Record<string, str
   return out;
 }
 
-/** Canonical form for comparing labels across sources (gold columns, runs). */
-export function normalizeLabel(v: string | undefined): string {
+/** Canonical form for comparing labels across sources (gold columns, runs).
+ *  For yes/no fields (`yesNo`), 1 and 0 also count as yes and no. */
+export function normalizeLabel(v: string | undefined, yesNo = false): string {
   if (v === undefined) return '';
   const s = v.trim().toLowerCase();
-  if (s === 'true' || s === 'yes') return 'true';
-  if (s === 'false' || s === 'no') return 'false';
+  if (s === 'true' || s === 'yes' || (yesNo && s === '1')) return 'true';
+  if (s === 'false' || s === 'no' || (yesNo && s === '0')) return 'false';
   if (s !== '' && !Number.isNaN(Number(s))) return String(Number(s));
   return s;
 }

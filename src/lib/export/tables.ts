@@ -3,6 +3,7 @@ import Papa from 'papaparse';
 import { agreement, type Agreement, type Level } from '../metrics';
 import { TEXT_RESPONSE_KEY, flattenJsonResponse, normalizeLabel, outputFields } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
+import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
 import { buildDocViews } from '../view';
 
@@ -24,12 +25,14 @@ export function metaColumns(docs: Doc[]): string[] {
 
 export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
   const cols = metaColumns(docs);
+  // A metadata column with the same name as one of ours (e.g. "source") gets a prefix instead of overwriting it.
+  const own = new Set(['doc_id', 'text', 'n_characters', 'source']);
   return docs.map((d) => ({
     doc_id: d.docId,
     ...(includeText ? { text: d.text } : {}),
     n_characters: d.text.length,
     source: d.source,
-    ...Object.fromEntries(cols.map((c) => [c, d.meta[c] ?? ''])),
+    ...Object.fromEntries(cols.map((c) => [own.has(c) ? `meta_${c}` : c, d.meta[c] ?? ''])),
   }));
 }
 
@@ -47,10 +50,12 @@ function jsonColumns(run: Run, response: string | undefined): Row {
   return Object.fromEntries(keys.map((k) => [k, numify(flat[k])]));
 }
 
-/** Numbers as numbers (so Excel can sort and sum them); anything else unchanged. */
+/** Numbers as numbers (so Excel can sort and sum them); anything else unchanged.
+ *  Only values that read back identically are converted, so codes like "007" or "3.50" stay as written. */
 function numify(v: string | undefined): string | number {
   if (v === undefined) return '';
-  return /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v;
+  const t = v.trim();
+  return /^-?\d+(\.\d+)?$/.test(t) && String(Number(t)) === t ? Number(t) : v;
 }
 
 function isNumericVar(run: Run, f: string): boolean {
@@ -142,7 +147,7 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
       row.rationale = v.results.find((r) => r.status === 'ok')?.rationale ?? '';
     }
     // Metadata (including any human labels) after the annotations; prefixed if a name collides.
-    for (const c of cols) row[c in row ? `meta_${c}` : c] = d.meta[c] ?? '';
+    for (const c of cols) row[c in row ? `meta_${c}` : c] = numify(d.meta[c]);
     row.n_ok = v.results.filter((r) => r.status === 'ok').length;
     row.n_error = v.results.filter((r) => r.status === 'error').length;
     rows.push(readingOrder(row, hasJson(run, v.values[TEXT_RESPONSE_KEY])));
@@ -177,12 +182,13 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
   for (const { field, column } of pairs) {
     const variable = run.snapshot.prompt.variables.find((v) => v.name === field);
     const level: Level = variable?.type === 'ordinal' ? 'ordinal' : variable?.type === 'number' ? 'interval' : 'nominal';
+    const yesNo = variable?.type === 'boolean';
     const xs: string[] = [];
     const ys: string[] = [];
     for (const d of docs) {
       const v = views.get(d.id)!;
-      const x = normalizeLabel(v.values[field]);
-      const y = normalizeLabel(d.meta[column]);
+      const x = normalizeLabel(v.values[field], yesNo);
+      const y = normalizeLabel(d.meta[column], yesNo);
       if (v.status !== 'none' && x && y) {
         xs.push(x);
         ys.push(y);
@@ -236,7 +242,7 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       thinking: r.snapshot.model.provider === 'anthropic' ? thinkingLabel(r.snapshot.model.model, r.snapshot.model.reasoningSummary) : '',
       temperature: r.snapshot.model.temperature ?? 'default',
       max_output_tokens: r.snapshot.model.maxOutputTokens,
-      caching: r.snapshot.options.caching ? 'on' : 'off',
+      caching: cachingLabel(r),
       prompt_version: r.snapshot.promptVersion,
       prompt_hash: r.snapshot.promptHash,
       input_tokens: sum('inputTokens'),
@@ -248,6 +254,14 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       error: r.error ?? '',
     };
   });
+}
+
+/** How prompt caching was handled in a run, for exports. Older OpenAI models cache whatever the setting says. */
+export function cachingLabel(run: Run): string {
+  const { provider, model } = run.snapshot.model;
+  if (provider === 'openai' && !supportsExplicitCaching(model)) return 'automatic (OpenAI caches long prompts; cannot be turned off)';
+  if (!run.snapshot.options.caching) return 'off';
+  return provider === 'anthropic' ? `on (${run.snapshot.options.cacheTtl})` : 'on';
 }
 
 export function codebookMarkdown(run: Run): string {

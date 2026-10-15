@@ -47,7 +47,7 @@ export function CorpusImport() {
       setBusy(`Reading ${i + 1} of ${files.length}: ${files[i].name}`);
       const r = await parseFile(files[i]);
       if (r.kind === 'text') {
-        if (r.file.text) texts.push({ docId: baseName(r.file.name), text: r.file.text, meta: { file: r.file.name }, source: r.file.name });
+        if (r.file.text.trim()) texts.push({ docId: baseName(r.file.name), text: r.file.text, meta: { file: r.file.name }, source: r.file.name });
         else errors.push(`${r.file.name}: empty`);
       } else if (r.kind === 'table') newTables.push(r.table);
       else errors.push(`${r.name}: ${r.error}`);

@@ -27,6 +27,8 @@ export const KNOWN_OPENAI_MODELS: ModelInfo[] = [
 
 const EXCLUDE = /(audio|realtime|transcribe|tts|image|embedding|search|moderation|dall-e|whisper|davinci|babbage|instruct|computer|sora)/i;
 const INCLUDE = /^(gpt|o\d|chatgpt)/i;
+/** Older models without reasoning: they reject a reasoning effort. */
+const NO_REASONING = /^(gpt-3|gpt-4|chatgpt)/i;
 
 interface ResponseLike {
   id: string;
@@ -94,7 +96,9 @@ export const openaiAdapter: ProviderAdapter = {
   async listModels(apiKey) {
     const out: (ModelInfo & { created: number })[] = [];
     for await (const m of client(apiKey).models.list()) {
-      if (INCLUDE.test(m.id) && !EXCLUDE.test(m.id)) out.push({ id: m.id, label: m.id, created: m.created });
+      if (INCLUDE.test(m.id) && !EXCLUDE.test(m.id)) {
+        out.push({ id: m.id, label: m.id, created: m.created, ...(NO_REASONING.test(m.id) ? { effortLevels: [] } : {}) });
+      }
     }
     // Known current models first (with names and effort levels), then everything else, newest first.
     const ids = new Set(out.map((m) => m.id));

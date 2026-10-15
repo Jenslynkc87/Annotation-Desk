@@ -11,6 +11,7 @@ import { fillScript, requirementsTxt, SCRIPT_TEMPLATE, scriptValues } from './py
 import {
   agreementForRun,
   agreementRows,
+  cachingLabel,
   codebookMarkdown,
   corpusRows,
   dropRedundantId,
@@ -97,7 +98,7 @@ function settingsRows(study: Study, run: Run): Row[] {
     { setting: 'Temperature', value: m.temperature ?? 'model default' },
     { setting: 'Max output tokens', value: m.maxOutputTokens },
     { setting: 'Runs per text', value: o.replicates },
-    { setting: 'Prompt caching', value: o.caching ? 'on' : 'off' },
+    { setting: 'Prompt caching', value: cachingLabel(run) },
     { setting: 'Mode', value: run.mode === 'batch' ? 'Batch API' : 'immediate requests' },
     { setting: 'Prompt version', value: `v${run.snapshot.promptVersion} (${run.snapshot.promptHash})` },
     { setting: 'Prompt (sent with each text)', value: effectiveTemplate(p.userTemplate) },
@@ -240,6 +241,8 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   const times = rs.map((r) => r.completedAt).sort();
   const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0);
   const m = run.snapshot.model;
+  const ok = rs.filter((r) => r.status === 'ok');
+  const fallbacks = rs.filter((r) => r.fallback);
   return {
     software: { name: 'Annotation Desk', version: run.snapshot.appVersion },
     exported_at: exportedAt,
@@ -249,6 +252,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       provider: m.provider,
       requested: m.model,
       reported_by_api: [...new Set(rs.map((r) => r.modelReported).filter(Boolean))],
+      fallback_models: [...new Set(fallbacks.map((r) => r.modelReported).filter(Boolean))],
       effort: m.effort || 'model default',
       thinking: m.provider === 'anthropic' ? thinkingLabel(m.model, m.reasoningSummary) : null,
       reasoning_summary_requested: m.reasoningSummary,
@@ -256,14 +260,19 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       max_output_tokens: m.maxOutputTokens,
     },
     prompt: { version: run.snapshot.promptVersion, sha256_prefix: run.snapshot.promptHash, output_mode: run.snapshot.prompt.outputMode, rationale_requested: run.snapshot.prompt.includeRationale },
-    options: { replicates_per_text: run.snapshot.options.replicates, prompt_caching: run.snapshot.options.caching },
+    options: { replicates_per_text: run.snapshot.options.replicates, prompt_caching: cachingLabel(run) },
     request_settings: run.snapshot.requestBase,
-    corpus: { n_texts_in_run: run.docIds.length, n_texts_with_results: new Set(rs.map((r) => r.docId)).size },
+    corpus: {
+      n_texts_in_run: run.docIds.length,
+      n_texts_with_results: new Set(rs.map((r) => r.docId)).size,
+      n_texts_with_usable_labels: new Set(ok.map((r) => r.docId)).size,
+    },
     requests: {
       total: rs.length,
-      ok: rs.filter((r) => r.status === 'ok').length,
+      ok: ok.length,
       failed: rs.filter((r) => r.status === 'error').length,
       parse_errors: rs.filter((r) => r.parseError).length,
+      answered_by_fallback_model: fallbacks.length,
       first_requested_at: started[0] ?? null,
       last_completed_at: times[times.length - 1] ?? null,
     },
@@ -277,8 +286,12 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   };
 }
 
-function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>): string {
+function methodsParagraph(run: Run, rs: Result[], meta: ReturnType<typeof supplementaryMetadata>): string {
   const m = run.snapshot.model;
+  // Versions of the requested model only; fallback answers are described separately.
+  const versions = [...new Set(rs.filter((r) => !r.fallback).map((r) => r.modelReported).filter(Boolean))];
+  const { total, failed, answered_by_fallback_model: nFallback } = meta.requests;
+  const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
   const reps = run.snapshot.options.replicates;
   const dates = [meta.requests.first_requested_at, meta.requests.last_completed_at].filter(Boolean).map((x) => x!.slice(0, 10));
   const period = dates.length ? (dates[0] === dates[1] ? `on ${dates[0]}` : `between ${dates[0]} and ${dates[1]}`) : '';
@@ -290,12 +303,18 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   ].filter((x): x is string => !!x);
   const settingsText = settings.length > 1 ? `${settings.slice(0, -1).join(', ')} and ${settings[settings.length - 1]}` : settings[0];
   return [
-    `Texts (N = ${meta.corpus.n_texts_with_results.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
+    `Texts (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${versions.length ? `; model version reported by the API: ${versions.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
     run.snapshot.prompt.outputMode === 'structured'
       ? `The model was required to return the fields listed in the codebook as JSON conforming to a schema (structured outputs)${run.snapshot.prompt.includeRationale ? ', preceded by a brief rationale' : ''}.`
       : 'The model returned free-text responses.',
     reps > 1 ? `Each text was annotated ${reps} times; categorical labels were aggregated by majority vote and numeric labels by the mean.` : '',
-    `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${run.snapshot.options.caching ? ' with prompt caching enabled' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
+    failed
+      ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} texts without a label` : ''}.`
+      : '',
+    nFallback
+      ? `For ${nFallback.toLocaleString('en-US')} request${nFallback === 1 ? '' : 's'}, ${m.model} declined and a fallback model (${meta.model.fallback_models.join(', ') || 'not reported'}) answered instead; these annotations are included.`
+      : '',
+    `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${cached ? ' with prompt caching' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
   ]
     .filter(Boolean)
     .join(' ');
@@ -316,9 +335,10 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| Effort / reasoning | ${meta.model.effort} |`,
     `| Temperature | ${meta.model.temperature} |`,
     `| Max output tokens | ${meta.model.max_output_tokens} |`,
-    `| Texts annotated | ${meta.corpus.n_texts_with_results} |`,
+    `| Texts with a usable annotation | ${meta.corpus.n_texts_with_usable_labels} of ${meta.corpus.n_texts_in_run} |`,
     `| Annotations per text | ${meta.options.replicates_per_text} |`,
     `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed} |`,
+    ...(meta.requests.answered_by_fallback_model ? [`| Answered by a fallback model | ${meta.requests.answered_by_fallback_model} (${meta.model.fallback_models.join(', ')}) |`] : []),
     `| Annotation period | ${meta.requests.first_requested_at ?? '—'} to ${meta.requests.last_completed_at ?? '—'} |`,
     `| Prompt version / hash | v${meta.prompt.version} / \`${meta.prompt.sha256_prefix}\` |`,
     '',
@@ -333,7 +353,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   lines.push(
     '## Methods text (draft)',
     '',
-    '> ' + methodsParagraph(run, meta),
+    '> ' + methodsParagraph(run, d.results.filter((r) => r.runId === run.id), meta),
     '',
     'Edit as needed; check every detail against `metadata.json`.',
     '',
