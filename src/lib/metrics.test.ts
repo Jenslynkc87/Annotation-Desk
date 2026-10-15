@@ -71,3 +71,23 @@ describe('full scale and intervals', () => {
     expect(agreement(['a', 'b', 'a'], ['a', 'b', 'b'], 'nominal').ci.cohenKappa).toBeNull();
   });
 });
+
+describe('tolerance and systematic difference', () => {
+  const a = s([1, 2, 3, 4, 5, 3, 2, 4, 1, 5, 3, 2]);
+  const b = s([1, 3, 3, 2, 5, 4, 2, 4, 3, 5, 4, 2]);
+  it('counts agreement within a tolerance and the mean difference (second − first)', () => {
+    const r = agreement(a, b, 'ordinal', s([1, 2, 3, 4, 5]), 1);
+    expect(r.percentAgreement).toBeCloseTo(7 / 12, 9);
+    expect(r.withinTolerance).toBeCloseTo(10 / 12, 9);
+    expect(r.meanDifference).toBeCloseTo(3 / 12, 9);
+    expect(r.mae).toBeCloseTo(7 / 12, 9);
+    expect(agreement(a, b, 'ordinal', [], 2).withinTolerance).toBeCloseTo(12 / 12, 9);
+    expect(agreement(a, b, 'ordinal', [], 0).withinTolerance).toBeCloseTo(7 / 12, 9);
+    expect(r.ci.meanDifference![0]).toBeLessThan(r.meanDifference!);
+  });
+  it('leaves tolerance and difference empty for categories', () => {
+    const r = agreement(['x', 'y'], ['x', 'x'], 'nominal');
+    expect(r.withinTolerance).toBeNull();
+    expect(r.meanDifference).toBeNull();
+  });
+});

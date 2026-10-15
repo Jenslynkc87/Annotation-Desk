@@ -2,7 +2,10 @@
 import JSZip from 'jszip';
 import { getLogsForRun } from '../db';
 import { fmtStat } from '../metrics';
-import { buildOutputSchema, effectiveTemplate } from '../prompt';
+import { comparableFields, fieldValue } from '../compare';
+import { agreement, type Agreement, type CiStat } from '../metrics';
+import { buildOutputSchema, effectiveTemplate, normalizeLabel } from '../prompt';
+import { buildDocViews } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
 import { dateStamp, nowIso, slug } from '../util';
@@ -43,35 +46,42 @@ function clipRows(rows: Row[]): Row[] {
   return rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, clean(v)])));
 }
 
+type Workbook = import('exceljs').Workbook;
+
+const isProse = (c: string) => c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning') || c === 'draft_text' || c === 'explanation';
+
+/** One styled sheet: header row, frozen panes, filters, sensible column widths, numbers as numbers. */
+function addSheet(wb: Workbook, name: string, rows: Row[]) {
+  const data = clipRows(rows.length ? rows : [{ note: 'No data' }]);
+  const cols = [...new Set(data.flatMap((r) => Object.keys(r)))];
+  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', xSplit: cols[0] === 'doc_id' || cols[0] === 'file' || cols[0] === 'setting' ? 1 : 0, ySplit: 1 }] });
+  ws.columns = cols.map((c) => {
+    const long = c === 'text' || c === 'response' || c === 'value';
+    const prose = isProse(c);
+    // Short columns (file name, scores) are as wide as their longest value, up to a cap.
+    const widest = data.reduce((m, r) => Math.max(m, String(r[c] ?? '').length), 0);
+    return { header: c, key: c, width: long ? 40 : prose ? 70 : Math.min(60, Math.max(9, c.length + 3, widest + 2)) };
+  });
+  ws.addRows(data.map((r) => cols.map((c) => r[c] ?? null)));
+  const head = ws.getRow(1);
+  head.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF003D73' } };
+  head.alignment = { vertical: 'middle' };
+  head.height = 28;
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: cols.length } };
+  // Wrap short prose columns; leave whole-article text and raw JSON on one line so rows stay compact.
+  cols.forEach((c, i) => {
+    const col = ws.getColumn(i + 1);
+    const prose = isProse(c);
+    col.alignment = { vertical: 'top', wrapText: prose };
+    if (typeof data[0]?.[c] === 'number') col.alignment = { vertical: 'top', horizontal: 'center' };
+  });
+}
+
 export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
-  const add = (name: string, rows: Row[]) => {
-    const data = clipRows(rows.length ? rows : [{ note: 'No data' }]);
-    const cols = [...new Set(data.flatMap((r) => Object.keys(r)))];
-    const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', xSplit: cols[0] === 'doc_id' || cols[0] === 'file' || cols[0] === 'setting' ? 1 : 0, ySplit: 1 }] });
-    ws.columns = cols.map((c) => {
-      const long = c === 'text' || c === 'response' || c === 'value';
-      const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
-      // Short columns (file name, scores) are as wide as their longest value, up to a cap.
-      const widest = data.reduce((m, r) => Math.max(m, String(r[c] ?? '').length), 0);
-      return { header: c, key: c, width: long ? 40 : prose ? 70 : Math.min(60, Math.max(9, c.length + 3, widest + 2)) };
-    });
-    ws.addRows(data.map((r) => cols.map((c) => r[c] ?? null)));
-    const head = ws.getRow(1);
-    head.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF003D73' } };
-    head.alignment = { vertical: 'middle' };
-    head.height = 28;
-    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: cols.length } };
-    // Wrap short prose columns; leave whole-article text and raw JSON on one line so rows stay compact.
-    cols.forEach((c, i) => {
-      const col = ws.getColumn(i + 1);
-      const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
-      col.alignment = { vertical: 'top', wrapText: prose };
-      if (typeof data[0]?.[c] === 'number') col.alignment = { vertical: 'top', horizontal: 'center' };
-    });
-  };
+  const add = (name: string, rows: Row[]) => addSheet(wb, name, rows);
   add('Results', dropRedundantId(resultsWide(run, d.docs, d.runs, d.results, opts)));
   add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }));
   const agr = agreementForRun(run, d.docs, d.runs, d.results);
@@ -439,4 +449,140 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     'Token counts: Anthropic reports input tokens excluding cached tokens; OpenAI reports input tokens including cached tokens.',
     '',
   ].join('\n');
+}
+
+// ---------- run vs run comparison report ----------
+
+/**
+ * Excel report comparing two runs (e.g. two models) on every field both can be compared on: exact and
+ * within-tolerance agreement, chance-corrected agreement, systematic difference, confusion tables, settings
+ * and draft text for a paper. All intervals are 95% bootstrap intervals over texts.
+ */
+export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], runs: Run[], results: Result[], tolerance: number): Promise<Blob> {
+  const ExcelJS = (await import('exceljs')).default;
+  const wb = new ExcelJS.Workbook();
+  const viewsA = buildDocViews(docs, runs, results, runA.id);
+  const viewsB = buildDocViews(docs, runs, results, runB.id);
+  const keysB = new Set(comparableFields(runB, viewsB.values()).map((f) => f.key));
+  const fields = comparableFields(runA, viewsA.values()).filter((f) => keysB.has(f.key));
+  const inB = new Set(runB.docIds);
+  const both = docs.filter((d) => inB.has(d.id) && runA.docIds.includes(d.id));
+  const name = (r: Run) => `${r.snapshot.model.model} (run #${r.number})`;
+
+  const rows = fields.map((f) => {
+    const xs: string[] = [];
+    const ys: string[] = [];
+    for (const d of both) {
+      const va = viewsA.get(d.id)!;
+      const vb = viewsB.get(d.id)!;
+      if (va.status === 'none' || vb.status === 'none') continue;
+      const x = normalizeLabel(fieldValue(runA, va.values, f.key), f.yesNo);
+      const y = normalizeLabel(fieldValue(runB, vb.values, f.key), f.yesNo);
+      if (x && y) {
+        xs.push(x);
+        ys.push(y);
+      }
+    }
+    return { f, stats: agreement(xs, ys, f.level, f.allowed, tolerance) };
+  });
+
+  const r4 = (x: number | null | undefined) => (x === null || x === undefined ? null : Math.round(x * 10000) / 10000);
+  const withCi = (label: string, s: Agreement, key: CiStat, value: number | null): Row => ({
+    [label]: r4(value),
+    [`${label}_ci_low`]: r4(s.ci[key]?.[0]),
+    [`${label}_ci_high`]: r4(s.ci[key]?.[1]),
+  });
+  const tolName = `within_${tolerance}_point${tolerance === 1 ? '' : 's'}`;
+  addSheet(
+    wb,
+    'Summary',
+    rows.map(({ f, stats: s }) => ({
+      field: f.label,
+      level: f.level,
+      n_compared: s.n,
+      n_texts_in_both_runs: both.length,
+      ...withCi('exact_agreement', s, 'percentAgreement', s.percentAgreement),
+      ...(s.withinTolerance !== null && tolerance > 0 ? withCi(tolName, s, 'withinTolerance', s.withinTolerance) : {}),
+      ...(s.weightedKappa !== null ? withCi('weighted_kappa_quadratic', s, 'weightedKappa', s.weightedKappa) : {}),
+      ...withCi('krippendorff_alpha', s, 'krippendorffAlpha', s.krippendorffAlpha),
+      ...withCi('cohen_kappa', s, 'cohenKappa', s.cohenKappa),
+      ...withCi('gwet_ac1', s, 'gwetAC1', s.gwetAC1),
+      ...(s.meanDifference !== null ? withCi('mean_difference_second_minus_first', s, 'meanDifference', s.meanDifference) : {}),
+      ...(s.mae !== null ? withCi('mean_absolute_difference', s, 'mae', s.mae) : {}),
+      ...(s.spearman !== null ? { spearman_rho: r4(s.spearman) } : {}),
+    })),
+  );
+  addSheet(
+    wb,
+    'Draft text',
+    rows.map(({ f, stats }) => ({ field: f.label, draft_text: comparisonSentence(f.label, name(runA), name(runB), stats, both.length, f.level) })),
+  );
+
+  const settings = (r: Run) => ({
+    run: `#${r.number}${r.label ? ` (${r.label})` : ''}`,
+    provider: r.snapshot.model.provider,
+    model: r.snapshot.model.model,
+    model_reported_by_api: [...new Set(results.filter((x) => x.runId === r.id).map((x) => x.modelReported).filter(Boolean))].join(', '),
+    effort: r.snapshot.model.effort || 'model default',
+    max_output_tokens: String(r.snapshot.model.maxOutputTokens),
+    prompt_version: `v${r.snapshot.promptVersion} (${r.snapshot.promptHash})`,
+    mode: r.mode === 'batch' ? 'batch API' : 'immediate requests',
+    started: r.createdAt,
+    texts: String(r.docIds.length),
+    annotations_per_text: String(r.snapshot.options.replicates),
+  });
+  const sa = settings(runA);
+  const sb = settings(runB);
+  addSheet(wb, 'Runs', Object.keys(sa).map((k) => ({ setting: k, first: sa[k as keyof typeof sa], second: sb[k as keyof typeof sb] })));
+
+  // One confusion table per field (rows: first run, columns: second run); skipped for long numeric scales.
+  const used = new Set<string>();
+  for (const { f, stats } of rows) {
+    if (stats.categories.length < 2 || stats.categories.length > 15) continue;
+    let sheet = `Table ${f.label}`.replace(/[[\]:*?/\\]/g, '_').slice(0, 31);
+    for (let k = 2; used.has(sheet); k++) sheet = `${sheet.slice(0, 28)}_${k}`;
+    used.add(sheet);
+    addSheet(
+      wb,
+      sheet,
+      stats.categories.map((r) => ({
+        [`first \\ second`]: r,
+        ...Object.fromEntries(stats.categories.map((c) => [c, stats.confusion[r][c]])),
+      })),
+    );
+  }
+
+  addSheet(wb, 'Notes', [
+    { note: `First: ${name(runA)}. Second: ${name(runB)}. Texts compared: those annotated in both runs with a usable value for the field.` },
+    { note: `Exact agreement: share of texts with the same value. ${tolerance > 0 ? `Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much (scales and numbers only).` : ''}` },
+    { note: 'Weighted kappa (quadratic weights over the codebook scale) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories.' },
+    { note: 'Mean difference = second minus first (positive: the second run scores higher on average). Mean absolute difference: average distance regardless of direction.' },
+    { note: 'Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of texts, fixed seed, so the same data gives the same interval).' },
+    { note: 'Agreement within a tolerance is generous on short scales (on a 1–3 scale only 1 vs 3 counts as a disagreement); report it together with exact agreement and weighted kappa.' },
+  ]);
+  const out = await wb.xlsx.writeBuffer();
+  return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+/** Draft sentence for a paper describing how well two runs agree on one field. */
+export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number, level = 'ordinal'): string {
+  if (!s.n) return `No texts had a usable value for ${label} in both runs.`;
+  const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)}%`);
+  const num = (x: number | null) => (x === null ? '—' : x.toFixed(2));
+  const ciP = (k: CiStat) => (s.ci[k] ? ` (95% CI ${pct(s.ci[k]![0])}–${pct(s.ci[k]![1])})` : '');
+  const ciN = (k: CiStat) => (s.ci[k] ? ` [${num(s.ci[k]![0])}, ${num(s.ci[k]![1])}]` : '');
+  const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} texts annotated in both runs` : ''}`;
+  if (s.meanDifference === null) {
+    return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}; Cohen's κ = ${num(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  }
+  const within = s.tolerance > 0 && s.withinTolerance !== null ? ` and scores within ${s.tolerance} point${s.tolerance === 1 ? '' : 's'} for ${pct(s.withinTolerance)}${ciP('withinTolerance')}` : '';
+  const kappa = s.weightedKappa !== null ? `weighted κ = ${num(s.weightedKappa)}${ciN('weightedKappa')}, ` : '';
+  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}Krippendorff's α (${level}) = ${num(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  const d = s.meanDifference;
+  const ci = s.ci.meanDifference;
+  const second =
+    ci && (ci[0] > 0 || ci[1] < 0)
+      ? ` ${b} scored on average ${Math.abs(d).toFixed(2)} points ${d > 0 ? 'higher' : 'lower'} than ${a} (95% CI ${ci[0].toFixed(2)} to ${ci[1].toFixed(2)}).`
+      : ` There was no clear systematic difference between the two (mean difference ${d.toFixed(2)}${ci ? `, 95% CI ${ci[0].toFixed(2)} to ${ci[1].toFixed(2)}` : ''}).`;
+  return first + second;
 }

@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
-import { effectiveTemplate, fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
+import { comparableFields, fieldValue } from '../lib/compare';
+import { buildComparisonReport } from '../lib/export/packages';
+import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
 import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
-import { cancelBatch, checkBatch, deleteRunById, renameRun, retryableCount, retryFailed, useStore } from '../lib/store';
+import { cancelBatch, checkBatch, currentStudy, deleteRunById, getState, renameRun, retryableCount, retryFailed, toast, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
-import { fmtDateTime, fmtInt } from '../lib/util';
+import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, runTitle, runTokens } from '../lib/view';
 import { Modal } from './ui';
 
@@ -218,26 +220,33 @@ function AgreementPanel() {
     src?.kind === 'run' ? runs.find((r) => r.id === src.id) : src?.kind === 'rep' ? runs.find((r) => r.id === src.runId) : undefined;
   // Either side may be a label column (e.g. two human coders); the field list comes from whichever side is a run.
   const runA = runOf(srcA) ?? runOf(decode(b));
-  const fields = runA ? outputFields(runA.snapshot.prompt) : [];
+  // Fields agreement can be computed on (codebook fields, or the numeric scores in JSON answers).
+  const fields = useMemo(() => (runA ? comparableFields(runA, buildDocViews(docs, runs, results, runA.id).values()) : []), [runA, docs, runs, results]);
   const bothColumns = srcA?.kind === 'meta' && decode(b)?.kind === 'meta';
   const [field, setField] = useState('');
-  const f = fields.includes(field) ? field : fields[0] ?? '';
-  const variable = runA?.snapshot.prompt.variables.find((v) => v.name === f);
-  const autoLevel: Level = variable?.type === 'ordinal' ? 'ordinal' : variable?.type === 'number' ? 'interval' : 'nominal';
+  const cf = fields.find((x) => x.key === field) ?? fields[0];
+  const f = cf?.key ?? '';
+  const autoLevel: Level = cf?.level ?? 'nominal';
   const [levelOverride, setLevelOverride] = useState<'' | Level>('');
   const level = levelOverride || autoLevel;
+  const [tolerance, setTolerance] = useState(1);
 
-  const yesNo = variable?.type === 'boolean';
+  const yesNo = !!cf?.yesNo;
   const valuesFor = (src: Source | null): Map<string, string> => {
     const out = new Map<string, string>();
     if (!src) return out;
     if (src.kind === 'meta') {
       for (const d of docs) out.set(d.id, normalizeLabel(d.meta[src.col], yesNo));
-    } else if (src.kind === 'run') {
+      return out;
+    }
+    const run = runOf(src);
+    if (!run) return out;
+    if (src.kind === 'run') {
       const views = buildDocViews(docs, runs, results, src.id);
-      for (const [id, v] of views) if (v.status !== 'none') out.set(id, normalizeLabel(v.values[f], yesNo));
+      for (const [id, v] of views) if (v.status !== 'none') out.set(id, normalizeLabel(fieldValue(run, v.values, f), yesNo));
     } else {
-      for (const r of results) if (r.runId === src.runId && r.replicate === src.rep && r.status === 'ok') out.set(r.docId, normalizeLabel(r.values[f], yesNo));
+      for (const r of results)
+        if (r.runId === src.runId && r.replicate === src.rep && r.status === 'ok') out.set(r.docId, normalizeLabel(fieldValue(run, r.values, f), yesNo));
     }
     return out;
   };
@@ -261,9 +270,8 @@ function AgreementPanel() {
         ys.push(y);
       }
     }
-    const allowed = variable && (variable.type === 'category' || variable.type === 'ordinal') ? variable.values.map((x) => normalizeLabel(x)).filter(Boolean) : [];
-    return { stats: agreement(xs, ys, level, allowed), nLabelled };
-  }, [a, b, f, level, yesNo, docs, runs, results]);
+    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance), nLabelled };
+  }, [a, b, f, level, yesNo, tolerance, docs, runs, results]);
 
   const sourceOptions = (allowMeta: boolean) => (
     <>
@@ -300,7 +308,22 @@ function AgreementPanel() {
     </>
   );
 
-  const isFreeText = runA?.snapshot.prompt.outputMode === 'text' || variable?.type === 'text';
+  const isFreeText = !!runA && !fields.length;
+  const [reporting, setReporting] = useState(false);
+  const downloadReport = async () => {
+    const ra = runOf(srcA);
+    const rb = runOf(decode(b));
+    if (!ra || !rb) return;
+    setReporting(true);
+    try {
+      const blob = await buildComparisonReport(ra, rb, docs, runs, results, tolerance);
+      download(`${slug(currentStudy(getState())?.name ?? 'study')}_run${ra.number}_vs_run${rb.number}_${dateStamp()}.xlsx`, blob);
+    } catch (e) {
+      toast(`Report failed: ${errorMessage(e)}`, 'error');
+    } finally {
+      setReporting(false);
+    }
+  };
   const srcB = decode(b);
   // A metadata column where (almost) every row is different is an identifier, not a set of labels.
   const bDistinct = srcB?.kind === 'meta' ? new Set(docs.map((d) => d.meta[srcB.col] ?? '')).size : 0;
@@ -332,8 +355,8 @@ function AgreementPanel() {
             <label>Field</label>
             <select className="select" value={f} onChange={(e) => setField(e.target.value)}>
               {fields.map((x) => (
-                <option key={x} value={x}>
-                  {runA ? fieldLabel(runA.snapshot.prompt, x) : x}
+                <option key={x.key} value={x.key}>
+                  {x.label}
                 </option>
               ))}
             </select>
@@ -348,12 +371,29 @@ function AgreementPanel() {
             <option value="interval">Interval</option>
           </select>
         </div>
+        {level !== 'nominal' && (
+          <div className="field">
+            <label>Counts as agreeing if within</label>
+            <select className="select" value={tolerance} onChange={(e) => setTolerance(Number(e.target.value))}>
+              <option value={0}>Exact match only</option>
+              <option value={1}>1 point</option>
+              <option value={2}>2 points</option>
+            </select>
+          </div>
+        )}
       </div>
+      {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && (
+        <div style={{ margin: '2px 0 12px' }}>
+          <button className="btn small" disabled={reporting} onClick={downloadReport} title="All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper">
+            {reporting ? 'Building…' : 'Download comparison report (Excel)'}
+          </button>
+        </div>
+      )}
 
       {isFreeText ? (
         <div className="notice warn" style={{ marginTop: 6 }}>
-          Agreement isn't meaningful for free-text output: every distinct answer would count as its own category. Use a field of type Category, Ordinal scale,
-          Number or Yes / no (set under Output in the setup) for fields you want to compare with human labels.
+          This run has nothing agreement can be computed on: free-text answers would make every distinct answer its own category. Use fields of type
+          Category, Ordinal scale, Number or Yes / no (under Output in the setup), or have plain-text answers return their scores as JSON.
         </div>
       ) : looksLikeIds ? (
         <div className="notice warn" style={{ marginTop: 6 }}>
@@ -369,12 +409,18 @@ function AgreementPanel() {
           <div className="stat-grid" style={{ marginTop: 6 }}>
             <Stat k="Texts compared" v={fmtInt(stats.n)} sub={`of ${fmtInt(nLabelled)} with a value in the second source`} />
             <Stat k="Percent agreement" v={fmtPct(stats.percentAgreement)} sub={ciText(stats.ci.percentAgreement, true)} />
+            {stats.withinTolerance !== null && stats.tolerance > 0 && (
+              <Stat k={`Within ±${stats.tolerance} point${stats.tolerance === 1 ? '' : 's'}`} v={fmtPct(stats.withinTolerance)} sub={ciText(stats.ci.withinTolerance, true)} />
+            )}
             <Stat k="Cohen's κ" v={fmtStat(stats.cohenKappa)} sub={ciText(stats.ci.cohenKappa)} />
             {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={fmtStat(stats.weightedKappa)} sub={ciText(stats.ci.weightedKappa)} />}
             <Stat k={`Krippendorff's α (${level})`} v={fmtStat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
             <Stat k="Gwet's AC1" v={fmtStat(stats.gwetAC1)} sub={ciText(stats.ci.gwetAC1)} />
             {stats.spearman !== null && <Stat k="Spearman ρ" v={fmtStat(stats.spearman)} />}
-            {stats.mae !== null && <Stat k="Mean abs. error" v={fmtStat(stats.mae)} />}
+            {stats.meanDifference !== null && (
+              <Stat k="Mean difference (second − first)" v={fmtStat(stats.meanDifference)} sub={ciText(stats.ci.meanDifference)} />
+            )}
+            {stats.mae !== null && <Stat k="Mean absolute difference" v={fmtStat(stats.mae)} sub={ciText(stats.ci.mae)} />}
           </div>
           <p className="hint">
             Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). Texts missing from either source are left out. Intervals: 95% bootstrap (2,000 resamples of texts). When
@@ -382,7 +428,7 @@ function AgreementPanel() {
           </p>
           {showMatrix && (
             <>
-              <p className="section-title" style={{ marginTop: 14 }}>Confusion matrix (rows: model annotations, columns: compared with)</p>
+              <p className="section-title" style={{ marginTop: 14 }}>Confusion matrix (rows: annotations, columns: compared with)</p>
               <div className="table-wrap" style={{ borderTop: 0 }}>
                 <table className="data" style={{ width: 'auto' }}>
                   <thead>

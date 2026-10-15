@@ -13,6 +13,12 @@ export interface Agreement {
   spearman: number | null;
   pearson: number | null;
   mae: number | null;
+  /** Numbers only: the tolerance used for `withinTolerance` (in scale points). */
+  tolerance: number;
+  /** Numbers only: share of texts whose two values differ by at most `tolerance` (exact and adjacent agreement). */
+  withinTolerance: number | null;
+  /** Numbers only: average of (second − first); positive = the second source scores higher. */
+  meanDifference: number | null;
   /** 95% bootstrap intervals (percentile method, texts resampled); null when too few texts. */
   ci: Partial<Record<CiStat, [number, number] | null>>;
   categories: string[];
@@ -20,7 +26,7 @@ export interface Agreement {
   confusion: Record<string, Record<string, number>>;
 }
 
-export type CiStat = 'percentAgreement' | 'cohenKappa' | 'weightedKappa' | 'krippendorffAlpha' | 'gwetAC1';
+export type CiStat = 'percentAgreement' | 'withinTolerance' | 'cohenKappa' | 'weightedKappa' | 'krippendorffAlpha' | 'gwetAC1' | 'meanDifference' | 'mae';
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
@@ -192,7 +198,14 @@ function bootstrapCI(pairs: [string, string][], stats: Partial<Record<CiStat, (p
   );
 }
 
-export function agreement(a: string[], b: string[], level: Level, allowed: string[] = []): Agreement {
+const numPairs = (p: [string, string][]) => p.map(([x, y]) => [Number(x), Number(y)] as const);
+const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null);
+export const withinTolerance = (p: [string, string][], tol: number) => mean(numPairs(p).map(([x, y]) => (Math.abs(x - y) <= tol + 1e-9 ? 1 : 0)));
+export const meanDifference = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => y - x));
+export const meanAbsoluteError = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => Math.abs(x - y)));
+
+/** `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`. */
+export function agreement(a: string[], b: string[], level: Level, allowed: string[] = [], tolerance = 1): Agreement {
   const pairs: [string, string][] = [];
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
     if (a[i] !== '' && b[i] !== '' && a[i] !== undefined && b[i] !== undefined) pairs.push([a[i], b[i]]);
@@ -212,6 +225,13 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     ...(numeric ? { weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale) } : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
     gwetAC1: (p: [string, string][]) => gwetAC1(p, allowed),
+    ...(numeric
+      ? {
+          withinTolerance: (p: [string, string][]) => withinTolerance(p, tolerance),
+          meanDifference,
+          mae: meanAbsoluteError,
+        }
+      : {}),
   };
   return {
     n: pairs.length,
@@ -223,7 +243,10 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     ci: bootstrapCI(pairs, stats),
     spearman: numeric ? spearman(xs, ys) : null,
     pearson: numeric ? pearson(xs, ys) : null,
-    mae: numeric ? xs.reduce((s, x, i) => s + Math.abs(x - ys[i]), 0) / xs.length : null,
+    mae: numeric ? meanAbsoluteError(pairs) : null,
+    tolerance,
+    withinTolerance: numeric ? withinTolerance(pairs, tolerance) : null,
+    meanDifference: numeric ? meanDifference(pairs) : null,
     categories,
     confusion,
   };

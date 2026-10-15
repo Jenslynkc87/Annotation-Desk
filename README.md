@@ -14,6 +14,7 @@ Everything runs in your browser. Your API key, texts and results never pass thro
 - **Run at scale:** run everything, a selection, or only texts not yet annotated with the current prompt; with optional prompt caching, the providers' Batch APIs (about 50% cheaper, results collected later), several annotations per text (retest reliability) and adjustable parallelism.
 - **Retry failed requests** within the same run, with its frozen settings, so one run stays one complete dataset.
 - **Inspect results:** a results list with per-text detail (rationale, reasoning summary, tokens, timing, the exact request and the full raw response), comparison against any metadata column, and an agreement panel (percent agreement, Cohen's κ, weighted κ, Krippendorff's α, Gwet's AC1, Spearman ρ, MAE, confusion matrix) for model vs. human labels, run vs. run, or replicate vs. replicate.
+- **Compare two runs** (e.g. two models): agreement within a chosen tolerance (exact, ±1, ±2 points), systematic difference (does one score higher?), and a downloadable Excel comparison report with intervals, confusion tables, both runs' settings and draft text for a paper. Plain-text runs that answer in JSON are compared on their numeric scores.
 - **Agreement with uncertainty:** 95% bootstrap intervals for every agreement statistic, the number of labelled texts compared, and human–human agreement (two coders' columns) as a baseline.
 - **Export:**
   - **Excel** workbook for a run.
