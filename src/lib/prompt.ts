@@ -180,6 +180,29 @@ export function parseModelOutput(rawText: string, p: PromptSpec): ParsedOutput {
   };
 }
 
+/**
+ * For free-text runs whose answer happens to be a JSON object: one column per leaf, nested keys joined
+ * with "_" (e.g. race_ethnicity_negative). Returns null when the answer is not a JSON object.
+ */
+export function flattenJsonResponse(raw: string | undefined): Record<string, string> | null {
+  if (!raw) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(stripFences(raw));
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const out: Record<string, string> = {};
+  const walk = (v: unknown, key: string) => {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, key ? `${key}_${k}` : k);
+    } else out[key] = valueToString(v);
+  };
+  walk(obj, '');
+  return out;
+}
+
 /** Canonical form for comparing labels across sources (gold columns, runs). */
 export function normalizeLabel(v: string | undefined): string {
   if (v === undefined) return '';

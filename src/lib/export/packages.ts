@@ -31,9 +31,13 @@ export interface ExportData {
 const EXCEL_CELL_MAX = 32000;
 
 function clipRows(rows: Row[]): Row[] {
-  return rows.map((r) =>
-    Object.fromEntries(Object.entries(r).map(([k, v]) => [k, typeof v === 'string' && v.length > EXCEL_CELL_MAX ? v.slice(0, EXCEL_CELL_MAX) + ' …[truncated]' : v])),
-  );
+  // Drop carriage returns (Windows line endings) so Excel doesn't show them as "_x000d_".
+  const clean = (v: Row[string]) => {
+    if (typeof v !== 'string') return v;
+    const t = v.replace(/\r\n?/g, '\n');
+    return t.length > EXCEL_CELL_MAX ? t.slice(0, EXCEL_CELL_MAX) + ' …[truncated]' : t;
+  };
+  return rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, clean(v)])));
 }
 
 export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {

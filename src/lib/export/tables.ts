@@ -1,7 +1,7 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
 import { agreement, type Agreement, type Level } from '../metrics';
-import { normalizeLabel, outputFields } from '../prompt';
+import { TEXT_RESPONSE_KEY, flattenJsonResponse, normalizeLabel, outputFields } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
 import { buildDocViews } from '../view';
@@ -33,6 +33,12 @@ export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
   }));
 }
 
+/** Free-text runs that answered with JSON get one extra column per value; the raw response column stays. */
+function jsonColumns(run: Run, response: string | undefined): Record<string, string> {
+  if (run.snapshot.prompt.outputMode !== 'text') return {};
+  return flattenJsonResponse(response) ?? {};
+}
+
 /** One row per request (text × replicate). */
 export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Result[], opts: { rationale: boolean; reasoning: boolean }): Row[] {
   const docById = new Map(docs.map((d) => [d.id, d]));
@@ -62,6 +68,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       status: r.status,
     };
     for (const f of outputFields(run.snapshot.prompt)) row[f] = r.values[f] ?? '';
+    Object.assign(row, jsonColumns(run, r.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale) row.rationale = r.rationale;
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
     Object.assign(row, {
@@ -99,6 +106,7 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
       row[f] = v.values[f] ?? '';
       if (reps > 1) row[`${f}_agreement_across_runs`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
     }
+    Object.assign(row, jsonColumns(run, v.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale && run.snapshot.prompt.includeRationale && run.snapshot.prompt.outputMode === 'structured') {
       row.rationale = v.results.find((r) => r.status === 'ok')?.rationale ?? '';
     }

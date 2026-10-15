@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldLabel, slugKey, uniqueKey } from './prompt';
+import { fieldLabel, flattenJsonResponse, slugKey, uniqueKey } from './prompt';
 import { DEFAULT_PROMPT } from './types';
 
 describe('field names', () => {
@@ -20,5 +20,17 @@ describe('field names', () => {
     expect(fieldLabel(p, 'positive_score')).toBe('Positive score');
     expect(fieldLabel(p, 'old')).toBe('old');
     expect(fieldLabel(p, 'rationale')).toBe('Rationale');
+  });
+});
+
+describe('flattenJsonResponse', () => {
+  it('flattens nested objects into underscore-joined columns', () => {
+    const raw = '```json\n{"race":{"reasoning":"x","negative":2,"positive":0},"note":"hi"}\n```';
+    expect(flattenJsonResponse(raw)).toEqual({ race_reasoning: 'x', race_negative: '2', race_positive: '0', note: 'hi' });
+  });
+  it('returns null for non-JSON or non-object answers', () => {
+    expect(flattenJsonResponse('Positive')).toBeNull();
+    expect(flattenJsonResponse('[1,2]')).toBeNull();
+    expect(flattenJsonResponse('')).toBeNull();
   });
 });
