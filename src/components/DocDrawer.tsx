@@ -75,21 +75,6 @@ export function DocDrawer({
       }
     >
       <section>
-        <p className="section-title">Text</p>
-        <div className="textblock">{doc.text}</div>
-        <div className="hint" style={{ marginTop: 6 }}>
-          {fmtInt(doc.text.length)} characters · source: {doc.source}
-        </div>
-        {Object.keys(doc.meta).length > 0 && (
-          <dl className="kv" style={{ marginTop: 10 }}>
-            {Object.entries(doc.meta).map(([k, v]) => (
-              <FragmentKV key={k} k={k} v={v} />
-            ))}
-          </dl>
-        )}
-      </section>
-
-      <section>
         <div className="row" style={{ marginBottom: 10 }}>
           <p className="section-title" style={{ margin: 0 }}>
             Annotation
@@ -106,6 +91,21 @@ export function DocDrawer({
         </div>
         {!run && <div className="empty">Not annotated yet.</div>}
         {run && reps.map((r) => <ResultCard key={r.id} run={run} result={r} showRep={reps.length > 1} />)}
+      </section>
+
+      <section>
+        <p className="section-title">Text ({doc.text.length.toLocaleString()} characters)</p>
+        <div className="textblock" style={{ maxHeight: 280 }}>{doc.text}</div>
+        <div className="hint" style={{ marginTop: 6 }}>
+          Source: {doc.source}
+        </div>
+        {Object.keys(doc.meta).length > 0 && (
+          <dl className="kv" style={{ marginTop: 10 }}>
+            {Object.entries(doc.meta).map(([k, v]) => (
+              <FragmentKV key={k} k={k} v={v} />
+            ))}
+          </dl>
+        )}
       </section>
     </Drawer>
   );
