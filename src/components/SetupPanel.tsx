@@ -384,13 +384,6 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             </span>
           </label>
         )}
-        <label className="check" style={{ marginTop: 10 }}>
-          <input type="checkbox" checked={o.batch} onChange={(e) => updateStudy((s) => void (s.options.batch = e.target.checked))} />
-          <span>
-            Batch API
-            <div className="hint">About half the price; results arrive later (usually within an hour). Tests always run immediately.</div>
-          </span>
-        </label>
       </Section>
 
       {preview && (

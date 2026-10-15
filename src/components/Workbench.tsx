@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
-import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, useStore } from '../lib/store';
+import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
@@ -146,7 +146,15 @@ function TextsAndResults() {
               </span>
             </div>
             <div className="runbar-group">
-              <span className="runbar-label">{study.options.batch ? 'Batch' : 'Run'}</span>
+              <span className="runbar-label">Run</span>
+              <span className="seg compact" role="radiogroup" aria-label="How to run">
+                <button role="radio" aria-checked={!study.options.batch} className={!study.options.batch ? 'on' : ''} onClick={() => updateStudy((s) => void (s.options.batch = false))} title="Send the requests now and see results as they arrive">
+                  Now
+                </button>
+                <button role="radio" aria-checked={study.options.batch} className={study.options.batch ? 'on' : ''} onClick={() => updateStudy((s) => void (s.options.batch = true))} title="Submit as a batch: about half the price, results arrive later">
+                  Batch · ½ price
+                </button>
+              </span>
               {selected.size > 0 && (
                 <button className="btn" disabled={busy} onClick={() => runDocs(docs.filter((d) => selected.has(d.id)), `Selected texts (${selected.size})`, false)}>
                   Selected ({selected.size})
