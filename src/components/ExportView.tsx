@@ -41,8 +41,8 @@ export function ExportView() {
   return (
     <div className="stack">
       <div className="card card-pad">
-        <div className="row">
-          <div className="field grow" style={{ marginBottom: 0, maxWidth: 520 }}>
+        <div>
+          <div className="field" style={{ marginBottom: 6, maxWidth: 640 }}>
             <label htmlFor="exp-run">Run to report</label>
             <select id="exp-run" className="select" value={runId} onChange={(e) => setRunId(e.target.value)}>
               {!withResults.length && <option value="">No runs with results yet</option>}
@@ -53,7 +53,7 @@ export function ExportView() {
               ))}
             </select>
           </div>
-          <div className="hint" style={{ maxWidth: 520 }}>
+          <div className="hint">
             Excel and the supplementary package describe this one run (typically your final, full run). The research repository always includes every run.
             {gold.length > 0 && <> Agreement is computed automatically for: {gold.join(', ')}.</>}
           </div>
@@ -61,7 +61,7 @@ export function ExportView() {
       </div>
 
       <div className="export-grid">
-        <div className="card card-pad">
+        <div className="card card-pad export-card">
           <div className="card-head">
             <h2>Excel workbook</h2>
           </div>
@@ -73,8 +73,7 @@ export function ExportView() {
             <li>Results · By replicate · Agreement · Settings · All runs</li>
           </ul>
           <button
-            className="btn primary"
-            style={{ marginTop: 14 }}
+            className="btn primary export-btn"
             disabled={!run || !!busy}
             onClick={() =>
               go('excel', async () => {
@@ -87,7 +86,7 @@ export function ExportView() {
           </button>
         </div>
 
-        <div className="card card-pad">
+        <div className="card card-pad export-card">
           <div className="card-head">
             <h2>Research repository</h2>
           </div>
@@ -101,8 +100,7 @@ export function ExportView() {
             <li>results/ · scripts/</li>
           </ul>
           <button
-            className="btn primary"
-            style={{ marginTop: 14 }}
+            className="btn primary export-btn"
             disabled={!!busy || (!docs.length && !runs.length)}
             onClick={() =>
               go('research', async () => {
@@ -115,7 +113,7 @@ export function ExportView() {
           </button>
         </div>
 
-        <div className="card card-pad">
+        <div className="card card-pad export-card">
           <div className="card-head">
             <h2>Supplementary repository</h2>
           </div>
@@ -145,8 +143,7 @@ export function ExportView() {
             <li>prompt/ · results/ · scripts/{supp.includeTexts ? ' · data/' : ''}{supp.includeLogs ? ' · logs/' : ''}</li>
           </ul>
           <button
-            className="btn primary"
-            style={{ marginTop: 14 }}
+            className="btn primary export-btn"
             disabled={!run || !!busy}
             onClick={() =>
               go('supp', async () => {

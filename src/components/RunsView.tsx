@@ -60,7 +60,7 @@ export function RunsView() {
                       <td>
                         <input
                           className="input small"
-                          style={{ minWidth: 120 }}
+                          style={{ width: 150 }}
                           placeholder="Add label…"
                           defaultValue={r.label}
                           onBlur={(e) => e.target.value !== r.label && renameRun(r.id, e.target.value)}

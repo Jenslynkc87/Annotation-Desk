@@ -181,6 +181,6 @@ export const DEFAULT_PROMPT: PromptSpec = {
   system: '',
   userTemplate: '{{text}}',
   outputMode: 'structured',
-  variables: [{ name: 'label', type: 'text', values: [], description: '' }],
+  variables: [{ name: 'label', type: 'category', values: [], description: '' }],
   includeRationale: true,
 };

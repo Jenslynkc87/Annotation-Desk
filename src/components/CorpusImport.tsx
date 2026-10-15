@@ -233,10 +233,10 @@ function TableDialog({ table, onDone, chunkWords }: { table: ParsedTable; onDone
           <thead>
             <tr>
               {table.columns.slice(0, 6).map((c) => (
-                <th key={c}>
+                <th key={c} className={c === textCol || c === idCol ? 'col-role' : ''}>
                   {c}
-                  {c === textCol && <span className="badge" style={{ marginLeft: 6 }}>text</span>}
-                  {c === idCol && <span className="badge" style={{ marginLeft: 6 }}>id</span>}
+                  {c === textCol && <span className="badge" style={{ marginLeft: 6 }}>used as text</span>}
+                  {c === idCol && <span className="badge" style={{ marginLeft: 6 }}>used as ID</span>}
                 </th>
               ))}
             </tr>
@@ -245,7 +245,7 @@ function TableDialog({ table, onDone, chunkWords }: { table: ParsedTable; onDone
             {table.rows.slice(0, 5).map((r, i) => (
               <tr key={i}>
                 {table.columns.slice(0, 6).map((c) => (
-                  <td key={c}>
+                  <td key={c} className={c === textCol || c === idCol ? 'col-role' : ''}>
                     <div className="snippet">{r[c]}</div>
                   </td>
                 ))}

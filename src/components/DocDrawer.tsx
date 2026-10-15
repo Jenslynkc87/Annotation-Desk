@@ -26,8 +26,10 @@ export function DocDrawer({
   const job = useStore((s) => s.job);
   const docResults = useMemo(() => allResults.filter((r) => r.docId === docId), [allResults, docId]);
   const view = useMemo(() => (doc ? buildDocViews([doc], runs, docResults, runFilter).get(doc.id) : undefined), [doc, runs, docResults, runFilter]);
-  const [runId, setRunId] = useState<string | null>(null);
-  useEffect(() => setRunId(view?.run?.id ?? null), [docId, view?.run?.id]);
+  // The run picked in the drawer; reset when moving to another text. Defaults to the run shown in the table.
+  const [picked, setPicked] = useState<{ docId: string; runId: string } | null>(null);
+  const runId = picked?.docId === docId ? picked.runId : view?.run?.id ?? null;
+  const setRunId = (id: string) => setPicked({ docId, runId: id });
 
   const idx = docOrder.indexOf(docId);
   useEffect(() => {
@@ -47,7 +49,16 @@ export function DocDrawer({
 
   return (
     <Drawer
-      title={<span className="mono">{doc.docId}</span>}
+      title={
+        <>
+          <span className="hint" style={{ fontWeight: 500 }}>Text</span> <span className="mono">{doc.docId}</span>
+          {idx >= 0 && (
+            <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>
+              {idx + 1} of {docOrder.length}
+            </span>
+          )}
+        </>
+      }
       onClose={onClose}
       actions={
         <>
@@ -117,8 +128,8 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
   return (
     <div className="card card-pad" style={{ marginBottom: 12, boxShadow: 'none' }}>
       <div className="row" style={{ marginBottom: 10 }}>
-        {showRep && <span className="badge">Replicate {r.replicate}</span>}
-        <span className={`badge ${r.status === 'ok' ? 'ok' : 'err'}`}>{r.status === 'ok' ? 'OK' : 'Error'}</span>
+        {showRep && <span className="badge">Annotation {r.replicate}</span>}
+        {r.status !== 'ok' && <span className="badge err">Error</span>}
         {r.parseError && <span className="badge warn">{r.parseError}</span>}
         {r.fallback && <span className="badge warn" title="A safety filter declined the request and a fallback model answered">Fallback: {r.fallback}</span>}
         <span className="hint" style={{ marginLeft: 'auto' }}>
@@ -128,11 +139,14 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
       </div>
       {r.error && <div className="notice err" style={{ marginBottom: 10 }}>{r.error}</div>}
       {r.status === 'ok' && (
-        <dl className="kv">
+        <div className="annot">
           {fields.map((f) => (
-            <FragmentKV key={f} k={f} v={r.values[f] ?? ''} />
+            <div key={f} className={f === 'response' ? 'annot-item wide' : 'annot-item'}>
+              <div className="annot-k">{f}</div>
+              <div className="annot-v">{r.values[f] || <span className="hint">—</span>}</div>
+            </div>
           ))}
-        </dl>
+        </div>
       )}
       {r.rationale && (
         <>

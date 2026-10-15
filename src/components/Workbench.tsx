@@ -106,7 +106,6 @@ function TextsAndResults() {
   };
 
   const testDoc = docs.find((d) => selected.has(d.id)) ?? docs[0];
-  const batchLabel = study.options.batch ? 'Submit batch' : 'Run';
   const busy = !!job;
 
   return (
@@ -123,41 +122,37 @@ function TextsAndResults() {
       {docs.length > 0 && (
         <div style={{ marginTop: 16 }}>
           <div className="runbar">
-            <button className="btn primary" disabled={busy || !testDoc} onClick={() => runDocs([testDoc], `Test: ${testDoc.docId}`, true)} title="Annotate one text right away (selected text, or the first one)">
-              <Icon name="flask" /> Test on 1 text
-            </button>
-            <span className="row" style={{ gap: 0 }}>
-              <button
-                className="btn"
-                style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}
-                disabled={busy}
-                onClick={() => runDocs(sample(docs, Math.min(sampleN, docs.length)), `Random sample of ${Math.min(sampleN, docs.length)}`, true)}
-                title="Annotate a random sample right away"
-              >
-                <Icon name="play" /> Random sample
+            <div className="runbar-group">
+              <span className="runbar-label">Try</span>
+              <button className="btn primary" disabled={busy || !testDoc} onClick={() => runDocs([testDoc], `Test: ${testDoc.docId}`, true)} title="Annotate one text right away: the first selected text, or else the first text">
+                <Icon name="flask" /> Test on 1 text
               </button>
-              <input
-                className="input"
-                type="number"
-                min={1}
-                aria-label="Sample size"
-                style={{ width: 64, borderTopLeftRadius: 0, borderBottomLeftRadius: 0, marginLeft: -1, minHeight: 35 }}
-                value={sampleN}
-                onChange={(e) => setSampleN(Math.max(1, Number(e.target.value) || 1))}
-              />
-            </span>
-            <span className="sep" />
-            {selected.size > 0 && (
-              <button className="btn" disabled={busy} onClick={() => runDocs(docs.filter((d) => selected.has(d.id)), `Selected texts (${selected.size})`, false)}>
-                {batchLabel}: selected ({selected.size})
+              <span className="btn-group">
+                <button
+                  className="btn"
+                  disabled={busy}
+                  onClick={() => runDocs(sample(docs, Math.min(sampleN, docs.length)), `Random sample of ${Math.min(sampleN, docs.length)}`, true)}
+                  title="Annotate a random sample right away"
+                >
+                  <Icon name="play" size={14} /> Random sample of
+                </button>
+                <input className="input" type="number" min={1} aria-label="Sample size" value={sampleN} onChange={(e) => setSampleN(Math.max(1, Number(e.target.value) || 1))} />
+              </span>
+            </div>
+            <div className="runbar-group">
+              <span className="runbar-label">{study.options.batch ? 'Batch' : 'Run'}</span>
+              {selected.size > 0 && (
+                <button className="btn" disabled={busy} onClick={() => runDocs(docs.filter((d) => selected.has(d.id)), `Selected texts (${selected.size})`, false)}>
+                  Selected ({selected.size})
+                </button>
+              )}
+              <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All texts (${docs.length})`, false)} title={study.options.batch ? 'Submit every text as a batch' : 'Annotate every text now'}>
+                All ({docs.length.toLocaleString()})
               </button>
-            )}
-            <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All texts (${docs.length})`, false)}>
-              {batchLabel}: all ({docs.length.toLocaleString()})
-            </button>
-            <button className="btn" disabled={busy} onClick={remaining} title="Only texts without a successful result for the current prompt">
-              {batchLabel}: remaining
-            </button>
+              <button className="btn" disabled={busy} onClick={remaining} title="Only texts without a successful result for the current prompt">
+                Remaining
+              </button>
+            </div>
           </div>
           {reps > 1 && <div className="hint" style={{ marginTop: 6 }}>Each text is annotated {reps}× per run.</div>}
 
@@ -190,7 +185,7 @@ function TextsAndResults() {
           ))}
 
           <div className="toolbar">
-            <input className="input small" style={{ maxWidth: 220 }} placeholder="Search texts and results…" value={query} onChange={(e) => (setQuery(e.target.value), setPage(0))} />
+            <input className="input small" style={{ flex: '1 1 180px', maxWidth: 260 }} placeholder="Search texts and results…" value={query} onChange={(e) => (setQuery(e.target.value), setPage(0))} />
             <select className="select small" style={{ width: 'auto' }} value={statusFilter} onChange={(e) => (setStatusFilter(e.target.value as typeof statusFilter), setPage(0))}>
               <option value="all">All texts</option>
               <option value="done">With results</option>
@@ -219,8 +214,8 @@ function TextsAndResults() {
             <span className="grow" />
             <Menu
               button={(t) => (
-                <button className="btn small ghost" onClick={t}>
-                  {selected.size ? `${selected.size} selected` : 'Texts'} <Icon name="chevron" size={12} />
+                <button className="btn small" onClick={t}>
+                  {selected.size ? `${selected.size} selected` : 'Select'} <Icon name="chevron" size={12} />
                 </button>
               )}
             >
