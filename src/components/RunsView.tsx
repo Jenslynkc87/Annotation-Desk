@@ -310,13 +310,23 @@ function AgreementPanel() {
 
   const isFreeText = !!runA && !fields.length;
   const [reporting, setReporting] = useState(false);
+  const [groupBy, setGroupBy] = useState('');
+  // Columns that group texts (e.g. era, journal): a few distinct values, not one per text.
+  const groupColumns = useMemo(
+    () =>
+      metaCols.filter((c) => {
+        const n = new Set(docs.map((d) => d.meta[c] ?? '').filter(Boolean)).size;
+        return n >= 2 && n <= 30;
+      }),
+    [metaCols, docs],
+  );
   const downloadReport = async () => {
     const ra = runOf(srcA);
     const rb = runOf(decode(b));
     if (!ra || !rb) return;
     setReporting(true);
     try {
-      const blob = await buildComparisonReport(ra, rb, docs, runs, results, tolerance);
+      const blob = await buildComparisonReport(ra, rb, docs, runs, results, tolerance, groupBy);
       download(`${slug(currentStudy(getState())?.name ?? 'study')}_run${ra.number}_vs_run${rb.number}_${dateStamp()}.xlsx`, blob);
     } catch (e) {
       toast(`Report failed: ${errorMessage(e)}`, 'error');
@@ -383,10 +393,20 @@ function AgreementPanel() {
         )}
       </div>
       {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && (
-        <div style={{ margin: '2px 0 12px' }}>
+        <div className="row" style={{ margin: '2px 0 12px' }}>
           <button className="btn small" disabled={reporting} onClick={downloadReport} title="All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper">
             {reporting ? 'Building…' : 'Download comparison report (Excel)'}
           </button>
+          {groupColumns.length > 0 && (
+            <select className="select small" style={{ width: 'auto' }} value={groupBy} onChange={(e) => setGroupBy(e.target.value)} title="Adds a sheet with the same figures per group (exploratory)">
+              <option value="">No breakdown</option>
+              {groupColumns.map((c) => (
+                <option key={c} value={c}>
+                  Break down by {c}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       )}
 
@@ -417,6 +437,7 @@ function AgreementPanel() {
             {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={fmtStat(stats.weightedKappa)} sub={ciText(stats.ci.weightedKappa)} />}
             <Stat k={`Krippendorff's α (${level})`} v={fmtStat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
             <Stat k="Gwet's AC1" v={fmtStat(stats.gwetAC1)} sub={ciText(stats.ci.gwetAC1)} />
+            {stats.gwetAC2Linear !== null && <Stat k="Gwet's AC2 (linear)" v={fmtStat(stats.gwetAC2Linear)} sub={ciText(stats.ci.gwetAC2Linear)} />}
             {stats.spearman !== null && <Stat k="Spearman ρ" v={fmtStat(stats.spearman)} />}
             {stats.meanDifference !== null && (
               <Stat k="Mean difference (second − first)" v={fmtStat(stats.meanDifference)} sub={ciText(stats.ci.meanDifference)} />

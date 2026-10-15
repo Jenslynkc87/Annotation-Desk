@@ -71,7 +71,11 @@ describe('comparison report', () => {
     expect(summary[1].weighted_kappa_linear).toBeCloseTo(0.4921, 4);
     const review = rows('Review');
     expect(review[0]).toMatchObject({ file: 'art_1.md', first: -1, second: 1, category: 'opposite direction', first_explanation: 'a because 1', second_explanation: 'b because 1' });
-    expect(review.at(-1)!.category).toBe('agree');
+    expect(review.at(-1)!.category).toBe('agree (zero)');
+    expect(review.map((r) => r.category)).toContain('agree (non-zero)');
+    const rnd = review.map((r) => r.random as number);
+    expect(rnd.every((x) => x >= 0 && x < 1)).toBe(true);
+    expect(new Set(rnd).size).toBe(rnd.length);
     expect(String(rows('Draft text')[0].draft_text)).toContain('in direction for 8.3%');
   });
 });

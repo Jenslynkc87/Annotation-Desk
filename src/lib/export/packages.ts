@@ -458,7 +458,23 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
  * within-tolerance agreement, chance-corrected agreement, systematic difference, confusion tables, settings
  * and draft text for a paper. All intervals are 95% bootstrap intervals over texts.
  */
-export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], runs: Run[], results: Result[], tolerance: number): Promise<Blob> {
+/** A fixed number in [0, 1) derived from a text (FNV-1a), so random draws are the same every time. */
+function stableRandom(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return Math.round(((h >>> 0) / 4294967296) * 1e6) / 1e6;
+}
+
+export async function buildComparisonReport(
+  runA: Run,
+  runB: Run,
+  docs: Doc[],
+  runs: Run[],
+  results: Result[],
+  tolerance: number,
+  /** Optional metadata column (e.g. era): adds a sheet with the same figures per group. */
+  groupBy = '',
+): Promise<Blob> {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const viewsA = buildDocViews(docs, runs, results, runA.id);
@@ -507,6 +523,7 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
     ...withCi('weighted_kappa_quadratic', s, 'weightedKappa', s.weightedKappa),
     ...withCi('krippendorff_alpha', s, 'krippendorffAlpha', s.krippendorffAlpha),
     ...withCi('cohen_kappa', s, 'cohenKappa', s.cohenKappa),
+    ...withCi('gwet_ac2_linear', s, 'gwetAC2Linear', s.gwetAC2Linear),
     ...withCi('gwet_ac1', s, 'gwetAC1', s.gwetAC1),
     ...withCi('mean_difference_second_minus_first', s, 'meanDifference', s.meanDifference),
     ...withCi('mean_absolute_difference', s, 'mae', s.mae),
@@ -546,24 +563,44 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
       const diff = numeric ? Number(y) - Number(x) : null;
       const mid = all.midpoint;
       const opposite = numeric && mid !== null && ((Number(x) < mid && Number(y) > mid) || (Number(x) > mid && Number(y) < mid));
-      const category = x === y ? 'agree' : opposite ? 'opposite direction' : diff !== null && Math.abs(diff) >= 2 ? '2+ points' : numeric ? '1 point' : 'differ';
+      const category =
+        x === y ? (numeric ? (Number(x) === 0 ? 'agree (zero)' : 'agree (non-zero)') : 'agree') : opposite ? 'opposite direction' : diff !== null && Math.abs(diff) >= 2 ? '2+ points' : numeric ? '1 point' : 'differ';
       return {
         file: doc.meta.file ?? doc.docId,
         field: f.label,
+        ...(groupBy ? { [groupBy]: doc.meta[groupBy] ?? '' } : {}),
         first: numeric ? Number(x) : x,
         second: numeric ? Number(y) : y,
         difference: diff,
         category,
         first_explanation: reasoningOf(runA, viewsA.get(doc.id)!.values, firstRationale(viewsA, doc.id), f.key),
         second_explanation: reasoningOf(runB, viewsB.get(doc.id)!.values, firstRationale(viewsB, doc.id), f.key),
+        // Sort by category, then by this column, to draw a reproducible random selection within a category.
+        random: stableRandom(`${doc.meta.file ?? doc.docId}|${f.key}`),
         judgment: '',
         note: '',
       };
     }),
   );
-  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, '1 point': 2, agree: 3 };
+  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, '1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4 };
   review.sort((p, q) => rank[p.category] - rank[q.category] || Math.abs(q.difference ?? 0) - Math.abs(p.difference ?? 0));
   addSheet(wb, 'Review', review);
+
+  if (groupBy) {
+    // Exploratory: the same figures per group (e.g. per era); small groups give wide intervals.
+    const groups = [...new Set(both.map((d) => d.meta[groupBy] ?? ''))].sort((p, q) => p.localeCompare(q, undefined, { numeric: true }));
+    addSheet(
+      wb,
+      `By ${groupBy}`.replace(/[[\]:*?/\\]/g, '_').slice(0, 31),
+      compared.flatMap(({ f, items }) =>
+        groups.map((g) => {
+          const sub = items.filter((i) => (i.doc.meta[groupBy] ?? '') === g);
+          const { field, texts: _t, ...rest } = summaryRow(f.label, '', f.level, agreement(sub.map((i) => i.x), sub.map((i) => i.y), f.level, f.allowed, tolerance));
+          return { field, [groupBy]: g || '(none)', ...rest, n_texts_in_both_runs: both.filter((d) => (d.meta[groupBy] ?? '') === g).length };
+        }),
+      ),
+    );
+  }
 
   const settings = (r: Run) => ({
     run: `#${r.number}${r.label ? ` (${r.label})` : ''}`,
@@ -603,10 +640,11 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
     { note: `First: ${name(runA)}. Second: ${name(runB)}. Texts compared: those annotated in both runs with a usable value for the field.` },
     { note: `Exact agreement: share of texts with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
     { note: '"At least one non-zero" rows repeat the statistics on texts where at least one run gave a score other than 0, because shared zeros inflate agreement.' },
-    { note: 'Weighted kappa (linear or quadratic weights over the codebook scale) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories.' },
+    { note: 'Weighted kappa (linear or quadratic weights over the codebook scale), Gwet\'s AC2 (linear weights) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories. AC1/AC2 stay stable when one score (e.g. 0) dominates, where kappa can drop sharply.' },
     { note: 'Mean difference = second minus first (positive: the second run scores higher on average). Mean absolute difference: average distance regardless of direction.' },
     { note: 'Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of texts, fixed seed, so the same data gives the same interval).' },
-    { note: 'Review sheet: every compared score, opposite directions first, then the largest differences; the judgment and note columns are for your own labels.' },
+    { note: 'Review sheet: every compared score, opposite directions first, then the largest differences. To draw at random within a category (e.g. 30 opposite-direction cases), sort by category and then by "random", and take the first rows; the numbers never change, so the draw is reproducible. The judgment and note columns are for your own labels.' },
+    ...(groupBy ? [{ note: `"By ${groupBy}" sheet: the same figures per ${groupBy}; exploratory, as small groups give wide intervals.` }] : []),
   ]);
   const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -627,7 +665,7 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
   const within = s.tolerance > 0 && s.withinTolerance !== null ? ` and scores within ${s.tolerance} point${s.tolerance === 1 ? '' : 's'} for ${pct(s.withinTolerance)}${ciP('withinTolerance')}` : '';
   const serious = ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of texts${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`;
   const kappa = s.weightedKappaLinear !== null ? `linear-weighted κ = ${num2(s.weightedKappaLinear)}${ciN('weightedKappaLinear')}, ` : '';
-  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}Gwet's AC1 = ${num2(s.gwetAC1)}${ciN('gwetAC1')}, Krippendorff's α (${level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}linear-weighted Gwet's AC2 = ${num2(s.gwetAC2Linear)}${ciN('gwetAC2Linear')}, Krippendorff's α (${level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   const d = s.meanDifference;
   const ci = s.ci.meanDifference;
   const shift =
@@ -640,5 +678,5 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
 /** The same figures on texts where at least one run gave a non-zero score. */
 function nonZeroSentence(s: Agreement): string {
   if (!s.n) return 'No text received a non-zero score from either run.';
-  return `On the ${s.n.toLocaleString('en-US')} texts where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)} and linear-weighted κ = ${num2(s.weightedKappaLinear)}.`;
+  return `On the ${s.n.toLocaleString('en-US')} texts where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)}, linear-weighted κ = ${num2(s.weightedKappaLinear)} and AC2 = ${num2(s.gwetAC2Linear)}.`;
 }

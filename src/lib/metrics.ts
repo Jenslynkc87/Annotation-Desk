@@ -11,6 +11,8 @@ export interface Agreement {
   weightedKappaLinear: number | null; // linear weights, ordinal/interval only
   krippendorffAlpha: number | null;
   gwetAC1: number | null;
+  /** Numbers only: Gwet's AC2 with linear weights over the scale (partial credit for near misses). */
+  gwetAC2Linear: number | null;
   spearman: number | null;
   pearson: number | null;
   mae: number | null;
@@ -43,6 +45,7 @@ export type CiStat =
   | 'weightedKappaLinear'
   | 'krippendorffAlpha'
   | 'gwetAC1'
+  | 'gwetAC2Linear'
   | 'meanDifference'
   | 'mae';
 
@@ -146,6 +149,32 @@ export function gwetAC1(pairs: [string, string][], allowed: string[] = []): numb
   return (pa - pe) / (1 - pe);
 }
 
+/**
+ * Gwet's AC2 for two raters with linear weights, 1 − |a − b| / (max − min) over the scale's values
+ * (the categories are the codebook scale plus any observed value). With identity weights this is AC1.
+ */
+export function gwetAC2Linear(pairs: [string, string][], scale: string[] = []): number | null {
+  const n = pairs.length;
+  if (!n) return null;
+  const cats = sortCats([...new Set([...scale, ...pairs.flat()])]);
+  const q = cats.length;
+  if (q < 2 || !cats.every(isNum)) return null;
+  const vals = cats.map(Number);
+  const range = Math.max(...vals) - Math.min(...vals);
+  const w = (a: number, b: number) => 1 - Math.abs(a - b) / range;
+  const pa = pairs.reduce((s, [a, b]) => s + w(Number(a), Number(b)), 0) / n;
+  let tw = 0;
+  for (const a of vals) for (const b of vals) tw += w(a, b);
+  let sum = 0;
+  for (const c of cats) {
+    const pi = pairs.reduce((s, [a, b]) => s + (a === c ? 1 : 0) + (b === c ? 1 : 0), 0) / (2 * n);
+    sum += pi * (1 - pi);
+  }
+  const pe = (tw / (q * (q - 1))) * sum;
+  if (pe === 1) return null;
+  return (pa - pe) / (1 - pe);
+}
+
 function ranks(xs: number[]): number[] {
   const order = xs.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
   const r = new Array(xs.length);
@@ -181,7 +210,7 @@ export function spearman(xs: number[], ys: number[]): number | null {
 }
 
 // Small seeded random generator (mulberry32), so bootstrap intervals are the same every time.
-function seeded(seed: number) {
+export function seeded(seed: number) {
   return () => {
     seed = (seed + 0x6d2b79f5) | 0;
     let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -254,6 +283,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
       ? {
           weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale),
           weightedKappaLinear: (p: [string, string][]) => cohenKappa(p, 'linear', scale),
+          gwetAC2Linear: (p: [string, string][]) => gwetAC2Linear(p, scale),
           largeDifference,
           ...(midpoint !== null ? { oppositeDirection: (p: [string, string][]) => oppositeDirection(p, midpoint) } : {}),
         }
@@ -276,6 +306,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     weightedKappaLinear: numeric ? cohenKappa(pairs, 'linear', scale) : null,
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
     gwetAC1: gwetAC1(pairs, allowed),
+    gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
     ci: bootstrapCI(pairs, stats),
     spearman: numeric ? spearman(xs, ys) : null,
     pearson: numeric ? pearson(xs, ys) : null,

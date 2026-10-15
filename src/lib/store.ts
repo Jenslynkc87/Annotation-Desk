@@ -275,6 +275,28 @@ export async function addLabels(updates: Map<string, Record<string, string>>) {
   toast(`Added labels to ${changed.length} text${changed.length === 1 ? '' : 's'}.`, 'success');
 }
 
+/**
+ * Mark a drawn sample: `column` = `value` on these texts, removed from texts marked by an earlier draw.
+ * `note` (the rule and seed) is added to the study description, which is exported with the study.
+ */
+export async function markSample(column: string, value: string, ids: string[], note: string) {
+  const chosen = new Set(ids);
+  const changed: Doc[] = [];
+  for (const d of state.docs) {
+    const marked = d.meta[column] === value;
+    if (chosen.has(d.id) && !marked) changed.push({ ...d, meta: { ...d.meta, [column]: value } });
+    else if (!chosen.has(d.id) && marked) {
+      const { [column]: _old, ...rest } = d.meta;
+      changed.push({ ...d, meta: rest });
+    }
+  }
+  await dbApi.putDocs(changed);
+  const byId = new Map(changed.map((d) => [d.id, d]));
+  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
+  updateStudy((s) => void (s.description = `${s.description.trim() ? s.description.trim() + '\n' : ''}${note}`));
+  toast(`Marked ${ids.length} text${ids.length === 1 ? '' : 's'} as ${column} = ${value}.`, 'success');
+}
+
 export async function removeDocs(ids: string[]) {
   await dbApi.deleteDocs(ids);
   const drop = new Set(ids);

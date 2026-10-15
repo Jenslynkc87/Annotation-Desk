@@ -254,6 +254,7 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
     ...withCi('weighted_kappa_quadratic', a.stats.weightedKappa, a.stats.ci.weightedKappa),
     ...withCi('krippendorff_alpha', a.stats.krippendorffAlpha, a.stats.ci.krippendorffAlpha),
     ...withCi('gwet_ac1', a.stats.gwetAC1, a.stats.ci.gwetAC1),
+    ...withCi('gwet_ac2_linear', a.stats.gwetAC2Linear, a.stats.ci.gwetAC2Linear),
     spearman_rho: a.stats.spearman,
     pearson_r: a.stats.pearson,
     mean_absolute_error: a.stats.mae,

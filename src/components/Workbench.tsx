@@ -7,6 +7,7 @@ import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
 import { CorpusImport } from './CorpusImport';
 import { DocDrawer } from './DocDrawer';
+import { SampleDialog } from './SampleDialog';
 import { SetupPanel } from './SetupPanel';
 import { Icon, Menu } from './ui';
 
@@ -35,6 +36,9 @@ function TextsAndResults() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'done' | 'todo' | 'error' | 'mismatch'>('all');
+  // Filter on a metadata column, e.g. sample = validation or era = 1980s ("column␟value"; '' = no filter).
+  const [metaFilter, setMetaFilter] = useState('');
+  const [sampling, setSampling] = useState(false);
   const [runFilter, setRunFilter] = useState<RunFilter>('latest');
   const [compareCol, setCompareCol] = useState('');
   const [page, setPage] = useState(0);
@@ -43,6 +47,13 @@ function TextsAndResults() {
 
   const views = useMemo(() => buildDocViews(docs, runs, results, runFilter), [docs, runs, results, runFilter]);
   const metaColumns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
+  const filterOptions = useMemo(
+    () =>
+      metaColumns
+        .map((c) => ({ c, values: [...new Set(docs.map((d) => d.meta[c] ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })) }))
+        .filter((x) => x.values.length >= 1 && x.values.length <= 30),
+    [metaColumns, docs],
+  );
   // Columns to show: the current prompt's fields, plus any extra fields of the run being viewed.
   const fields = useMemo(() => {
     const f = outputFields(study.prompt);
@@ -66,6 +77,10 @@ function TextsAndResults() {
       if (statusFilter === 'done' && v.status === 'none') return false;
       if (statusFilter === 'todo' && v.status !== 'none') return false;
       if (statusFilter === 'error' && v.status !== 'error' && v.status !== 'partial') return false;
+      if (metaFilter) {
+        const [col, val] = metaFilter.split('\u001f');
+        if (d.meta[col] !== val) return false;
+      }
       if (statusFilter === 'mismatch') {
         if (!compareCol || v.status === 'none') return false;
         if (normalizeLabel(v.values[compareField], compareYesNo) === normalizeLabel(d.meta[compareCol], compareYesNo)) return false;
@@ -73,7 +88,7 @@ function TextsAndResults() {
       if (!q) return true;
       return d.docId.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) || Object.values(v.values).some((x) => x.toLowerCase().includes(q));
     });
-  }, [docs, views, query, statusFilter, compareCol, compareField, compareYesNo]);
+  }, [docs, views, query, statusFilter, metaFilter, compareCol, compareField, compareYesNo]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
   const curPage = Math.min(page, pageCount - 1);
@@ -214,6 +229,20 @@ function TextsAndResults() {
               <option value="error">With errors</option>
               {compareCol && <option value="mismatch">Disagree with {compareCol}</option>}
             </select>
+            {filterOptions.length > 0 && (
+              <select className="select small" style={{ width: 'auto' }} value={metaFilter} onChange={(e) => (setMetaFilter(e.target.value), setPage(0))} title="Show only texts with this metadata value">
+                <option value="">Any metadata</option>
+                {filterOptions.map(({ c, values }) => (
+                  <optgroup key={c} label={c}>
+                    {values.map((v) => (
+                      <option key={v} value={`${c}\u001f${v}`}>
+                        {c} = {v}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            )}
             <select className="select small" style={{ width: 'auto' }} value={runFilter} onChange={(e) => (setRunFilter(e.target.value), setPage(0))} title="Which run's results to show">
               <option value="latest">Latest result per text</option>
               {[...runs].reverse().map((r) => (
@@ -247,6 +276,9 @@ function TextsAndResults() {
                   </button>
                   <button className="menu-item" onClick={() => (close(), setSelected(new Set()))}>
                     Clear selection
+                  </button>
+                  <button className="menu-item" onClick={() => (close(), setSampling(true))}>
+                    Draw a sample…
                   </button>
                   <div className="menu-sep" />
                   <button
@@ -381,6 +413,7 @@ function TextsAndResults() {
         </div>
       )}
 
+      {sampling && <SampleDialog onClose={() => setSampling(false)} />}
       {openDoc && (
         <DocDrawer
           docId={openDoc}
