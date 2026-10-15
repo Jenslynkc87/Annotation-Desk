@@ -54,6 +54,14 @@ export interface PromptSpec {
   includeRationale: boolean;
 }
 
+/** A named prompt (text, output mode and fields) kept in the study, to switch between several. */
+export interface SavedPrompt {
+  id: string;
+  name: string;
+  savedAt: string;
+  prompt: PromptSpec;
+}
+
 export interface Study {
   id: string;
   name: string;
@@ -63,6 +71,7 @@ export interface Study {
   model: ModelSettings;
   options: RunOptions;
   prompt: PromptSpec;
+  savedPrompts?: SavedPrompt[];
 }
 
 export interface Doc {

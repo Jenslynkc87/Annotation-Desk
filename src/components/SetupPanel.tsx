@@ -4,9 +4,11 @@ import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
-import type { ProviderId, Variable, VariableType } from '../lib/types';
+import { samePrompt, upsertSavedPrompt } from '../lib/savedPrompts';
+import type { ProviderId, SavedPrompt, Variable, VariableType } from '../lib/types';
+import { nowIso, uid } from '../lib/util';
 import { RequestView } from './RequestView';
-import { Icon, Modal } from './ui';
+import { Icon, Menu, Modal } from './ui';
 
 const TYPE_LABELS: Record<VariableType, string> = {
   category: 'Category',
@@ -288,6 +290,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
       </Section>
 
       <Section id="prompt" title="Prompt" summary={p.userTemplate.trim() ? `${p.userTemplate.slice(0, 60).replace(/\s+/g, ' ')}…` : p.system.trim() ? 'System prompt only' : 'Empty'}>
+        <SavedPrompts />
         <div className="field">
           <label htmlFor="prompt" className="sr-only">
             Prompt
@@ -398,6 +401,59 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           <RequestView request={preview} />
         </Modal>
       )}
+    </div>
+  );
+}
+
+/** Named prompts (text, output mode and fields) kept in the study, so the corpus and run settings stay put while the prompt is switched. */
+function SavedPrompts() {
+  const study = useStore((s) => currentStudy(s)!);
+  const saved = study.savedPrompts ?? [];
+  const save = () => {
+    const name = window.prompt('Name for this prompt and its fields (e.g. Prompt 3):')?.trim();
+    if (!name) return;
+    const existing = saved.find((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing && !confirm(`Replace the saved prompt “${existing.name}” with the current one?`)) return;
+    updateStudy((s) => void (s.savedPrompts = upsertSavedPrompt(s.savedPrompts ?? [], name, s.prompt, uid(), nowIso())));
+  };
+  const load = (sp: SavedPrompt) => {
+    const kept = saved.some((x) => samePrompt(x.prompt, study.prompt));
+    if (!kept && !confirm(`Replace the current prompt and fields with “${sp.name}”? The current ones are not saved under a name.`)) return;
+    updateStudy((s) => void (s.prompt = structuredClone(sp.prompt)));
+  };
+  const remove = (sp: SavedPrompt) => {
+    if (confirm(`Delete the saved prompt “${sp.name}”? Runs already made with it are not affected.`)) updateStudy((s) => void (s.savedPrompts = (s.savedPrompts ?? []).filter((x) => x.id !== sp.id)));
+  };
+  return (
+    <div className="row" style={{ marginBottom: 8 }}>
+      <Menu
+        align="left"
+        button={(t) => (
+          <button className="btn small" onClick={t} title="Keep several prompts, each with its own fields, and switch between them">
+            Saved prompts <Icon name="chevron" size={12} />
+          </button>
+        )}
+      >
+        {(close) => (
+          <>
+            <button className="menu-item" onClick={() => (close(), save())}>
+              Save current prompt and fields…
+            </button>
+            {saved.length > 0 && <div className="menu-sep" />}
+            {saved.map((sp) => (
+              <div key={sp.id} className="row" style={{ gap: 0 }}>
+                <button className="menu-item" style={{ flex: 1 }} onClick={() => (close(), load(sp))} title="Load this prompt and its fields">
+                  {sp.name}
+                  {samePrompt(sp.prompt, study.prompt) && <span className="badge" style={{ marginLeft: 'auto' }}>in use</span>}
+                </button>
+                <button className="btn ghost small icon" title="Delete this saved prompt" aria-label={`Delete saved prompt ${sp.name}`} onClick={() => (close(), remove(sp))}>
+                  <Icon name="trash" size={15} />
+                </button>
+              </div>
+            ))}
+          </>
+        )}
+      </Menu>
     </div>
   );
 }
