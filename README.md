@@ -37,7 +37,7 @@ The app is a static site (Vite + React + TypeScript) and uses the official `@ant
 
 ## Deployment
 
-`.github/workflows/deploy.yml` publishes `dist/` to GitHub Pages on every push to `main`. Enable it once under **Settings → Pages → Source: GitHub Actions**. GitHub Pages on a private repository requires a paid plan; alternatively connect the repository to Cloudflare Pages or Netlify (build command `npm run build`, output directory `dist`).
+`.github/workflows/deploy.yml` publishes `dist/` to GitHub Pages on every push to the default branch. Enable it once under **Settings → Pages → Source: GitHub Actions**. GitHub Pages on a private repository requires a paid plan; alternatively connect the repository to Cloudflare Pages or Netlify (build command `npm run build`, output directory `dist`).
 
 ## Methodological notes
 
