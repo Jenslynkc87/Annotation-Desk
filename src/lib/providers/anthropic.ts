@@ -36,10 +36,10 @@ export const FALLBACK_MODELS = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-o
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 export const FALLBACK_ANTHROPIC_MODELS: ModelInfo[] = [
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
   { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
-  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
 ];
 
 type Caps = Record<string, { supported?: boolean } & Record<string, unknown>> | undefined;

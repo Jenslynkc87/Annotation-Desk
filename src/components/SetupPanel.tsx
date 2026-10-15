@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { RATIONALE_KEY, renderMessageParts, templatePlaceholders, validateVariableName } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS } from '../lib/providers/anthropic';
+import { KNOWN_OPENAI_MODELS } from '../lib/providers/openai';
 import { PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
 import type { ProviderId, Variable, VariableType } from '../lib/types';
@@ -68,7 +69,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     if (hasKey && modelsStatus[m.provider] === 'idle') void loadModels(m.provider);
   }, [hasKey, m.provider, modelsStatus]);
 
-  const list = models[m.provider] ?? (m.provider === 'anthropic' ? FALLBACK_ANTHROPIC_MODELS : []);
+  const list = models[m.provider] ?? (m.provider === 'anthropic' ? FALLBACK_ANTHROPIC_MODELS : KNOWN_OPENAI_MODELS);
   const info = list.find((x) => x.id === m.model);
   const showCustom = customModel || !list.length || (!!m.model && !info);
   const effortChoices = info?.effortLevels?.length ? info.effortLevels : adapter.effortOptions;
@@ -82,7 +83,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     updateStudy((s) => {
       if (s.model.provider === id) return;
       s.model.provider = id;
-      s.model.model = id === 'anthropic' ? 'claude-opus-5-5' : '';
+      s.model.model = id === 'anthropic' ? 'claude-opus-5-5' : 'gpt-6.1-sol';
       s.model.effort = '';
     });
 

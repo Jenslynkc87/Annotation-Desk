@@ -6,6 +6,16 @@ function client(apiKey: string) {
   return new OpenAI({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 4 });
 }
 
+const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** Current text models per OpenAI's model overview (checked October 2026). Shown before a key is added
+ *  and used to label/order the list loaded from the user's account. */
+export const KNOWN_OPENAI_MODELS: ModelInfo[] = [
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra · flagship', effortLevels: ALL_EFFORTS },
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol · balanced', effortLevels: ALL_EFFORTS },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna · low-cost', effortLevels: ['none', ...ALL_EFFORTS] },
+];
+
 const EXCLUDE = /(audio|realtime|transcribe|tts|image|embedding|search|moderation|dall-e|whisper|davinci|babbage|instruct|computer|sora)/i;
 const INCLUDE = /^(gpt|o\d|chatgpt)/i;
 
@@ -70,14 +80,18 @@ export const openaiAdapter: ProviderAdapter = {
   label: 'OpenAI (GPT)',
   keyHint: 'sk-…',
   keyUrl: 'https://platform.openai.com/api-keys',
-  effortOptions: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+  effortOptions: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 
   async listModels(apiKey) {
     const out: (ModelInfo & { created: number })[] = [];
     for await (const m of client(apiKey).models.list()) {
       if (INCLUDE.test(m.id) && !EXCLUDE.test(m.id)) out.push({ id: m.id, label: m.id, created: m.created });
     }
-    return out.sort((a, b) => b.created - a.created).map(({ created: _c, ...m }) => m);
+    // Known current models first (with names and effort levels), then everything else, newest first.
+    const ids = new Set(out.map((m) => m.id));
+    const known = KNOWN_OPENAI_MODELS.filter((k) => ids.has(k.id));
+    const rest = out.filter((m) => !KNOWN_OPENAI_MODELS.some((k) => k.id === m.id)).sort((a, b) => b.created - a.created);
+    return [...known, ...rest.map(({ created: _c, ...m }) => m)];
   },
 
   buildRequestBase({ model, options, system, outputSchema, promptHash }: RequestInputs) {
