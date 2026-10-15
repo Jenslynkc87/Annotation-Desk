@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldLabel, flattenJsonResponse, invalidPlaceholders, normalizeLabel, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
+import { fieldLabel, flattenJsonResponse, invalidPlaceholders, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
 import { DEFAULT_PROMPT } from './types';
 
 describe('field names', () => {
@@ -52,5 +52,15 @@ describe('normalizeLabel', () => {
     expect(normalizeLabel('0', true)).toBe('false');
     expect(normalizeLabel('1')).toBe('1');
     expect(normalizeLabel(' Yes ')).toBe('true');
+  });
+});
+
+describe('plain-text answers with JSON', () => {
+  const text = { ...DEFAULT_PROMPT, outputMode: 'text' as const };
+  it('fails an answer whose JSON cannot be read, accepts prose and readable JSON', () => {
+    expect(parseModelOutput('{"score": 2, "reasoning": "cut off', text).parseError).toBe('Answer contains JSON that could not be read');
+    expect(parseModelOutput('Here you go: {"score": 2}', text).parseError).not.toBeNull();
+    expect(parseModelOutput('```json\n{"score": 2}\n```', text).parseError).toBeNull();
+    expect(parseModelOutput('The text is broadly supportive.', text).parseError).toBeNull();
   });
 });

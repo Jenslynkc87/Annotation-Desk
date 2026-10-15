@@ -40,10 +40,13 @@ describe('agreement metrics', () => {
 
 describe('aggregate', () => {
   it('majority vote with ties', () => {
-    expect(aggregate(['a', 'b', 'a'], false)).toBe('a');
-    expect(aggregate(['a', 'b'], false)).toBe('a | b');
+    expect(aggregate(['a', 'b', 'a'], 'majority')).toBe('a');
+    expect(aggregate(['a', 'b'], 'majority')).toBe('a | b');
   });
-  it('mean for numeric', () => {
-    expect(aggregate(['1', '2', '2'], true)).toBe('1.667');
+  it('mean for numbers, median for ordinal scales', () => {
+    expect(aggregate(['1', '2', '2'], 'mean')).toBe('1.667');
+    expect(aggregate(['3', '1', '2'], 'median')).toBe('2');
+    expect(aggregate(['1', '3', '3', '', '1', '2'], 'median')).toBe('2');
+    expect(aggregate(['2', '3'], 'median')).toBe('2.5');
   });
 });

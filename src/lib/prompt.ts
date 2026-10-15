@@ -168,7 +168,10 @@ export interface ParsedOutput {
 
 export function parseModelOutput(rawText: string, p: PromptSpec): ParsedOutput {
   if (p.outputMode === 'text') {
-    return { values: { [TEXT_RESPONSE_KEY]: rawText.trim() }, rationale: '', parseError: null };
+    // A JSON answer is split into columns in the exports; if it can't be read, those columns would be
+    // silently empty, so it counts as failed. Answers without JSON (plain prose) are fine.
+    const unreadable = rawText.includes('{') && !flattenJsonResponse(rawText);
+    return { values: { [TEXT_RESPONSE_KEY]: rawText.trim() }, rationale: '', parseError: unreadable ? 'Answer contains JSON that could not be read' : null };
   }
   let obj: unknown;
   try {

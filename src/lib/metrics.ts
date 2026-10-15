@@ -175,13 +175,20 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
   };
 }
 
-/** Majority vote (categorical) or mean (numeric) across replicates. Ties are reported as "a | b". */
-export function aggregate(values: string[], numeric: boolean): string {
+export type Aggregation = 'majority' | 'median' | 'mean';
+
+/**
+ * Combine replicates: majority vote (categories; ties reported as "a | b"), median (ordinal scales:
+ * a whole number with an odd number of replicates) or mean (numbers).
+ */
+export function aggregate(values: string[], method: Aggregation): string {
   const v = values.filter((x) => x !== '');
   if (!v.length) return '';
-  if (numeric && v.every(isNum)) {
-    const mean = v.reduce((s, x) => s + Number(x), 0) / v.length;
-    return String(Math.round(mean * 1000) / 1000);
+  if (method !== 'majority' && v.every(isNum)) {
+    const xs = v.map(Number).sort((a, b) => a - b);
+    const mid = Math.floor(xs.length / 2);
+    const value = method === 'mean' ? xs.reduce((s, x) => s + x, 0) / xs.length : xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
+    return String(Math.round(value * 1000) / 1000);
   }
   const counts = new Map<string, number>();
   for (const x of v) counts.set(x, (counts.get(x) ?? 0) + 1);

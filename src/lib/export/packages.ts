@@ -242,7 +242,6 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0);
   const m = run.snapshot.model;
   const ok = rs.filter((r) => r.status === 'ok');
-  const fallbacks = rs.filter((r) => r.fallback);
   return {
     software: { name: 'Annotation Desk', version: run.snapshot.appVersion },
     exported_at: exportedAt,
@@ -252,7 +251,6 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       provider: m.provider,
       requested: m.model,
       reported_by_api: [...new Set(rs.map((r) => r.modelReported).filter(Boolean))],
-      fallback_models: [...new Set(fallbacks.map((r) => r.modelReported).filter(Boolean))],
       effort: m.effort || 'model default',
       thinking: m.provider === 'anthropic' ? thinkingLabel(m.model, m.reasoningSummary) : null,
       reasoning_summary_requested: m.reasoningSummary,
@@ -272,7 +270,6 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       ok: ok.length,
       failed: rs.filter((r) => r.status === 'error').length,
       parse_errors: rs.filter((r) => r.parseError).length,
-      answered_by_fallback_model: fallbacks.length,
       first_requested_at: started[0] ?? null,
       last_completed_at: times[times.length - 1] ?? null,
     },
@@ -286,11 +283,9 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   };
 }
 
-function methodsParagraph(run: Run, rs: Result[], meta: ReturnType<typeof supplementaryMetadata>): string {
+function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>): string {
   const m = run.snapshot.model;
-  // Versions of the requested model only; fallback answers are described separately.
-  const versions = [...new Set(rs.filter((r) => !r.fallback).map((r) => r.modelReported).filter(Boolean))];
-  const { total, failed, answered_by_fallback_model: nFallback } = meta.requests;
+  const { total, failed } = meta.requests;
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
   const reps = run.snapshot.options.replicates;
   const dates = [meta.requests.first_requested_at, meta.requests.last_completed_at].filter(Boolean).map((x) => x!.slice(0, 10));
@@ -303,16 +298,13 @@ function methodsParagraph(run: Run, rs: Result[], meta: ReturnType<typeof supple
   ].filter((x): x is string => !!x);
   const settingsText = settings.length > 1 ? `${settings.slice(0, -1).join(', ')} and ${settings[settings.length - 1]}` : settings[0];
   return [
-    `Texts (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${versions.length ? `; model version reported by the API: ${versions.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
+    `Texts (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
     run.snapshot.prompt.outputMode === 'structured'
       ? `The model was required to return the fields listed in the codebook as JSON conforming to a schema (structured outputs)${run.snapshot.prompt.includeRationale ? ', preceded by a brief rationale' : ''}.`
       : 'The model returned free-text responses.',
-    reps > 1 ? `Each text was annotated ${reps} times; categorical labels were aggregated by majority vote and numeric labels by the mean.` : '',
+    reps > 1 ? `Each text was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.` : '',
     failed
       ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} texts without a label` : ''}.`
-      : '',
-    nFallback
-      ? `For ${nFallback.toLocaleString('en-US')} request${nFallback === 1 ? '' : 's'}, ${m.model} declined and a fallback model (${meta.model.fallback_models.join(', ') || 'not reported'}) answered instead; these annotations are included.`
       : '',
     `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${cached ? ' with prompt caching' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
   ]
@@ -338,7 +330,6 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| Texts with a usable annotation | ${meta.corpus.n_texts_with_usable_labels} of ${meta.corpus.n_texts_in_run} |`,
     `| Annotations per text | ${meta.options.replicates_per_text} |`,
     `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed} |`,
-    ...(meta.requests.answered_by_fallback_model ? [`| Answered by a fallback model | ${meta.requests.answered_by_fallback_model} (${meta.model.fallback_models.join(', ')}) |`] : []),
     `| Annotation period | ${meta.requests.first_requested_at ?? '—'} to ${meta.requests.last_completed_at ?? '—'} |`,
     `| Prompt version / hash | v${meta.prompt.version} / \`${meta.prompt.sha256_prefix}\` |`,
     '',
@@ -353,7 +344,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   lines.push(
     '## Methods text (draft)',
     '',
-    '> ' + methodsParagraph(run, d.results.filter((r) => r.runId === run.id), meta),
+    '> ' + methodsParagraph(run, meta),
     '',
     'Edit as needed; check every detail against `metadata.json`.',
     '',

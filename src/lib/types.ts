@@ -29,8 +29,6 @@ export interface ModelSettings {
   /** null = not sent. */
   temperature: number | null;
   maxOutputTokens: number;
-  /** Anthropic: let the API re-run a refused request on a fallback model (recorded per result). */
-  refusalFallback: boolean;
 }
 
 export interface RunOptions {
@@ -149,8 +147,6 @@ export interface Result {
   responseId: string;
   modelReported: string;
   stopReason: string;
-  /** Non-empty when a refusal fallback model produced this result. */
-  fallback?: string;
 }
 
 /** Heavy per-result data, loaded on demand. */
@@ -170,8 +166,6 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   reasoningSummary: false,
   temperature: null,
   maxOutputTokens: 16000,
-  // Off: every label must come from the chosen model; a refused text is recorded as failed.
-  refusalFallback: false,
 };
 
 export const DEFAULT_RUN_OPTIONS: RunOptions = {

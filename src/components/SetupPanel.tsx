@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceholders, uniqueKey } from '../lib/prompt';
-import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
+import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
@@ -271,18 +271,6 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
                 ? 'Current Claude models do not accept a temperature setting, so none is sent.'
                 : 'Leave temperature empty unless needed: many reasoning models reject anything but their default.'}
             </div>
-            {m.provider === 'anthropic' && (
-              <label className="check" style={{ marginTop: 12 }}>
-                <input type="checkbox" checked={m.refusalFallback} onChange={(e) => updateStudy((s) => void (s.model.refusalFallback = e.target.checked))} />
-                <span>
-                  Refusal fallback
-                  <div className="hint">
-                    If a safety filter declines a text, retry it on a fallback model. Flagged per result; never used in batch runs
-                    {!FALLBACK_MODELS.includes(m.model) && m.model ? '; not available for this model' : ''}.
-                  </div>
-                </span>
-              </label>
-            )}
           </div>
         </details>
       </Section>
@@ -377,7 +365,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             />
           </div>
         </div>
-        <div className="hint tight">{o.replicates > 1 ? `Each text is annotated ${o.replicates}×; results show the majority (or mean) and how consistent the repeats were.` : 'Use 2 or more to measure how consistent the model is.'}</div>
+        <div className="hint tight">{o.replicates > 1 ? `Each text is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}` : 'Use 2 or more to measure how consistent the model is.'}</div>
 
         <label className="check" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={o.caching} onChange={(e) => updateStudy((s) => void (s.options.caching = e.target.checked))} />

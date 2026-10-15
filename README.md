@@ -45,5 +45,5 @@ The app is a static site (Vite + React + TypeScript) and uses the official `@ant
 - Claude models always run with (adaptive) thinking; effort controls how much they reason.
 - Effort is always set explicitly (it starts at medium), because providers' defaults differ between models and can change. Runs made before this was the case are recorded as "model default". Models without an effort setting show "Not supported" and nothing is sent.
 - Current Claude models don't accept a temperature setting, so none is sent or recorded for them.
-- Refusal fallback is off by default, so every label comes from the chosen model and a refused text is recorded as failed. It can be switched on under *Sampling & limits* (Anthropic models that support it): a refused request is then re-run on a fallback model, and the answering model is recorded per result and flagged. Batch runs never use fallbacks.
+- Every label comes from the chosen model: a text the model declines is recorded as failed (stop reason "refusal"), never re-run on another model.
 - When iterating on prompts against human labels, keep a held-out set for the final agreement estimate, so prompt selection doesn't inflate it.

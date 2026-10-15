@@ -98,7 +98,6 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       provider: run.snapshot.model.provider,
       model_requested: run.snapshot.model.model,
       model_reported: r.modelReported,
-      refusal_fallback: r.fallback ?? '',
       doc_id: doc?.docId ?? `(deleted ${r.docId})`,
       replicate: r.replicate,
       status: r.status,

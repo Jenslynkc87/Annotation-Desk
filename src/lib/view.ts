@@ -1,5 +1,5 @@
 // Derived views over results: which result(s) to show per text, and aggregated values.
-import { aggregate } from './metrics';
+import { aggregate, type Aggregation } from './metrics';
 import { outputFields } from './prompt';
 import type { Doc, PromptSpec, Result, Run } from './types';
 
@@ -14,9 +14,10 @@ export interface DocView {
   status: 'none' | 'ok' | 'error' | 'partial';
 }
 
-export function isNumericField(prompt: PromptSpec, field: string): boolean {
-  const v = prompt.variables.find((x) => x.name === field);
-  return !!v && (v.type === 'number' || v.type === 'ordinal');
+/** How replicates of a field are combined: median for ordinal scales, mean for numbers, majority otherwise. */
+export function aggregationFor(prompt: PromptSpec, field: string): Aggregation {
+  const t = prompt.variables.find((x) => x.name === field)?.type;
+  return t === 'ordinal' ? 'median' : t === 'number' ? 'mean' : 'majority';
 }
 
 export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filter: RunFilter): Map<string, DocView> {
@@ -43,7 +44,7 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
       const ok = reps.filter((r) => r.status === 'ok');
       for (const f of outputFields(chosenRun.snapshot.prompt)) {
         const vals = ok.map((r) => r.values[f] ?? '');
-        values[f] = aggregate(vals, isNumericField(chosenRun.snapshot.prompt, f));
+        values[f] = aggregate(vals, aggregationFor(chosenRun.snapshot.prompt, f));
         if (vals.length > 1) consistency[f] = vals.filter((v) => v === values[f]).length / vals.length;
       }
     }

@@ -20,8 +20,6 @@ export interface CallOutcome {
   responseId: string;
   modelReported: string;
   stopReason: string;
-  /** Set when a refused request was answered by a fallback model, e.g. "claude-opus-5-5 → claude-opus-4-8". */
-  fallback: string;
   /** Full provider response object, stored verbatim in the log. */
   response: unknown;
 }

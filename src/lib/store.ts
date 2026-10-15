@@ -375,7 +375,6 @@ function makeResult(run: Run, doc: Doc, replicate: number, requestedAt: string, 
     responseId: outcome?.responseId ?? '',
     modelReported: outcome?.modelReported ?? '',
     stopReason: outcome?.stopReason ?? '',
-    fallback: outcome?.fallback ?? '',
   };
 }
 
@@ -420,8 +419,6 @@ export async function startRun(req: RunRequest): Promise<void> {
 
   const snapshot = await buildSnapshot(st);
   const batch = st.options.batch && !req.forceSync;
-  // The Batches API doesn't accept refusal fallbacks; keep the record faithful to what is sent.
-  if (batch) delete snapshot.requestBase.fallbacks;
   const run: Run = {
     id: uid(),
     studyId: st.id,

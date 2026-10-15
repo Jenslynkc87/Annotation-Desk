@@ -132,7 +132,6 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
         {showRep && <span className="badge">Annotation {r.replicate}</span>}
         {r.status !== 'ok' && <span className="badge err">Error</span>}
         {r.parseError && <span className="badge warn">{r.parseError}</span>}
-        {r.fallback && <span className="badge warn" title="A safety filter declined the request and a fallback model answered">Fallback: {r.fallback}</span>}
         <span className="hint" style={{ marginLeft: 'auto' }}>
           {fmtDateTime(r.completedAt)}
           {r.latencyMs !== null && ` · ${(r.latencyMs / 1000).toFixed(1)} s`}

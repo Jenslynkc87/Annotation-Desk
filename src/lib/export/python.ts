@@ -189,13 +189,8 @@ def call_model(client, body):
         body = dict(body)
         # Parameters the SDK has no argument for (e.g. temperature) are sent unchanged in the request body.
         extra = {k: body.pop(k) for k in ("temperature",) if k in body}
-        if "fallbacks" in body:
-            # Server-side refusal fallback (beta): a refused request is re-run on a fallback model.
-            with client.beta.messages.stream(**body, betas=["server-side-fallback-2026-07-01"], extra_body=extra or None) as stream:
-                msg = stream.get_final_message()
-        else:
-            with client.messages.stream(**body, extra_body=extra or None) as stream:
-                msg = stream.get_final_message()
+        with client.messages.stream(**body, extra_body=extra or None) as stream:
+            msg = stream.get_final_message()
         text = "".join(b.text for b in msg.content if b.type == "text")
         thinking = "\\n\\n".join(b.thinking for b in msg.content if b.type == "thinking" and b.thinking)
         u = msg.usage
@@ -250,9 +245,17 @@ def as_text(v):
 
 
 def parse_output(text):
-    if OUTPUT_SCHEMA is None:
-        return {"response": text.strip()}, ""
     cleaned = re.sub(r"^\`\`\`(?:json)?\\s*|\\s*\`\`\`$", "", text.strip())
+    if OUTPUT_SCHEMA is None:
+        # As in Annotation Desk: an answer containing JSON that can't be read counts as failed.
+        if "{" in text:
+            try:
+                readable = isinstance(json.loads(cleaned), dict)
+            except json.JSONDecodeError:
+                readable = False
+            if not readable:
+                return {"response": text.strip()}, "Answer contains JSON that could not be read"
+        return {"response": text.strip()}, ""
     try:
         obj = json.loads(cleaned)
     except json.JSONDecodeError:

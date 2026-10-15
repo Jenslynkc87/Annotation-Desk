@@ -39,10 +39,6 @@ export function thinkingLabel(model: string, summary: boolean): string {
   return summary ? 'adaptive (on), summary recorded' : 'adaptive (on)';
 }
 
-/** Models that accept the server-side refusal fallback (`fallbacks: "default"`). */
-export const FALLBACK_MODELS = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5'];
-const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
-
 export const FALLBACK_ANTHROPIC_MODELS: ModelInfo[] = [
   { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', description: "Anthropic's most capable model, for the hardest reasoning; also the most expensive." },
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', description: "Anthropic's flagship for demanding, nuanced work; a strong default for annotation." },
@@ -60,18 +56,10 @@ function supported(node: unknown): boolean | undefined {
 function toOutcome(msg: Anthropic.Message): CallOutcome {
   let text = '';
   let thinking = '';
-  const switches: string[] = [];
   for (const block of msg.content as unknown as Array<Record<string, unknown> & { type: string }>) {
     if (block.type === 'text') text += block.text as string;
     else if (block.type === 'thinking') thinking += (thinking ? '\n\n' : '') + (block.thinking as string);
-    else if (block.type === 'fallback') {
-      const from = (block.from as { model?: string } | undefined)?.model ?? '?';
-      const to = (block.to as { model?: string } | undefined)?.model ?? '?';
-      switches.push(`${from} → ${to}`);
-    }
   }
-  const iterations = (msg.usage as unknown as { iterations?: { type?: string }[] }).iterations ?? [];
-  if (!switches.length && iterations.some((i) => i.type === 'fallback_message')) switches.push(`served by ${msg.model}`);
   const u = msg.usage;
   let stop = msg.stop_reason ?? '';
   const details = (msg as unknown as { stop_details?: { category?: string | null } | null }).stop_details;
@@ -89,7 +77,6 @@ function toOutcome(msg: Anthropic.Message): CallOutcome {
     responseId: msg.id,
     modelReported: msg.model,
     stopReason: stop,
-    fallback: switches.join('; '),
     response: msg,
   };
 }
@@ -144,7 +131,6 @@ export const anthropicAdapter: ProviderAdapter = {
     if (outputSchema) outputConfig.format = { type: 'json_schema', schema: outputSchema };
     if (Object.keys(outputConfig).length) body.output_config = outputConfig;
     if (model.temperature !== null && !rejectsTemperature(model.model)) body.temperature = model.temperature;
-    if (model.refusalFallback && FALLBACK_MODELS.includes(model.model)) body.fallbacks = 'default';
     return body;
   },
 
@@ -163,22 +149,15 @@ export const anthropicAdapter: ProviderAdapter = {
   async send(apiKey, base, part, signal) {
     const params = { ...base, ...part };
     // Streaming avoids HTTP timeouts on long thinking; we only keep the final message.
-    if ('fallbacks' in params) {
-      const beta = { ...params, betas: [FALLBACK_BETA] } as unknown as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming;
-      const msg = await client(apiKey).beta.messages.stream(beta, { signal }).finalMessage();
-      return toOutcome(msg as unknown as Anthropic.Message);
-    }
     const msg = await client(apiKey).messages.stream(params as unknown as Anthropic.MessageCreateParamsNonStreaming, { signal }).finalMessage();
     return toOutcome(msg);
   },
 
   async submitBatch(apiKey, base, items) {
-    // The Batches API rejects `fallbacks`; batch requests run on the requested model only.
-    const { fallbacks: _fallbacks, ...batchBase } = base;
     const batch = await client(apiKey).messages.batches.create({
       requests: items.map((it) => ({
         custom_id: it.customId,
-        params: { ...batchBase, ...it.part } as unknown as Anthropic.MessageCreateParamsNonStreaming,
+        params: { ...base, ...it.part } as unknown as Anthropic.MessageCreateParamsNonStreaming,
       })),
     });
     return { batchId: batch.id };

@@ -81,7 +81,6 @@ function toOutcome(r: ResponseLike): CallOutcome {
     responseId: r.id,
     modelReported: r.model,
     stopReason: stop,
-    fallback: '',
     response: r,
   };
 }
