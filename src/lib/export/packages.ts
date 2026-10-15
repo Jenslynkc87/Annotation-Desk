@@ -33,6 +33,7 @@ const EXCEL_CELL_MAX = 32000;
 function clipRows(rows: Row[]): Row[] {
   // Drop carriage returns (Windows line endings) so Excel doesn't show them as "_x000d_".
   const clean = (v: Row[string]) => {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null; // NaN would make Excel report a corrupt file
     if (typeof v !== 'string') return v;
     const t = v.replace(/\r\n?/g, '\n');
     return t.length > EXCEL_CELL_MAX ? t.slice(0, EXCEL_CELL_MAX) + ' …[truncated]' : t;
@@ -41,13 +42,31 @@ function clipRows(rows: Row[]): Row[] {
 }
 
 export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {
-  const XLSX = await import('xlsx');
-  const wb = XLSX.utils.book_new();
+  const ExcelJS = (await import('exceljs')).default;
+  const wb = new ExcelJS.Workbook();
   const add = (name: string, rows: Row[]) => {
-    const ws = XLSX.utils.json_to_sheet(clipRows(rows.length ? rows : [{ note: 'No data' }]));
-    const cols = Object.keys(rows[0] ?? { note: '' });
-    ws['!cols'] = cols.map((c) => ({ wch: c === 'text' || c === 'rationale' ? 60 : Math.min(40, Math.max(10, c.length + 2)) }));
-    XLSX.utils.book_append_sheet(wb, ws, name);
+    const data = clipRows(rows.length ? rows : [{ note: 'No data' }]);
+    const cols = [...new Set(data.flatMap((r) => Object.keys(r)))];
+    const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', xSplit: cols[0] === 'doc_id' || cols[0] === 'setting' ? 1 : 0, ySplit: 1 }] });
+    ws.columns = cols.map((c) => {
+      const long = c === 'text' || c === 'response' || c === 'value';
+      const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
+      return { header: c, key: c, width: long ? 40 : prose ? 55 : Math.min(32, Math.max(9, c.length + 3)) };
+    });
+    ws.addRows(data.map((r) => cols.map((c) => r[c] ?? null)));
+    const head = ws.getRow(1);
+    head.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2F4B6E' } };
+    head.alignment = { vertical: 'middle' };
+    head.height = 22;
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: cols.length } };
+    // Wrap short prose columns; leave whole-article text and raw JSON on one line so rows stay compact.
+    cols.forEach((c, i) => {
+      const col = ws.getColumn(i + 1);
+      const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
+      col.alignment = { vertical: 'top', wrapText: prose };
+      if (typeof data[0]?.[c] === 'number') col.alignment = { vertical: 'top', horizontal: 'center' };
+    });
   };
   add('Results', resultsWide(run, d.docs, d.runs, d.results, opts));
   add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }));
@@ -55,7 +74,7 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
   if (agr.length) add('Agreement', agreementRows(agr, run.number));
   add('Settings', settingsRows(d.study, run));
   add('All runs', runSummaryRows(d.runs, d.results));
-  const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 

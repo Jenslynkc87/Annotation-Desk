@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.134.0",
+    "exceljs": "^4.4.0",
     "idb": "^8.0.4",
     "jszip": "^3.10.2",
     "mammoth": "^1.13.0",

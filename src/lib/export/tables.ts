@@ -34,9 +34,21 @@ export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
 }
 
 /** Free-text runs that answered with JSON get one extra column per value; the raw response column stays. */
-function jsonColumns(run: Run, response: string | undefined): Record<string, string> {
+function jsonColumns(run: Run, response: string | undefined): Row {
   if (run.snapshot.prompt.outputMode !== 'text') return {};
-  return flattenJsonResponse(response) ?? {};
+  const flat = flattenJsonResponse(response) ?? {};
+  return Object.fromEntries(Object.entries(flat).map(([k, v]) => [k, numify(v)]));
+}
+
+/** Numbers as numbers (so Excel can sort and sum them); anything else unchanged. */
+function numify(v: string | undefined): string | number {
+  if (v === undefined) return '';
+  return /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : v;
+}
+
+function isNumericVar(run: Run, f: string): boolean {
+  const t = run.snapshot.prompt.variables.find((x) => x.name === f)?.type;
+  return t === 'number' || t === 'ordinal';
 }
 
 /** One row per request (text × replicate). */
@@ -67,7 +79,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       replicate: r.replicate,
       status: r.status,
     };
-    for (const f of outputFields(run.snapshot.prompt)) row[f] = r.values[f] ?? '';
+    for (const f of outputFields(run.snapshot.prompt)) row[f] = isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
     Object.assign(row, jsonColumns(run, r.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale) row.rationale = r.rationale;
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
@@ -103,7 +115,7 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
     const row: Row = { doc_id: d.docId };
     if (opts.text) row.text = d.text;
     for (const f of fields) {
-      row[f] = v.values[f] ?? '';
+      row[f] = isNumericVar(run, f) ? numify(v.values[f]) : (v.values[f] ?? '');
       if (reps > 1) row[`${f}_agreement_across_runs`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
     }
     Object.assign(row, jsonColumns(run, v.values[TEXT_RESPONSE_KEY]));
