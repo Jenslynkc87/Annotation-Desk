@@ -1,0 +1,102 @@
+import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import type { Doc, Result, ResultLog, Run, Study } from './types';
+
+interface DeskDB extends DBSchema {
+  studies: { key: string; value: Study };
+  docs: { key: string; value: Doc; indexes: { byStudy: string } };
+  runs: { key: string; value: Run; indexes: { byStudy: string } };
+  results: { key: string; value: Result; indexes: { byStudy: string; byRun: string } };
+  logs: { key: string; value: ResultLog; indexes: { byStudy: string; byRun: string } };
+}
+
+let dbPromise: Promise<IDBPDatabase<DeskDB>> | null = null;
+
+export function db(): Promise<IDBPDatabase<DeskDB>> {
+  dbPromise ??= openDB<DeskDB>('annotation-desk', 1, {
+    upgrade(d) {
+      d.createObjectStore('studies', { keyPath: 'id' });
+      d.createObjectStore('docs', { keyPath: 'id' }).createIndex('byStudy', 'studyId');
+      d.createObjectStore('runs', { keyPath: 'id' }).createIndex('byStudy', 'studyId');
+      const results = d.createObjectStore('results', { keyPath: 'id' });
+      results.createIndex('byStudy', 'studyId');
+      results.createIndex('byRun', 'runId');
+      const logs = d.createObjectStore('logs', { keyPath: 'id' });
+      logs.createIndex('byStudy', 'studyId');
+      logs.createIndex('byRun', 'runId');
+    },
+  });
+  return dbPromise;
+}
+
+export async function listStudies(): Promise<Study[]> {
+  const all = await (await db()).getAll('studies');
+  return all.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export async function putStudy(s: Study) {
+  await (await db()).put('studies', s);
+}
+
+export async function loadStudyData(studyId: string) {
+  const d = await db();
+  const [docs, runs, results] = await Promise.all([
+    d.getAllFromIndex('docs', 'byStudy', studyId),
+    d.getAllFromIndex('runs', 'byStudy', studyId),
+    d.getAllFromIndex('results', 'byStudy', studyId),
+  ]);
+  docs.sort((a, b) => a.order - b.order);
+  runs.sort((a, b) => a.number - b.number);
+  return { docs, runs, results };
+}
+
+export async function putDocs(docs: Doc[]) {
+  const tx = (await db()).transaction('docs', 'readwrite');
+  await Promise.all([...docs.map((x) => tx.store.put(x)), tx.done]);
+}
+
+export async function deleteDocs(ids: string[]) {
+  const tx = (await db()).transaction('docs', 'readwrite');
+  await Promise.all([...ids.map((id) => tx.store.delete(id)), tx.done]);
+}
+
+export async function putRun(r: Run) {
+  await (await db()).put('runs', r);
+}
+
+export async function putResult(r: Result, log: ResultLog | null) {
+  const tx = (await db()).transaction(['results', 'logs'], 'readwrite');
+  const ops: Promise<unknown>[] = [tx.objectStore('results').put(r)];
+  if (log) ops.push(tx.objectStore('logs').put(log));
+  await Promise.all([...ops, tx.done]);
+}
+
+export async function getLog(id: string): Promise<ResultLog | undefined> {
+  return (await db()).get('logs', id);
+}
+
+export async function getLogsForRun(runId: string): Promise<ResultLog[]> {
+  return (await db()).getAllFromIndex('logs', 'byRun', runId);
+}
+
+async function deleteByIndex(
+  store: 'docs' | 'runs' | 'results' | 'logs',
+  index: 'byStudy' | 'byRun',
+  key: string,
+) {
+  // Untyped view: the typed schema can't express "any store that has this index".
+  const d = (await db()) as unknown as IDBPDatabase;
+  const keys = await d.getAllKeysFromIndex(store, index, key);
+  const tx = d.transaction(store, 'readwrite');
+  await Promise.all([...keys.map((k) => tx.store.delete(k)), tx.done]);
+}
+
+export async function deleteRun(runId: string) {
+  await deleteByIndex('results', 'byRun', runId);
+  await deleteByIndex('logs', 'byRun', runId);
+  await (await db()).delete('runs', runId);
+}
+
+export async function deleteStudy(studyId: string) {
+  for (const s of ['docs', 'runs', 'results', 'logs'] as const) await deleteByIndex(s, 'byStudy', studyId);
+  await (await db()).delete('studies', studyId);
+}

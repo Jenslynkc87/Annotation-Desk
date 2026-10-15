@@ -1,0 +1,87 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+
+export function Modal({ title, onClose, children, footer }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
+  useEscape(onClose);
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal" role="dialog" aria-modal="true">
+        <div className="modal-head">
+          <h3>{title}</h3>
+          <button className="btn ghost small close" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-foot">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+export function Drawer({ title, onClose, children, actions }: { title: ReactNode; onClose: () => void; children: ReactNode; actions?: ReactNode }) {
+  useEscape(onClose);
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <aside className="drawer" role="dialog" aria-modal="true">
+        <div className="drawer-head">
+          <h3>{title}</h3>
+          <div className="row" style={{ marginLeft: 'auto' }}>
+            {actions}
+            <button className="btn ghost small" onClick={onClose} aria-label="Close">✕</button>
+          </div>
+        </div>
+        <div className="drawer-body">{children}</div>
+      </aside>
+    </div>
+  );
+}
+
+export function useEscape(fn: () => void) {
+  const ref = useRef(fn);
+  ref.current = fn;
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => e.key === 'Escape' && ref.current();
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, []);
+}
+
+export function Menu({ button, children, align = 'right' }: { button: (open: () => void) => ReactNode; children: (close: () => void) => ReactNode; align?: 'left' | 'right' }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+  return (
+    <div className="menu" ref={ref}>
+      {button(() => setOpen((o) => !o))}
+      {open && <div className={`menu-pop ${align === 'left' ? 'left' : ''}`}>{children(() => setOpen(false))}</div>}
+    </div>
+  );
+}
+
+export function Icon({ name, size = 16 }: { name: 'upload' | 'play' | 'download' | 'key' | 'check' | 'refresh' | 'plus' | 'trash' | 'flask' | 'stop' | 'chevron'; size?: number }) {
+  const p = {
+    upload: 'M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3',
+    play: 'M7 5v14l11-7z',
+    download: 'M12 4v12m0 0-4.5-4.5M12 16l4.5-4.5M4 17v1a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-1',
+    key: 'M15 7a4 4 0 1 1-3.9 5H9v2H7v2H4v-3l6.1-6.1A4 4 0 0 1 15 7zm1 1.5h.01',
+    check: 'M5 12.5l4.5 4.5L19 7.5',
+    refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+    plus: 'M12 5v14M5 12h14',
+    trash: 'M5 7h14M10 7V5h4v2m-7 0 1 12h8l1-12',
+    flask: 'M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3',
+    stop: 'M7 7h10v10H7z',
+    chevron: 'm6 9 6 6 6-6',
+  }[name];
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={p} />
+    </svg>
+  );
+}
+
+export function Help({ children }: { children: ReactNode }) {
+  return <div className="hint">{children}</div>;
+}

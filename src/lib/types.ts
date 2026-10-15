@@ -1,0 +1,186 @@
+// Core data model. Everything here is persisted in IndexedDB and exported as-is
+// in the research repository, so field names are part of the public file format.
+
+export type ProviderId = 'anthropic' | 'openai';
+
+export type VariableType = 'category' | 'ordinal' | 'number' | 'boolean' | 'text';
+
+/** One annotation field the model must return (a codebook entry). */
+export interface Variable {
+  name: string; // machine name, used as JSON key and column name
+  type: VariableType;
+  /** Allowed values for category / ordinal (ordinal values are integers). */
+  values: string[];
+  description: string;
+}
+
+export type OutputMode = 'structured' | 'text';
+
+export interface ModelSettings {
+  provider: ProviderId;
+  model: string;
+  /** '' = provider/model default (parameter not sent). */
+  effort: string;
+  /** Anthropic only: 'default' omits the thinking parameter. */
+  thinking: 'default' | 'adaptive' | 'disabled';
+  /** Ask the provider to return a readable reasoning summary (stored per result). */
+  reasoningSummary: boolean;
+  /** null = not sent. */
+  temperature: number | null;
+  maxOutputTokens: number;
+  /** Anthropic: let the API re-run a refused request on a fallback model (recorded per result). */
+  refusalFallback: boolean;
+}
+
+export interface RunOptions {
+  caching: boolean;
+  /** Anthropic cache lifetime. */
+  cacheTtl: '5m' | '1h';
+  batch: boolean;
+  replicates: number;
+  concurrency: number;
+}
+
+export interface PromptSpec {
+  system: string;
+  /** User message template; {{text}}, {{id}} and {{meta.<column>}} are substituted. */
+  userTemplate: string;
+  outputMode: OutputMode;
+  variables: Variable[];
+  /** Add a free-text "rationale" field to structured output. */
+  includeRationale: boolean;
+}
+
+export interface Study {
+  id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+  model: ModelSettings;
+  options: RunOptions;
+  prompt: PromptSpec;
+}
+
+export interface Doc {
+  id: string; // internal key
+  studyId: string;
+  /** User-facing identifier (from an ID column or file name). Unique within a study. */
+  docId: string;
+  text: string;
+  /** Metadata columns, including any gold/human labels. */
+  meta: Record<string, string>;
+  source: string; // file name or "pasted"
+  order: number;
+  addedAt: string;
+}
+
+export type RunStatus = 'running' | 'submitted' | 'completed' | 'cancelled' | 'failed';
+
+/** Everything needed to reproduce a run, frozen when the run starts. */
+export interface RunSnapshot {
+  appVersion: string;
+  model: ModelSettings;
+  options: RunOptions;
+  prompt: PromptSpec;
+  promptVersion: number;
+  promptHash: string;
+  /** JSON schema sent for structured output (null in text mode). */
+  outputSchema: Record<string, unknown> | null;
+  /** Request body without the per-text message: the part shared by every request. */
+  requestBase: Record<string, unknown>;
+}
+
+export interface Run {
+  id: string;
+  studyId: string;
+  number: number; // 1, 2, 3 … within the study
+  label: string;
+  createdAt: string;
+  finishedAt: string | null;
+  mode: 'sync' | 'batch';
+  scope: string; // human-readable description, e.g. "Random sample of 10"
+  docIds: string[]; // internal doc ids included
+  status: RunStatus;
+  snapshot: RunSnapshot;
+  batch: null | {
+    provider: ProviderId;
+    batchId: string;
+    inputFileId?: string;
+    /** custom_id -> [docInternalId, replicate] */
+    map: Record<string, [string, number]>;
+    lastStatus: string;
+    lastCheckedAt: string | null;
+  };
+  error: string | null;
+}
+
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}
+
+export interface Result {
+  id: string; // `${runId}:${docId}:${replicate}`
+  runId: string;
+  studyId: string;
+  docId: string; // internal doc id
+  replicate: number; // 1-based
+  status: 'ok' | 'error';
+  /** Parsed field values (structured mode) or { response } (text mode). */
+  values: Record<string, string>;
+  rationale: string;
+  reasoningSummary: string;
+  rawText: string;
+  parseError: string | null;
+  error: string | null;
+  usage: Usage;
+  latencyMs: number | null;
+  requestedAt: string;
+  completedAt: string;
+  responseId: string;
+  modelReported: string;
+  stopReason: string;
+  /** Non-empty when a refusal fallback model produced this result. */
+  fallback?: string;
+}
+
+/** Heavy per-result data, loaded on demand. */
+export interface ResultLog {
+  id: string; // same as Result.id
+  runId: string;
+  studyId: string;
+  /** The per-text part of the request (messages / input). Combine with run.snapshot.requestBase. */
+  requestPart: Record<string, unknown>;
+  response: unknown;
+}
+
+export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
+  provider: 'anthropic',
+  model: 'claude-opus-5-5',
+  effort: '',
+  thinking: 'default',
+  reasoningSummary: false,
+  temperature: null,
+  maxOutputTokens: 16000,
+  refusalFallback: true,
+};
+
+export const DEFAULT_RUN_OPTIONS: RunOptions = {
+  caching: true,
+  cacheTtl: '5m',
+  batch: false,
+  replicates: 1,
+  concurrency: 4,
+};
+
+export const DEFAULT_PROMPT: PromptSpec = {
+  system: '',
+  userTemplate: '{{text}}',
+  outputMode: 'structured',
+  variables: [{ name: 'label', type: 'text', values: [], description: '' }],
+  includeRationale: true,
+};
