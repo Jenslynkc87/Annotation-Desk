@@ -32,7 +32,12 @@ export function CorpusImport() {
     else toast(r.kind === 'error' ? `${r.name}: ${r.error}` : 'Labels must be a table (CSV, TSV, XLSX, JSON or JSONL).', 'error');
   };
 
-  const handleFiles = async (files: File[]) => {
+  const ZIP_NOTE = 'Extract the zip first, then drop the extracted files (or the folder’s files) here.';
+
+  const handleFiles = async (all: File[]) => {
+    const zips = all.filter((f) => /\.zip$/i.test(f.name));
+    const files = all.filter((f) => !/\.zip$/i.test(f.name));
+    if (zips.length) toast(`${zips.length === 1 ? zips[0].name : `${zips.length} zip files`} can’t be read directly. ${ZIP_NOTE}`, 'error');
     if (!files.length) return;
     const texts: NewDoc[] = [];
     const newTables: ParsedTable[] = [];
@@ -65,7 +70,9 @@ export function CorpusImport() {
         onDrop={(e) => {
           e.preventDefault();
           setOver(false);
-          void handleFiles([...e.dataTransfer.files]);
+          const dropped = [...e.dataTransfer.files];
+          if (!dropped.length) toast(`Nothing arrived. Files dragged from inside a zip can’t be read. ${ZIP_NOTE}`, 'error');
+          else void handleFiles(dropped);
         }}
         role="button"
         tabIndex={0}
@@ -97,8 +104,8 @@ export function CorpusImport() {
           Paste text…
         </button>
         {nDocs > 0 && (
-          <button className="btn small" onClick={() => labelsRef.current?.click()} title="Add human labels (an answer key) to the texts already here, matched by file name or ID">
-            Add labels from a spreadsheet…
+          <button className="btn small" onClick={() => labelsRef.current?.click()} title="Add human labels (an answer key) or metadata (era, journal, …) to the texts already here, matched by file name or ID">
+            Add labels or metadata from a spreadsheet…
           </button>
         )}
       </div>

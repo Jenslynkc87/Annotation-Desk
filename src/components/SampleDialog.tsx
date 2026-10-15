@@ -86,7 +86,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
               </label>
             ))
           ) : (
-            <span className="hint">No grouping columns yet (add era, journal, … with Add labels from a spreadsheet).</span>
+            <span className="hint">No grouping columns yet (add era, journal, … with Add labels or metadata from a spreadsheet).</span>
           )}
         </div>
       </div>

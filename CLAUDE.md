@@ -33,7 +33,3 @@ A browser-only research workbench for LLM-assisted text annotation (Anthropic + 
 
 ## Publishing
 The site deploys from the repository's default branch, `claude/gifted-bell-is85me`. Work goes to the session's own branch; only when the owner says "publish", fast-forward the default branch to it (`git push origin HEAD:claude/gifted-bell-is85me` after checking it is a fast-forward). Batch changes; don't publish unasked. No need to watch the deploy: GitHub emails the owner if it fails.
-
-## Open items
-- The drop area silently does nothing when files are dragged from inside a zip (empty drop) or a .zip is dropped: show a short message ("extract the zip first").
-- Rename the button "Add labels from a spreadsheet…" to "Add labels or metadata from a spreadsheet…" (the owner looked for "metadata").
