@@ -271,20 +271,24 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             placeholder={'Your instructions, e.g.:\n\nClassify the sentiment of the review as positive, negative or neutral.\n- Mixed reviews are neutral.\n- Sarcasm counts as negative.'}
             onChange={(e) => updateStudy((s) => void (s.prompt.userTemplate = e.target.value))}
           />
-          <div className="hint">
-            Each text is added after your prompt, between <code>{'<text>'}</code> tags. To put it somewhere else, write <code>{'{{text}}'}</code> where it
-            should go{metaColumns.length > 0 && (
-              <>
-                ; <code>{`{{meta.${metaColumns[0]}}}`}</code> inserts a metadata column
-              </>
-            )}
-            .
-          </div>
+          <div className="hint">Paste your prompt here. Each text from your corpus is added after it automatically.</div>
           {unknownPlaceholders.length > 0 && <div className="hint warn">Unknown placeholder(s): {unknownPlaceholders.join(', ')} (sent as written).</div>}
         </div>
         <details className="more" open={!!p.system.trim()}>
-          <summary>System prompt (optional)</summary>
+          <summary>Advanced</summary>
           <div className="more-body">
+            <p className="hint" style={{ marginTop: 0 }}>
+              The texts are added between <code>{'<text>'}</code> tags. To place a text inside your prompt instead (e.g. before a final instruction),
+              write <code>{'{{text}}'}</code> at that spot{metaColumns.length > 0 && (
+                <>
+                  ; <code>{`{{meta.${metaColumns[0]}}}`}</code> inserts a metadata column
+                </>
+              )}
+              .
+            </p>
+            <label htmlFor="system" className="label" style={{ display: 'block', margin: '10px 0 5px' }}>
+              System prompt (optional)
+            </label>
             <textarea
               id="system"
               className="textarea"

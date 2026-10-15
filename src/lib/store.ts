@@ -129,7 +129,7 @@ export function newStudy(name = 'Untitled study'): Study {
 }
 
 export async function init() {
-  let studies = await dbApi.listStudies();
+  let studies = await migrateStudies(await dbApi.listStudies());
   if (!studies.length) {
     const s = newStudy('My first study');
     await dbApi.putStudy(s);
@@ -147,8 +147,24 @@ export async function init() {
   startBatchPolling();
 }
 
+/**
+ * Studies created before the single prompt box had the instructions in `system` and the
+ * placeholder "{{text}}" as the prompt. Move the instructions into the prompt box.
+ */
+async function migrateStudies(studies: Study[]): Promise<Study[]> {
+  for (const s of studies) {
+    const p = s.prompt;
+    if (p.userTemplate.trim() === '{{text}}') {
+      p.userTemplate = p.system;
+      p.system = '';
+      await dbApi.putStudy(s);
+    }
+  }
+  return studies;
+}
+
 export async function refreshStudies() {
-  set({ studies: await dbApi.listStudies() });
+  set({ studies: await migrateStudies(await dbApi.listStudies()) });
 }
 
 export async function selectStudy(id: string) {
