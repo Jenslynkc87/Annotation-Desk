@@ -21,6 +21,7 @@ A browser-only research workbench for LLM-assisted text annotation (Anthropic + 
 ## Decisions worth remembering
 - One Prompt box. Each text is appended inside `<text>` tags (or placed at `{{text}}`). The fixed part before it is what gets cached.
 - Effort has no "Default" option: it starts at medium and is always sent (except for models without an effort setting). Temperature is not sent to Claude models that reject it.
+- Refusal fallback is off by default: a label from another model is not a useful result.
 - Plain-text runs that return JSON are split into columns in Excel/CSV. Each reasoning column goes after its scores.
 - Excel Results sheet shows the file name (not `doc_id`) and has no text column. CSVs keep `doc_id` as the join key.
 - Corpus: about 937 Markdown files extracted from scholarly PDFs. About 15 have lost fi/fl/ff letters and 36 have stray `<mark>` tags. The owner chose to leave them as they are.

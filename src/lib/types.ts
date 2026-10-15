@@ -170,7 +170,8 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   reasoningSummary: false,
   temperature: null,
   maxOutputTokens: 16000,
-  refusalFallback: true,
+  // Off: every label must come from the chosen model; a refused text is recorded as failed.
+  refusalFallback: false,
 };
 
 export const DEFAULT_RUN_OPTIONS: RunOptions = {
