@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
-export function Modal({ title, onClose, children, footer }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
+export function Modal({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   useEscape(onClose);
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true">
+      <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true">
         <div className="modal-head">
           <h3>{title}</h3>
           <button className="btn ghost small close" onClick={onClose} aria-label="Close">✕</button>

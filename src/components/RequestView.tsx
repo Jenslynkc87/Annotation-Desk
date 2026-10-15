@@ -52,7 +52,7 @@ export function RequestView({ request }: { request: Json }) {
       )}
       <div>
         <p className="section-title">Message as the model reads it</p>
-        <pre className="textblock" style={{ maxHeight: 420 }}>{message}</pre>
+        <pre className="textblock message" style={{ maxHeight: 460 }}>{message}</pre>
       </div>
       <div>
         <p className="section-title">Settings sent with it</p>

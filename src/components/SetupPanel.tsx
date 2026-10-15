@@ -388,7 +388,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
       </Section>
 
       {preview && (
-        <Modal title="Request preview (first text)" onClose={() => setPreview(null)}>
+        <Modal title="Request preview (first text)" onClose={() => setPreview(null)} wide>
           <p className="hint" style={{ marginTop: 0 }}>
             This exact body is sent to {adapter.label} for each text. Your API key travels separately in a header and is never stored.
           </p>
