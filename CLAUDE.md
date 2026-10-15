@@ -26,7 +26,7 @@ A browser-only research workbench for LLM-assisted text annotation (Anthropic + 
 - No text chunking (removed on purpose). Anthropic cache lifetime is automatic: 5 min for immediate runs, 1 hour for batches.
 - Plain-text runs that return JSON are split into columns in Excel/CSV. Each explanation column goes after its scores. The owner's JSON fields are named `explanation` (not `reasoning`: Anthropic's `reasoning_extraction` refusals are triggered by JSON fields named reasoning/thinking/trace); `isExplanationKey` in `prompt.ts` accepts both names.
 - Excel Results sheet shows the file name (not `doc_id`) and has no text column. CSVs keep `doc_id` as the join key.
-- Corpus: 3,080 articles (937 Markdown files extracted from scholarly PDFs, the rest .txt), all with unique file names; a metadata file (era, journal, pilot, …) covers every article and is added with "Add labels from a spreadsheet". Of the Markdown files, About 15 have lost fi/fl/ff letters and 36 have stray `<mark>` tags. The owner chose to leave them as they are.
+- Corpus: 3,080 articles (937 Markdown files extracted from scholarly PDFs, the rest .txt), all with unique file names; a metadata file (era, journal, pilot, …) covers every article and is added with "Add labels from a spreadsheet". Of the Markdown files, about 15 have lost fi/fl/ff letters and 36 have stray `<mark>` tags. The owner chose to leave them as they are.
 
 ## Checks before pushing
 `npx tsc --noEmit -p .`, `npx vitest run`, `npx vite build`.
