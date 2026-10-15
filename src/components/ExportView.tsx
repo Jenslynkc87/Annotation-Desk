@@ -67,8 +67,9 @@ export function ExportView() {
           </div>
           <p className="hint">Results for the chosen run, one row per text, plus per-replicate results, agreement, settings and a run overview.</p>
           <label className="check">
-            <input type="checkbox" checked={excelText} onChange={(e) => setExcelText(e.target.checked)} /> Include the texts
+            <input type="checkbox" checked={excelText} onChange={(e) => setExcelText(e.target.checked)} /> Include a text excerpt
           </label>
+          <p className="hint">The first ~32,000 characters of each text (Excel’s cell limit). The research repository has the full texts.</p>
           <ul className="filelist">
             <li>Results · By replicate · Agreement · Settings · All runs</li>
           </ul>

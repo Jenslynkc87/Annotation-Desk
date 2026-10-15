@@ -52,7 +52,9 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
     ws.columns = cols.map((c) => {
       const long = c === 'text' || c === 'response' || c === 'value';
       const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
-      return { header: c, key: c, width: long ? 40 : prose ? 70 : Math.min(32, Math.max(9, c.length + 3)) };
+      // Short columns (file name, scores) are as wide as their longest value, up to a cap.
+      const widest = data.reduce((m, r) => Math.max(m, String(r[c] ?? '').length), 0);
+      return { header: c, key: c, width: long ? 40 : prose ? 70 : Math.min(60, Math.max(9, c.length + 3, widest + 2)) };
     });
     ws.addRows(data.map((r) => cols.map((c) => r[c] ?? null)));
     const head = ws.getRow(1);
