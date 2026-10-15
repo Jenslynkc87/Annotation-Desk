@@ -20,7 +20,7 @@ export function ExportView() {
   const [runId, setRunId] = useState(withResults[withResults.length - 1]?.id ?? '');
   const run = runs.find((r) => r.id === runId);
   const [busy, setBusy] = useState('');
-  const [excelText, setExcelText] = useState(true);
+  const [excelText, setExcelText] = useState(false);
   const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(true);
 

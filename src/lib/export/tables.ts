@@ -259,3 +259,10 @@ export function codebookMarkdown(run: Run): string {
   for (const v of p.variables) lines.push(`| ${esc(v.label?.trim() || v.name)} | ${v.name} | ${v.type} | ${esc(v.values.filter((x) => x.trim()).join(', '))} | ${esc(v.description)} |`);
   return lines.join('\n') + '\n';
 }
+
+/** For the Excel sheet only: doc_id is just the file name minus extension for uploaded files, so show only the file name. CSVs keep doc_id as the join key. */
+export function dropRedundantId(rows: Row[]): Row[] {
+  const stem = (f: unknown) => String(f ?? '').replace(/\.[^./\\]+$/, '');
+  if (!rows.length || !rows.every((r) => 'file' in r && r.doc_id === stem(r.file))) return rows;
+  return rows.map(({ doc_id: _id, ...rest }) => rest);
+}

@@ -13,6 +13,7 @@ import {
   agreementRows,
   codebookMarkdown,
   corpusRows,
+  dropRedundantId,
   resultsLong,
   resultsWide,
   runSummaryRows,
@@ -47,7 +48,7 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
   const add = (name: string, rows: Row[]) => {
     const data = clipRows(rows.length ? rows : [{ note: 'No data' }]);
     const cols = [...new Set(data.flatMap((r) => Object.keys(r)))];
-    const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', xSplit: cols[0] === 'doc_id' || cols[0] === 'setting' ? 1 : 0, ySplit: 1 }] });
+    const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', xSplit: cols[0] === 'doc_id' || cols[0] === 'file' || cols[0] === 'setting' ? 1 : 0, ySplit: 1 }] });
     ws.columns = cols.map((c) => {
       const long = c === 'text' || c === 'response' || c === 'value';
       const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
@@ -68,7 +69,7 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
       if (typeof data[0]?.[c] === 'number') col.alignment = { vertical: 'top', horizontal: 'center' };
     });
   };
-  add('Results', resultsWide(run, d.docs, d.runs, d.results, opts));
+  add('Results', dropRedundantId(resultsWide(run, d.docs, d.runs, d.results, opts)));
   add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }));
   const agr = agreementForRun(run, d.docs, d.runs, d.results);
   if (agr.length) add('Agreement', agreementRows(agr, run.number));
