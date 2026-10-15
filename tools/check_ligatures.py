@@ -15,12 +15,11 @@ length and digit counts look normal. This script counts two signals per file:
              (confict, frst, signifcant, diferent, ofers, ...)
   loose    - loose single letters f/i/l next to <mark> tags, left behind by the same fault
 
-It also counts <mark> tags per file (column mark_tags). pymupdf4llm writes highlights that are
-present in the PDF as <mark>...</mark>, so these are not noise: they are someone's highlighting,
-and a model reading the text sees it. If the highlights are your own, they leak your judgement
-into the model's input; if only some files have them, the corpus is inconsistent.
+It also counts <mark> tags per file (column mark_tags). pymupdf4llm sometimes writes
+<mark>...</mark> around text for reasons not fully identified (they are not your own
+highlights). They are harmless noise for a model, but the count shows how widespread they are.
 
-and reports them per 10,000 characters. Severity bands (calibrated on five articles;
+Files are scored per 10,000 characters. Severity bands (calibrated on five articles;
 treat them as guidance, not a verdict):
     clean     under 1    nothing to worry about
     trace     1-5        a few words; readable
@@ -106,7 +105,7 @@ def main() -> int:
         if counts.get(name):
             print(f"  {name:8s} {counts[name]}")
     with_marks = [r for r in rows if r["mark_tags"]]
-    print(f"\nFiles containing <mark> tags (highlights from the PDF): {len(with_marks)} of {len(rows)}")
+    print(f"\nFiles containing <mark> tags (extractor noise, not highlights): {len(with_marks)} of {len(rows)}")
     for r in sorted(with_marks, key=lambda r: -r["mark_tags"])[:15]:
         print(f"   {r['mark_tags']:5d}  {r['file_stem']}")
     if len(with_marks) > 15:
