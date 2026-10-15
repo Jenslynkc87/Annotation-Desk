@@ -5,6 +5,7 @@ import { startRun, useStore } from '../lib/store';
 import type { Result, ResultLog, Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
+import { RequestView } from './RequestView';
 import { Drawer, Icon } from './ui';
 
 export function DocDrawer({
@@ -203,7 +204,7 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
           ) : (
             <>
               <p className="section-title" style={{ marginTop: 12 }}>Request (shared part + this text)</p>
-              <pre className="textblock mono">{JSON.stringify({ ...run.snapshot.requestBase, ...log.requestPart }, null, 2)}</pre>
+              <RequestView request={{ ...run.snapshot.requestBase, ...log.requestPart }} />
               <p className="section-title" style={{ marginTop: 12 }}>Response</p>
               <pre className="textblock mono">{JSON.stringify(log.response, null, 2)}</pre>
             </>

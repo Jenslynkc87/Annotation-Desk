@@ -5,6 +5,7 @@ import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/o
 import { PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
 import type { ProviderId, Variable, VariableType } from '../lib/types';
+import { RequestView } from './RequestView';
 import { Icon, Modal } from './ui';
 
 const TYPE_LABELS: Record<VariableType, string> = {
@@ -56,7 +57,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const modelsStatus = useStore((s) => s.modelsStatus);
   const modelsError = useStore((s) => s.modelsError);
   const docs = useStore((s) => s.docs);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [customModel, setCustomModel] = useState(false);
 
   const m = study.model;
@@ -92,7 +93,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     const snap = await buildSnapshot(st);
     const doc = getState().docs[0] ?? { docId: 'example', text: '(your text appears here)', meta: {} };
     const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), st.options, st.model.model);
-    setPreview(JSON.stringify({ ...snap.requestBase, ...part }, null, 2));
+    setPreview({ ...snap.requestBase, ...part });
   };
 
   const modelSummary = [m.model || 'no model', m.effort ? `${effortLabel.toLowerCase()} ${m.effort}` : null, m.temperature !== null ? `temp ${m.temperature}` : null]
@@ -391,9 +392,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           <p className="hint" style={{ marginTop: 0 }}>
             This exact body is sent to {adapter.label} for each text. Your API key travels separately in a header and is never stored.
           </p>
-          <pre className="textblock mono" style={{ maxHeight: '60vh' }}>
-            {preview}
-          </pre>
+          <RequestView request={preview} />
         </Modal>
       )}
     </div>
