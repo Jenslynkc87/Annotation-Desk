@@ -20,7 +20,6 @@ export function ExportView() {
   const [runId, setRunId] = useState(withResults[withResults.length - 1]?.id ?? '');
   const run = runs.find((r) => r.id === runId);
   const [busy, setBusy] = useState('');
-  const [excelText, setExcelText] = useState(false);
   const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(true);
 
@@ -66,10 +65,6 @@ export function ExportView() {
             <h2>Excel workbook</h2>
           </div>
           <p className="hint">Results for the chosen run, one row per text, plus per-replicate results, agreement, settings and a run overview.</p>
-          <label className="check">
-            <input type="checkbox" checked={excelText} onChange={(e) => setExcelText(e.target.checked)} /> Include a text excerpt
-          </label>
-          <p className="hint">The first ~32,000 characters of each text (Excel’s cell limit). The research repository has the full texts.</p>
           <ul className="filelist">
             <li>Results · By replicate · Agreement · Settings · All runs</li>
           </ul>
@@ -78,7 +73,7 @@ export function ExportView() {
             disabled={!run || !!busy}
             onClick={() =>
               go('excel', async () => {
-                const blob = await buildExcel(exportData(), run!, { text: excelText, rationale: true });
+                const blob = await buildExcel(exportData(), run!, { text: false, rationale: true });
                 download(`${slug(study.name)}_run${run!.number}_${dateStamp()}.xlsx`, blob);
               })
             }

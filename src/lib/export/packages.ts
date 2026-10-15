@@ -196,7 +196,7 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
 
   const latest = finished[finished.length - 1];
   if (latest) {
-    results.file(`results_${runFolder(latest)}.xlsx`, await buildExcel(d, latest, { text: true, rationale: true }));
+    results.file(`results_${runFolder(latest)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
     scriptFiles(root.folder('scripts')!, d.study, latest, exportedAt);
   }
   root.file('README.md', researchReadme(d, exportedAt, latest, opts));
