@@ -98,8 +98,8 @@ export const openaiAdapter: ProviderAdapter = {
     const body: Record<string, unknown> = {
       model: model.model,
       max_output_tokens: model.maxOutputTokens,
-      // Do not keep responses on OpenAI's side; everything is logged locally instead.
-      store: false,
+      // Whether OpenAI keeps the request in its dashboard logs (its default is to store).
+      store: options.storeInLogs !== false,
     };
     if (system.trim()) body.instructions = system;
     const reasoning: Record<string, unknown> = {};

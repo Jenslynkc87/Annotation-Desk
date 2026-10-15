@@ -373,6 +373,15 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             </div>
           </span>
         </label>
+        {m.provider === 'openai' && (
+          <label className="check" style={{ marginTop: 10 }}>
+            <input type="checkbox" checked={o.storeInLogs !== false} onChange={(e) => updateStudy((s) => void (s.options.storeInLogs = e.target.checked))} />
+            <span>
+              Show requests in OpenAI's logs
+              <div className="hint">Lets you inspect them on platform.openai.com. OpenAI keeps stored requests for a limited time; turn off for confidential texts.</div>
+            </span>
+          </label>
+        )}
         <label className="check" style={{ marginTop: 10 }}>
           <input type="checkbox" checked={o.batch} onChange={(e) => updateStudy((s) => void (s.options.batch = e.target.checked))} />
           <span>

@@ -33,6 +33,8 @@ export interface ModelSettings {
 }
 
 export interface RunOptions {
+  /** OpenAI: keep requests in the OpenAI dashboard logs (the API's default). Undefined = on. */
+  storeInLogs?: boolean;
   caching: boolean;
   /** Anthropic cache lifetime. */
   cacheTtl: '5m' | '1h';

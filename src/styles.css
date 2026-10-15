@@ -292,9 +292,6 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 
 /* ---------- setup panel ---------- */
 .setup-card { overflow: hidden; }
-@media (min-width: 1051px) {
-  .setup-card { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; overscroll-behavior: contain; }
-}
 .setup-section { border-top: 1px solid var(--line); }
 .setup-card > .card-head { margin-bottom: 12px; }
 .setup-section-head {
