@@ -4,7 +4,7 @@ import { getLogsForRun } from '../db';
 import { fmtStat } from '../metrics';
 import { comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
-import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, normalizeLabel } from '../prompt';
+import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel } from '../prompt';
 import { buildDocViews } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
@@ -48,7 +48,7 @@ function clipRows(rows: Row[]): Row[] {
 
 type Workbook = import('exceljs').Workbook;
 
-const isProse = (c: string) => c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning') || c === 'draft_text' || c === 'explanation';
+const isProse = (c: string) => c === 'rationale' || c === 'reasoning_summary' || isExplanationKey(c) || c === 'draft_text';
 
 /** One styled sheet: header row, frozen panes, filters, sensible column widths, numbers as numbers. */
 function addSheet(wb: Workbook, name: string, rows: Row[]) {
@@ -533,7 +533,11 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
   const reasoningOf = (run: Run, values: Record<string, string>, rationale: string, key: string) => {
     const flat = run.snapshot.prompt.outputMode === 'structured' ? values : (flattenJsonResponse(values.response) ?? {});
     const group = key.includes('_') ? key.slice(0, key.lastIndexOf('_')) : '';
-    return flat[`${key}_reasoning`] ?? (group ? flat[`${group}_reasoning`] : undefined) ?? flat.reasoning ?? rationale ?? '';
+    for (const name of ['explanation', 'reasoning']) {
+      const v = flat[`${key}_${name}`] ?? (group ? flat[`${group}_${name}`] : undefined) ?? flat[name];
+      if (v) return v;
+    }
+    return rationale ?? '';
   };
   const firstRationale = (views: typeof viewsA, id: string) => views.get(id)?.results.find((r) => r.status === 'ok')?.rationale ?? '';
   const review = compared.flatMap(({ f, items, all }) =>
@@ -550,8 +554,8 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
         second: numeric ? Number(y) : y,
         difference: diff,
         category,
-        first_reasoning: reasoningOf(runA, viewsA.get(doc.id)!.values, firstRationale(viewsA, doc.id), f.key),
-        second_reasoning: reasoningOf(runB, viewsB.get(doc.id)!.values, firstRationale(viewsB, doc.id), f.key),
+        first_explanation: reasoningOf(runA, viewsA.get(doc.id)!.values, firstRationale(viewsA, doc.id), f.key),
+        second_explanation: reasoningOf(runB, viewsB.get(doc.id)!.values, firstRationale(viewsB, doc.id), f.key),
         judgment: '',
         note: '',
       };

@@ -1,7 +1,7 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
 import { agreement, type Agreement, type Level } from '../metrics';
-import { TEXT_RESPONSE_KEY, flattenJsonResponse, normalizeLabel, outputFields } from '../prompt';
+import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
@@ -42,7 +42,7 @@ function jsonColumns(run: Run, response: string | undefined): Row {
   const flat = flattenJsonResponse(response) ?? {};
   // The model writes its reasoning first (better answers), but readers want the scores first:
   // within each group (e.g. each domain) put the reasoning column last.
-  const isReasoning = (k: string) => k === 'reasoning' || k.endsWith('_reasoning');
+  const isReasoning = isExplanationKey;
   const groupOf = (k: string) => (k.includes('_') ? k.slice(0, k.lastIndexOf('_')) : '');
   const order: string[] = [];
   for (const k of Object.keys(flat)) if (!order.includes(groupOf(k))) order.push(groupOf(k));

@@ -219,6 +219,14 @@ export function flattenJsonResponse(raw: string | undefined): Record<string, str
   return out;
 }
 
+/**
+ * Keys holding the model's written justification in JSON answers: "explanation" (preferred: Anthropic
+ * models may refuse JSON output fields named "reasoning") or, in older prompts, "reasoning".
+ */
+export function isExplanationKey(k: string): boolean {
+  return k === 'explanation' || k === 'reasoning' || k.endsWith('_explanation') || k.endsWith('_reasoning');
+}
+
 /** Canonical form for comparing labels across sources (gold columns, runs).
  *  For yes/no fields (`yesNo`), 1 and 0 also count as yes and no. */
 export function normalizeLabel(v: string | undefined, yesNo = false): string {

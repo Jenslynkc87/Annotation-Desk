@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldLabel, flattenJsonResponse, invalidPlaceholders, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
+import { fieldLabel, flattenJsonResponse, invalidPlaceholders, isExplanationKey, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
 import { DEFAULT_PROMPT } from './types';
 
 describe('field names', () => {
@@ -62,5 +62,12 @@ describe('plain-text answers with JSON', () => {
     expect(parseModelOutput('Here you go: {"score": 2}', text).parseError).not.toBeNull();
     expect(parseModelOutput('```json\n{"score": 2}\n```', text).parseError).toBeNull();
     expect(parseModelOutput('The text is broadly supportive.', text).parseError).toBeNull();
+  });
+});
+
+describe('explanation fields in JSON answers', () => {
+  it('recognizes explanation and the older reasoning names', () => {
+    for (const k of ['explanation', 'race_explanation', 'reasoning', 'race_reasoning']) expect(isExplanationKey(k)).toBe(true);
+    for (const k of ['race_negative', 'score', 'explanations_count']) expect(isExplanationKey(k)).toBe(false);
   });
 });

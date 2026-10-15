@@ -70,8 +70,24 @@ describe('comparison report', () => {
     expect(summary[1].exact_agreement).toBeCloseTo(0.25, 4);
     expect(summary[1].weighted_kappa_linear).toBeCloseTo(0.4921, 4);
     const review = rows('Review');
-    expect(review[0]).toMatchObject({ file: 'art_1.md', first: -1, second: 1, category: 'opposite direction', first_reasoning: 'a because 1', second_reasoning: 'b because 1' });
+    expect(review[0]).toMatchObject({ file: 'art_1.md', first: -1, second: 1, category: 'opposite direction', first_explanation: 'a because 1', second_explanation: 'b because 1' });
     expect(review.at(-1)!.category).toBe('agree');
     expect(String(rows('Draft text')[0].draft_text)).toContain('in direction for 8.3%');
+  });
+});
+
+import { resultsLong } from './export/tables';
+
+describe('explanation columns in the exports', () => {
+  it('puts each explanation after its scores, like the older reasoning columns', () => {
+    const doc: Doc = { id: 'd', studyId: 's', docId: 'art', text: 't', meta: {}, source: 'x', order: 0, addedAt: '' };
+    const r: Result = {
+      id: 'r:d:1', runId: 'r', studyId: 's', docId: 'd', replicate: 1, status: 'ok', rationale: '', reasoningSummary: '', rawText: '', parseError: null, error: null,
+      values: { response: '{"race": {"explanation": "Because.", "negative": 2, "positive": 0}, "gender": {"explanation": "So.", "negative": 1}}' },
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }, latencyMs: 1, requestedAt: '', completedAt: '', responseId: '', modelReported: '', stopReason: '',
+    };
+    const study = { id: 's', name: 'S', description: '', createdAt: '', updatedAt: '', model: DEFAULT_MODEL_SETTINGS, options: DEFAULT_RUN_OPTIONS, prompt: textRun.snapshot.prompt };
+    const cols = Object.keys(resultsLong(study, [textRun], [doc], [r], { rationale: false, reasoning: false })[0]);
+    expect(cols.filter((c) => c.startsWith('race_') || c.startsWith('gender_'))).toEqual(['race_negative', 'race_positive', 'race_explanation', 'gender_negative', 'gender_explanation']);
   });
 });
