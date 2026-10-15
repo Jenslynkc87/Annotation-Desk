@@ -11,9 +11,9 @@ const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 /** Current text models per OpenAI's model overview (checked October 2026). Shown before a key is added
  *  and used to label/order the list loaded from the user's account. */
 export const KNOWN_OPENAI_MODELS: ModelInfo[] = [
-  { id: 'gpt-6-astra', label: 'GPT-6 Astra · flagship', effortLevels: ALL_EFFORTS },
-  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol · balanced', effortLevels: ALL_EFFORTS },
-  { id: 'gpt-6-luna', label: 'GPT-6 Luna · low-cost', effortLevels: ['none', ...ALL_EFFORTS] },
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: "OpenAI's most capable model, built for complex reasoning; the most expensive.", effortLevels: ALL_EFFORTS },
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', description: 'Near-flagship performance at lower cost; a balanced default for annotation.', effortLevels: ALL_EFFORTS },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna', description: "OpenAI's most efficient model, for focused, high-volume tasks.", effortLevels: ['none', ...ALL_EFFORTS] },
 ];
 
 const EXCLUDE = /(audio|realtime|transcribe|tts|image|embedding|search|moderation|dall-e|whisper|davinci|babbage|instruct|computer|sora)/i;

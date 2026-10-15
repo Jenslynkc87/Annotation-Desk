@@ -36,10 +36,10 @@ export const FALLBACK_MODELS = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-o
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 export const FALLBACK_ANTHROPIC_MODELS: ModelInfo[] = [
-  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
-  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
-  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
-  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+  { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', description: "Anthropic's most capable model, for the hardest reasoning; also the most expensive." },
+  { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', description: "Anthropic's flagship for demanding, nuanced work; a strong default for annotation." },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', description: 'Fast and capable at half the price of Opus; a good fit for large corpora.' },
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5', description: 'The fastest and cheapest Claude; suits clear-cut, high-volume labelling.' },
 ];
 
 type Caps = Record<string, { supported?: boolean } & Record<string, unknown>> | undefined;
@@ -104,6 +104,7 @@ export const anthropicAdapter: ProviderAdapter = {
       out.push({
         id: m.id,
         label: m.display_name || m.id,
+        description: FALLBACK_ANTHROPIC_MODELS.find((k) => k.id === m.id)?.description,
         effortLevels,
         supportsAdaptiveThinking: thinkingTypes ? supported(thinkingTypes.adaptive) : undefined,
         supportsStructuredOutput: supported(caps?.structured_outputs),

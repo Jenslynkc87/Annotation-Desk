@@ -4,6 +4,8 @@ import type { ModelSettings, ProviderId, RunOptions, Usage } from '../types';
 export interface ModelInfo {
   id: string;
   label: string;
+  /** One-sentence explainer shown under the model picker (known models only). */
+  description?: string;
   /** Effort / reasoning levels the model reports supporting; undefined = unknown. */
   effortLevels?: string[];
   supportsAdaptiveThinking?: boolean;

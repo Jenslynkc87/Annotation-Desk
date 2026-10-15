@@ -133,23 +133,23 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           )}
         </div>
 
-        <div className="field">
-          <label htmlFor="model">Model</label>
-          <div className="row nowrap">
+        <div className="grid2 model-row">
+          <div className="field">
+            <label htmlFor="model">Model</label>
             {!showCustom ? (
               <select
                 id="model"
-                className="select grow"
+                className="select"
                 value={m.model}
                 onChange={(e) => {
                   if (e.target.value === CUSTOM) setCustomModel(true);
                   else updateStudy((s) => void (s.model.model = e.target.value));
                 }}
               >
-                {!m.model && <option value="">Choose a model…</option>}
+                {!m.model && <option value="">Choose…</option>}
                 {list.map((x) => (
                   <option key={x.id} value={x.id}>
-                    {x.label !== x.id ? `${x.label}  (${x.id})` : x.id}
+                    {x.label}
                   </option>
                 ))}
                 <option value={CUSTOM}>Other model id…</option>
@@ -157,44 +157,50 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             ) : (
               <input
                 id="model"
-                className="input grow"
+                className="input"
                 value={m.model}
                 autoFocus={customModel}
-                placeholder={m.provider === 'openai' ? 'Model id, e.g. from platform.openai.com' : 'Model id, e.g. claude-opus-5-5'}
+                placeholder="Model id"
                 onChange={(e) => updateStudy((s) => void (s.model.model = e.target.value.trim()))}
               />
             )}
-            {showCustom && list.length > 0 && (
-              <button className="btn small" onClick={() => setCustomModel(false)} title="Choose from the list">
-                List
-              </button>
-            )}
-            <button className="btn small icon" disabled={!hasKey || modelsStatus[m.provider] === 'loading'} onClick={() => loadModels(m.provider)} title="Reload models from your account" aria-label="Reload models">
-              <Icon name="refresh" size={14} />
-            </button>
           </div>
-          <div className="hint">
-            {modelsStatus[m.provider] === 'loading' && 'Loading models from your account…'}
-            {modelsStatus[m.provider] === 'error' && <span className="err">{modelsError[m.provider]}</span>}
-            {modelsStatus[m.provider] === 'ok' && `${list.length} models available to your key.`}
-            {modelsStatus[m.provider] === 'idle' && !hasKey && 'Add a key to list the models your account can use.'}
+          <div className="field">
+            <label htmlFor="effort" title="How much the model reasons before answering">
+              {effortLabel}
+            </label>
+            <select id="effort" className="select" value={m.effort} onChange={(e) => updateStudy((s) => void (s.model.effort = e.target.value))}>
+              <option value="">Default</option>
+              {effortChoices.map((e) => (
+                <option key={e} value={e}>
+                  {e}
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
-
-        <div className="field">
-          <label htmlFor="effort">{effortLabel}</label>
-          <select id="effort" className="select" value={m.effort} onChange={(e) => updateStudy((s) => void (s.model.effort = e.target.value))}>
-            <option value="">Model default</option>
-            {effortChoices.map((e) => (
-              <option key={e} value={e}>
-                {e}
-              </option>
-            ))}
-          </select>
         </div>
         <div className="hint tight">
-          How much the model reasons before answering{m.provider === 'anthropic' ? ' (thinking is always on)' : ''}.
-          {!m.effort && ' Set it explicitly for reported runs; defaults differ between models.'}
+          {info?.description ?? (m.model ? <span className="mono">{m.model}</span> : 'Choose a model.')}
+          {showCustom && list.length > 0 && (
+            <>
+              {' '}
+              <button className="linkbtn" onClick={() => setCustomModel(false)}>
+                Back to the list
+              </button>
+            </>
+          )}
+        </div>
+        <div className="hint" style={{ marginTop: 4 }}>
+          {modelsStatus[m.provider] === 'loading' && 'Loading models from your account…'}
+          {modelsStatus[m.provider] === 'error' && <span className="err">{modelsError[m.provider]} </span>}
+          {modelsStatus[m.provider] === 'ok' && (
+            <>
+              {list.length} models on your account ·{' '}
+              <button className="linkbtn" onClick={() => loadModels(m.provider)}>
+                refresh
+              </button>
+            </>
+          )}
         </div>
 
         <label className="check" style={{ marginTop: 12 }}>

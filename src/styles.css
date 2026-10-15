@@ -286,7 +286,7 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   .workbench { grid-template-columns: minmax(0, 1fr); }
   .study-title { font-size: 24px; }
   .card-pad { padding: 14px; }
-  .grid2 { grid-template-columns: 1fr; }
+  .grid2:not(.model-row) { grid-template-columns: 1fr; }
   .footer { padding: 16px; }
 }
 
@@ -320,3 +320,4 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .export-card .filelist { margin-bottom: 16px; }
 
 .label-note { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
+.grid2.model-row { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
