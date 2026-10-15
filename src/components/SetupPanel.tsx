@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { RATIONALE_KEY, renderMessageParts, templatePlaceholders, uniqueKey } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS } from '../lib/providers/anthropic';
-import { KNOWN_OPENAI_MODELS } from '../lib/providers/openai';
+import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
 import type { ProviderId, Variable, VariableType } from '../lib/types';
@@ -91,7 +91,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     const st = currentStudy(getState())!;
     const snap = await buildSnapshot(st);
     const doc = getState().docs[0] ?? { docId: 'example', text: '(your text appears here)', meta: {} };
-    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), st.options);
+    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), st.options, st.model.model);
     setPreview(JSON.stringify({ ...snap.requestBase, ...part }, null, 2));
   };
 
@@ -369,7 +369,9 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             <div className="hint">
               {m.provider === 'anthropic'
                 ? 'Reuses the fixed part of the prompt between requests: cheaper and faster. Only applies to long prompts (roughly 500+ words).'
-                : 'OpenAI caches long prompts automatically; this adds a cache key for better hit rates.'}
+                : supportsExplicitCaching(m.model)
+                  ? 'Caches only the fixed part of your prompt (not the texts). Off: nothing is cached or written.'
+                  : 'This OpenAI model caches long prompts automatically and it cannot be turned off.'}
             </div>
           </span>
         </label>

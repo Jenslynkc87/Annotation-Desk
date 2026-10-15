@@ -19,6 +19,7 @@ export function splitRequestBase(run: Run) {
       if (!Object.keys(oc).length) delete base.output_config;
     }
   } else {
+    if (run.snapshot.options.caching && 'prompt_cache_options' in base) cacheControl = { mode: 'explicit' };
     delete base.instructions;
     const text = base.text as Record<string, unknown> | undefined;
     if (text) {
@@ -114,8 +115,8 @@ FIELDS = {{FIELDS}}
 # (token limit, effort / reasoning, thinking, temperature, caching key, ...).
 REQUEST_SETTINGS = {{REQUEST_SETTINGS}}
 
-# Prompt caching marker (Anthropic only; None = off). Applied to the system
-# prompt and to the fixed part of the prompt before the first {{...}} marker.
+# Prompt caching marker (None = off), applied to the fixed part of the prompt
+# before the first {{...}} marker. Anthropic: cache_control; OpenAI (GPT-5.6+): breakpoint.
 CACHE_CONTROL = {{CACHE_CONTROL}}
 
 # Number of times each text is annotated.
@@ -171,7 +172,14 @@ def build_request(prefix, rest):
                 "schema": OUTPUT_SCHEMA,
                 "strict": True,
             }
-        body["input"] = prefix + rest
+        if CACHE_CONTROL and prefix.strip() and rest.strip():
+            # Explicit caching: only the fixed part of the prompt is written to the cache.
+            body["input"] = [{"role": "user", "content": [
+                {"type": "input_text", "text": prefix, "prompt_cache_breakpoint": CACHE_CONTROL},
+                {"type": "input_text", "text": rest},
+            ]}]
+        else:
+            body["input"] = prefix + rest
     return body
 
 

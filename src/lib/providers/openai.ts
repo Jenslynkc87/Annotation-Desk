@@ -6,6 +6,15 @@ function client(apiKey: string) {
   return new OpenAI({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 4 });
 }
 
+/**
+ * GPT-5.6 and later have explicit prompt caching: with `prompt_cache_options.mode = "explicit"`
+ * only developer-placed breakpoints are cached (none = no caching and no cache writes, which are
+ * billed at 1.25x). The default "implicit" mode writes the whole request, texts included.
+ */
+export function supportsExplicitCaching(model: string): boolean {
+  return /^gpt-(5\.([6-9]|\d{2})|[6-9]|\d{2})(\b|[-.])/.test(model);
+}
+
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /** Current text models per OpenAI's model overview (checked October 2026). Shown before a key is added
@@ -33,7 +42,7 @@ interface ResponseLike {
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number } | null;
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number } | null;
     output_tokens_details?: { reasoning_tokens?: number } | null;
   } | null;
 }
@@ -64,7 +73,7 @@ function toOutcome(r: ResponseLike): CallOutcome {
       inputTokens: u?.input_tokens ?? 0,
       outputTokens: u?.output_tokens ?? 0,
       cacheReadTokens: u?.input_tokens_details?.cached_tokens ?? 0,
-      cacheWriteTokens: 0,
+      cacheWriteTokens: u?.input_tokens_details?.cache_write_tokens ?? 0,
       reasoningTokens: u?.output_tokens_details?.reasoning_tokens ?? 0,
     },
     responseId: r.id,
@@ -110,14 +119,32 @@ export const openaiAdapter: ProviderAdapter = {
       body.text = { format: { type: 'json_schema', name: 'annotation', schema: outputSchema, strict: true } };
     }
     if (model.temperature !== null) body.temperature = model.temperature;
-    // OpenAI caches long prompt prefixes automatically. A stable cache key improves hit rates;
-    // with caching "off" we simply don't send one (automatic caching cannot be disabled).
-    if (options.caching) body.prompt_cache_key = `annotation-desk-${promptHash}`;
+    if (supportsExplicitCaching(model.model)) {
+      // Caching off: explicit mode with no breakpoints = nothing cached, no cache writes.
+      // Caching on: a breakpoint is added after the fixed part of the prompt (see buildRequestPart).
+      body.prompt_cache_options = { mode: 'explicit' };
+    } else if (options.caching) {
+      // Older models cache long prefixes automatically (cannot be turned off); a stable key helps hits.
+      body.prompt_cache_key = `annotation-desk-${promptHash}`;
+    }
     return body;
   },
 
-  buildRequestPart({ prefix, rest }) {
-    // OpenAI caches identical prompt prefixes automatically.
+  buildRequestPart({ prefix, rest }, options, modelId) {
+    // Explicit caching: mark the end of the fixed prompt so only that part is written to the cache.
+    if (options.caching && supportsExplicitCaching(modelId) && prefix.trim() && rest.trim()) {
+      return {
+        input: [
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: prefix, prompt_cache_breakpoint: { mode: 'explicit' } },
+              { type: 'input_text', text: rest },
+            ],
+          },
+        ],
+      };
+    }
     return { input: prefix + rest };
   },
 

@@ -48,7 +48,7 @@ export function RunsView() {
                   <th>Status</th>
                   <th className="num">OK / failed</th>
                   <th className="num">Tokens in / out</th>
-                  <th className="num">Cache read</th>
+                  <th className="num" title="Tokens read from the cache / written to it">Cache read / write</th>
                   <th />
                 </tr>
               </thead>
@@ -91,7 +91,9 @@ export function RunsView() {
                       <td className="num">
                         {fmtInt(t.input)} / {fmtInt(t.output)}
                       </td>
-                      <td className="num">{fmtInt(t.cacheRead)}</td>
+                      <td className="num">
+                        {fmtInt(t.cacheRead)} / {fmtInt(t.cacheWrite)}
+                      </td>
                       <td>
                         <div className="row" style={{ flexWrap: 'nowrap' }}>
                           <button className="btn small" onClick={() => setInspect(r)}>

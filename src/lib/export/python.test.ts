@@ -36,11 +36,11 @@ const promptWithMarkers: PromptSpec = {
 // The common case: one prompt, no markers, no system prompt; the text is appended.
 const promptPlain: PromptSpec = { ...promptWithMarkers, system: '', userTemplate: TRICKY };
 
-function makeRun(provider: ProviderId, prompt: PromptSpec): { study: Study; run: Run } {
+function makeRun(provider: ProviderId, prompt: PromptSpec, openaiModel = 'gpt-mock-1'): { study: Study; run: Run } {
   const model = {
     ...DEFAULT_MODEL_SETTINGS,
     provider,
-    model: provider === 'anthropic' ? 'claude-opus-5-5' : 'gpt-mock-1',
+    model: provider === 'anthropic' ? 'claude-opus-5-5' : openaiModel,
     effort: 'high',
     temperature: provider === 'openai' ? 0.2 : null,
     reasoningSummary: true,
@@ -80,10 +80,29 @@ describe('exported script', () => {
       const out = execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run']).toString();
       const doc = { docId: 'd1', text: 'Some text, with "quotes"\nand a newline', meta: { year: '2024' } };
       const adapter = provider === 'anthropic' ? anthropicAdapter : openaiAdapter;
-      const expected = { ...run.snapshot.requestBase, ...adapter.buildRequestPart(renderMessageParts(prompt.userTemplate, doc), run.snapshot.options) };
+      const expected = { ...run.snapshot.requestBase, ...adapter.buildRequestPart(renderMessageParts(prompt.userTemplate, doc), run.snapshot.options, run.snapshot.model.model) };
       expect(JSON.parse(out)).toEqual(expected);
     });
   }
+
+  for (const caching of [true, false])
+    it(`rebuilds the exact GPT-6 request with explicit caching ${caching ? 'on' : 'off'}`, () => {
+      if (!hasPython()) return;
+      const { study, run } = makeRun('openai', promptPlain, 'gpt-6.1-sol');
+      run.snapshot.options.caching = caching;
+      run.snapshot.requestBase = openaiAdapter.buildRequestBase({ model: run.snapshot.model, options: run.snapshot.options, system: '', outputSchema: run.snapshot.outputSchema, promptHash: 'h' });
+      const dir = mkdtempSync(join(tmpdir(), 'annot-'));
+      writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
+      writeFileSync(join(dir, 'corpus.csv'), 'doc_id,text,year\nd1,"Some text",2024\n');
+      const out = JSON.parse(execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run']).toString());
+      const doc = { docId: 'd1', text: 'Some text', meta: { year: '2024' } };
+      const expected = { ...run.snapshot.requestBase, ...openaiAdapter.buildRequestPart(renderMessageParts(promptPlain.userTemplate, doc), run.snapshot.options, 'gpt-6.1-sol') };
+      expect(out).toEqual(expected);
+      expect(out.prompt_cache_options).toEqual({ mode: 'explicit' });
+      // On: one breakpoint after the fixed prompt only. Off: plain string, nothing to cache.
+      if (caching) expect(out.input[0].content.filter((c: Record<string, unknown>) => c.prompt_cache_breakpoint).length).toBe(1);
+      else expect(typeof out.input).toBe('string');
+    });
 
   it('template keeps placeholders; filled script has none left', () => {
     const { study, run } = makeRun('anthropic', promptWithMarkers);

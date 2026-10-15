@@ -64,7 +64,7 @@ export interface ProviderAdapter {
   effortOptions: string[];
   listModels(apiKey: string): Promise<ModelInfo[]>;
   buildRequestBase(inp: RequestInputs): Record<string, unknown>;
-  buildRequestPart(message: MessageParts, options: RunOptions): Record<string, unknown>;
+  buildRequestPart(message: MessageParts, options: RunOptions, modelId: string): Record<string, unknown>;
   send(
     apiKey: string,
     base: Record<string, unknown>,

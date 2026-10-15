@@ -140,7 +140,7 @@ export const anthropicAdapter: ProviderAdapter = {
     return body;
   },
 
-  buildRequestPart({ prefix, rest }, options) {
+  buildRequestPart({ prefix, rest }, options, _modelId) {
     // Cache the fixed start of the prompt (everything before the text) as its own block.
     if (options.caching && prefix.trim() && rest.trim()) {
       const cache: Record<string, unknown> = { type: 'ephemeral' };
