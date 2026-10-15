@@ -143,9 +143,30 @@ export function isYesNoField(p: PromptSpec, key: string): boolean {
   return p.variables.find((v) => v.name === key)?.type === 'boolean';
 }
 
-/** Field names the results table shows, in order. */
+/**
+ * Field names the results table and exports show, in order. This is the display order, separate from
+ * the order the model writes in (`buildOutputSchema` follows the field list): a field named
+ * "<score>_explanation" (or "_reasoning") is shown right after the field "<score>", wherever it sits in the list.
+ */
 export function outputFields(p: PromptSpec): string[] {
-  return p.outputMode === 'structured' ? p.variables.map((v) => v.name) : [TEXT_RESPONSE_KEY];
+  if (p.outputMode !== 'structured') return [TEXT_RESPONSE_KEY];
+  const names = p.variables.map((v) => v.name);
+  const scoreOf = new Map<string, string>();
+  for (const n of names) {
+    for (const suffix of ['_explanation', '_reasoning']) {
+      const base = n.endsWith(suffix) ? n.slice(0, -suffix.length) : '';
+      if (base && names.includes(base)) scoreOf.set(n, base);
+    }
+  }
+  // An explanation of an explanation is just a field: only pair explanations with fields that are not explanations themselves.
+  for (const [n, base] of [...scoreOf]) if (scoreOf.has(base)) scoreOf.delete(n);
+  const out: string[] = [];
+  for (const n of names) {
+    if (scoreOf.has(n)) continue;
+    out.push(n);
+    for (const m of names) if (scoreOf.get(m) === n) out.push(m);
+  }
+  return out;
 }
 
 function stripFences(s: string): string {

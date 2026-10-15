@@ -433,6 +433,24 @@ function VariableEditor() {
                 ))}
               </select>
               <button
+                className="btn ghost small icon move"
+                title="Move up (the model writes the fields in this order)"
+                aria-label="Move field up"
+                disabled={i === 0}
+                onClick={() => updateStudy((s) => void s.prompt.variables.splice(i - 1, 2, s.prompt.variables[i], s.prompt.variables[i - 1]))}
+              >
+                ↑
+              </button>
+              <button
+                className="btn ghost small icon move"
+                title="Move down (the model writes the fields in this order)"
+                aria-label="Move field down"
+                disabled={i === vars.length - 1}
+                onClick={() => updateStudy((s) => void s.prompt.variables.splice(i, 2, s.prompt.variables[i + 1], s.prompt.variables[i]))}
+              >
+                ↓
+              </button>
+              <button
                 className="btn ghost small icon"
                 title="Remove field"
                 aria-label="Remove field"

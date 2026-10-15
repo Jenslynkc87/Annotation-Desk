@@ -169,6 +169,7 @@ details.more > .more-body { padding-top: 8px; }
 .btn.icon { justify-content: center; }
 .btn.ghost.icon { padding: 4px; color: var(--muted); }
 .btn.ghost.icon:hover:not(:disabled) { color: var(--err); }
+.btn.ghost.icon.move:hover:not(:disabled) { color: var(--ink); }
 .linkbtn { border: 0; background: none; color: var(--navy); cursor: pointer; padding: 0; font-size: 13.5px; text-decoration: underline; text-underline-offset: 2px; }
 
 /* ---------- badges ---------- */

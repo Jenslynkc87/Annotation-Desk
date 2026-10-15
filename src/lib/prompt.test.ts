@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fieldLabel, flattenJsonResponse, invalidPlaceholders, isExplanationKey, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
+import { buildOutputSchema, fieldLabel, outputFields, flattenJsonResponse, invalidPlaceholders, isExplanationKey, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
 import { DEFAULT_PROMPT } from './types';
 
 describe('field names', () => {
@@ -69,5 +69,32 @@ describe('explanation fields in JSON answers', () => {
   it('recognizes explanation and the older reasoning names', () => {
     for (const k of ['explanation', 'race_explanation', 'reasoning', 'race_reasoning']) expect(isExplanationKey(k)).toBe(true);
     for (const k of ['race_negative', 'score', 'explanations_count']) expect(isExplanationKey(k)).toBe(false);
+  });
+});
+
+describe('field order: generation vs display', () => {
+  const v = (name: string, type: 'ordinal' | 'text') => ({ name, type, values: type === 'ordinal' ? ['-1', '0', '1'] : [], description: '' });
+  const prompt = {
+    ...DEFAULT_PROMPT,
+    outputMode: 'structured' as const,
+    includeRationale: false,
+    variables: [
+      v('race_ethnicity_explanation', 'text'),
+      v('race_ethnicity', 'ordinal'),
+      v('gender_sexuality_explanation', 'text'),
+      v('gender_sexuality', 'ordinal'),
+    ],
+  };
+  it('the model writes the fields in list order, each explanation before its score', () => {
+    const schema = buildOutputSchema(prompt) as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(schema.properties)).toEqual(['race_ethnicity_explanation', 'race_ethnicity', 'gender_sexuality_explanation', 'gender_sexuality']);
+    expect(schema.required).toEqual(Object.keys(schema.properties));
+  });
+  it('the tables show each explanation right after its own score', () => {
+    expect(outputFields(prompt)).toEqual(['race_ethnicity', 'race_ethnicity_explanation', 'gender_sexuality', 'gender_sexuality_explanation']);
+  });
+  it('leaves other field lists as they are', () => {
+    const p = { ...prompt, variables: [v('a', 'ordinal'), v('explanation', 'text'), v('b_explanation', 'text')] };
+    expect(outputFields(p)).toEqual(['a', 'explanation', 'b_explanation']);
   });
 });
