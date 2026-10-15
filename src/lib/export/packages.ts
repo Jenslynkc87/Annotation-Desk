@@ -4,7 +4,7 @@ import { getLogsForRun } from '../db';
 import { fmtStat } from '../metrics';
 import { comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
-import { buildOutputSchema, effectiveTemplate, normalizeLabel } from '../prompt';
+import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, normalizeLabel } from '../prompt';
 import { buildDocViews } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
@@ -465,58 +465,101 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
   const viewsB = buildDocViews(docs, runs, results, runB.id);
   const keysB = new Set(comparableFields(runB, viewsB.values()).map((f) => f.key));
   const fields = comparableFields(runA, viewsA.values()).filter((f) => keysB.has(f.key));
-  const inB = new Set(runB.docIds);
-  const both = docs.filter((d) => inB.has(d.id) && runA.docIds.includes(d.id));
+  const inA = new Set(runA.docIds);
+  const both = docs.filter((d) => inA.has(d.id) && runB.docIds.includes(d.id));
   const name = (r: Run) => `${r.snapshot.model.model} (run #${r.number})`;
 
-  const rows = fields.map((f) => {
-    const xs: string[] = [];
-    const ys: string[] = [];
+  // Per field: the texts with a usable value in both runs.
+  const compared = fields.map((f) => {
+    const items: { doc: Doc; x: string; y: string }[] = [];
     for (const d of both) {
       const va = viewsA.get(d.id)!;
       const vb = viewsB.get(d.id)!;
       if (va.status === 'none' || vb.status === 'none') continue;
       const x = normalizeLabel(fieldValue(runA, va.values, f.key), f.yesNo);
       const y = normalizeLabel(fieldValue(runB, vb.values, f.key), f.yesNo);
-      if (x && y) {
-        xs.push(x);
-        ys.push(y);
-      }
+      if (x && y) items.push({ doc: d, x, y });
     }
-    return { f, stats: agreement(xs, ys, f.level, f.allowed, tolerance) };
+    const all = agreement(items.map((i) => i.x), items.map((i) => i.y), f.level, f.allowed, tolerance);
+    // Shared zeros ("no evaluation" from both runs) inflate agreement: also report texts where at least one run is non-zero.
+    const zeroOnScale = all.meanDifference !== null && (f.allowed.includes('0') || items.some((i) => i.x === '0' || i.y === '0'));
+    const nz = items.filter((i) => i.x !== '0' || i.y !== '0');
+    // Only when some texts got 0 from both runs; otherwise the row would repeat the one above.
+    const nonZero = zeroOnScale && nz.length < items.length ? agreement(nz.map((i) => i.x), nz.map((i) => i.y), f.level, f.allowed, tolerance) : null;
+    return { f, items, all, nonZero };
   });
 
   const r4 = (x: number | null | undefined) => (x === null || x === undefined ? null : Math.round(x * 10000) / 10000);
-  const withCi = (label: string, s: Agreement, key: CiStat, value: number | null): Row => ({
-    [label]: r4(value),
-    [`${label}_ci_low`]: r4(s.ci[key]?.[0]),
-    [`${label}_ci_high`]: r4(s.ci[key]?.[1]),
-  });
+  const withCi = (label: string, s: Agreement, key: CiStat, value: number | null): Row =>
+    value === null ? {} : { [label]: r4(value), [`${label}_ci_low`]: r4(s.ci[key]?.[0]), [`${label}_ci_high`]: r4(s.ci[key]?.[1]) };
   const tolName = `within_${tolerance}_point${tolerance === 1 ? '' : 's'}`;
+  const summaryRow = (label: string, texts: string, level: string, s: Agreement): Row => ({
+    field: label,
+    texts,
+    level,
+    n_compared: s.n,
+    n_texts_in_both_runs: both.length,
+    ...withCi('exact_agreement', s, 'percentAgreement', s.percentAgreement),
+    ...(tolerance > 0 ? withCi(tolName, s, 'withinTolerance', s.withinTolerance) : {}),
+    ...withCi('differ_2_or_more_points', s, 'largeDifference', s.largeDifference),
+    ...withCi('opposite_direction', s, 'oppositeDirection', s.oppositeDirection),
+    ...withCi('weighted_kappa_linear', s, 'weightedKappaLinear', s.weightedKappaLinear),
+    ...withCi('weighted_kappa_quadratic', s, 'weightedKappa', s.weightedKappa),
+    ...withCi('krippendorff_alpha', s, 'krippendorffAlpha', s.krippendorffAlpha),
+    ...withCi('cohen_kappa', s, 'cohenKappa', s.cohenKappa),
+    ...withCi('gwet_ac1', s, 'gwetAC1', s.gwetAC1),
+    ...withCi('mean_difference_second_minus_first', s, 'meanDifference', s.meanDifference),
+    ...withCi('mean_absolute_difference', s, 'mae', s.mae),
+    ...(s.spearman !== null ? { spearman_rho: r4(s.spearman) } : {}),
+  });
   addSheet(
     wb,
     'Summary',
-    rows.map(({ f, stats: s }) => ({
-      field: f.label,
-      level: f.level,
-      n_compared: s.n,
-      n_texts_in_both_runs: both.length,
-      ...withCi('exact_agreement', s, 'percentAgreement', s.percentAgreement),
-      ...(s.withinTolerance !== null && tolerance > 0 ? withCi(tolName, s, 'withinTolerance', s.withinTolerance) : {}),
-      ...(s.weightedKappa !== null ? withCi('weighted_kappa_quadratic', s, 'weightedKappa', s.weightedKappa) : {}),
-      ...withCi('krippendorff_alpha', s, 'krippendorffAlpha', s.krippendorffAlpha),
-      ...withCi('cohen_kappa', s, 'cohenKappa', s.cohenKappa),
-      ...withCi('gwet_ac1', s, 'gwetAC1', s.gwetAC1),
-      ...(s.meanDifference !== null ? withCi('mean_difference_second_minus_first', s, 'meanDifference', s.meanDifference) : {}),
-      ...(s.mae !== null ? withCi('mean_absolute_difference', s, 'mae', s.mae) : {}),
-      ...(s.spearman !== null ? { spearman_rho: r4(s.spearman) } : {}),
-    })),
+    compared.flatMap(({ f, all, nonZero }) => [
+      summaryRow(f.label, 'all', f.level, all),
+      ...(nonZero ? [summaryRow(f.label, 'at least one non-zero', f.level, nonZero)] : []),
+    ]),
   );
   addSheet(
     wb,
     'Draft text',
-    rows.map(({ f, stats }) => ({ field: f.label, draft_text: comparisonSentence(f.label, name(runA), name(runB), stats, both.length, f.level) })),
+    compared.map(({ f, all, nonZero }) => ({
+      field: f.label,
+      draft_text: comparisonSentence(f.label, name(runA), name(runB), all, both.length, f.level) + (nonZero ? ' ' + nonZeroSentence(nonZero) : ''),
+    })),
   );
+
+  // Every compared score, ordered for expert review: opposite directions first, then the largest differences.
+  const reasoningOf = (run: Run, values: Record<string, string>, rationale: string, key: string) => {
+    const flat = run.snapshot.prompt.outputMode === 'structured' ? values : (flattenJsonResponse(values.response) ?? {});
+    const group = key.includes('_') ? key.slice(0, key.lastIndexOf('_')) : '';
+    return flat[`${key}_reasoning`] ?? (group ? flat[`${group}_reasoning`] : undefined) ?? flat.reasoning ?? rationale ?? '';
+  };
+  const firstRationale = (views: typeof viewsA, id: string) => views.get(id)?.results.find((r) => r.status === 'ok')?.rationale ?? '';
+  const review = compared.flatMap(({ f, items, all }) =>
+    items.map(({ doc, x, y }) => {
+      const numeric = all.meanDifference !== null;
+      const diff = numeric ? Number(y) - Number(x) : null;
+      const mid = all.midpoint;
+      const opposite = numeric && mid !== null && ((Number(x) < mid && Number(y) > mid) || (Number(x) > mid && Number(y) < mid));
+      const category = x === y ? 'agree' : opposite ? 'opposite direction' : diff !== null && Math.abs(diff) >= 2 ? '2+ points' : numeric ? '1 point' : 'differ';
+      return {
+        file: doc.meta.file ?? doc.docId,
+        field: f.label,
+        first: numeric ? Number(x) : x,
+        second: numeric ? Number(y) : y,
+        difference: diff,
+        category,
+        first_reasoning: reasoningOf(runA, viewsA.get(doc.id)!.values, firstRationale(viewsA, doc.id), f.key),
+        second_reasoning: reasoningOf(runB, viewsB.get(doc.id)!.values, firstRationale(viewsB, doc.id), f.key),
+        judgment: '',
+        note: '',
+      };
+    }),
+  );
+  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, '1 point': 2, agree: 3 };
+  review.sort((p, q) => rank[p.category] - rank[q.category] || Math.abs(q.difference ?? 0) - Math.abs(p.difference ?? 0));
+  addSheet(wb, 'Review', review);
 
   const settings = (r: Run) => ({
     run: `#${r.number}${r.label ? ` (${r.label})` : ''}`,
@@ -537,52 +580,61 @@ export async function buildComparisonReport(runA: Run, runB: Run, docs: Doc[], r
 
   // One confusion table per field (rows: first run, columns: second run); skipped for long numeric scales.
   const used = new Set<string>();
-  for (const { f, stats } of rows) {
-    if (stats.categories.length < 2 || stats.categories.length > 15) continue;
+  for (const { f, all } of compared) {
+    if (all.categories.length < 2 || all.categories.length > 15) continue;
     let sheet = `Table ${f.label}`.replace(/[[\]:*?/\\]/g, '_').slice(0, 31);
     for (let k = 2; used.has(sheet); k++) sheet = `${sheet.slice(0, 28)}_${k}`;
     used.add(sheet);
     addSheet(
       wb,
       sheet,
-      stats.categories.map((r) => ({
+      all.categories.map((r) => ({
         [`first \\ second`]: r,
-        ...Object.fromEntries(stats.categories.map((c) => [c, stats.confusion[r][c]])),
+        ...Object.fromEntries(all.categories.map((c) => [c, all.confusion[r][c]])),
       })),
     );
   }
 
   addSheet(wb, 'Notes', [
     { note: `First: ${name(runA)}. Second: ${name(runB)}. Texts compared: those annotated in both runs with a usable value for the field.` },
-    { note: `Exact agreement: share of texts with the same value. ${tolerance > 0 ? `Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much (scales and numbers only).` : ''}` },
-    { note: 'Weighted kappa (quadratic weights over the codebook scale) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories.' },
+    { note: `Exact agreement: share of texts with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
+    { note: '"At least one non-zero" rows repeat the statistics on texts where at least one run gave a score other than 0, because shared zeros inflate agreement.' },
+    { note: 'Weighted kappa (linear or quadratic weights over the codebook scale) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories.' },
     { note: 'Mean difference = second minus first (positive: the second run scores higher on average). Mean absolute difference: average distance regardless of direction.' },
     { note: 'Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of texts, fixed seed, so the same data gives the same interval).' },
-    { note: 'Agreement within a tolerance is generous on short scales (on a 1–3 scale only 1 vs 3 counts as a disagreement); report it together with exact agreement and weighted kappa.' },
+    { note: 'Review sheet: every compared score, opposite directions first, then the largest differences; the judgment and note columns are for your own labels.' },
   ]);
   const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
+const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)}%`);
+const num2 = (x: number | null) => (x === null ? '—' : x.toFixed(2));
+
 /** Draft sentence for a paper describing how well two runs agree on one field. */
 export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number, level = 'ordinal'): string {
   if (!s.n) return `No texts had a usable value for ${label} in both runs.`;
-  const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)}%`);
-  const num = (x: number | null) => (x === null ? '—' : x.toFixed(2));
   const ciP = (k: CiStat) => (s.ci[k] ? ` (95% CI ${pct(s.ci[k]![0])}–${pct(s.ci[k]![1])})` : '');
-  const ciN = (k: CiStat) => (s.ci[k] ? ` [${num(s.ci[k]![0])}, ${num(s.ci[k]![1])}]` : '');
+  const ciN = (k: CiStat) => (s.ci[k] ? ` [${num2(s.ci[k]![0])}, ${num2(s.ci[k]![1])}]` : '');
   const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} texts annotated in both runs` : ''}`;
   if (s.meanDifference === null) {
-    return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}; Cohen's κ = ${num(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+    return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}; Cohen's κ = ${num2(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   }
   const within = s.tolerance > 0 && s.withinTolerance !== null ? ` and scores within ${s.tolerance} point${s.tolerance === 1 ? '' : 's'} for ${pct(s.withinTolerance)}${ciP('withinTolerance')}` : '';
-  const kappa = s.weightedKappa !== null ? `weighted κ = ${num(s.weightedKappa)}${ciN('weightedKappa')}, ` : '';
-  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}Krippendorff's α (${level}) = ${num(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  const serious = ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of texts${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`;
+  const kappa = s.weightedKappaLinear !== null ? `linear-weighted κ = ${num2(s.weightedKappaLinear)}${ciN('weightedKappaLinear')}, ` : '';
+  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}Gwet's AC1 = ${num2(s.gwetAC1)}${ciN('gwetAC1')}, Krippendorff's α (${level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   const d = s.meanDifference;
   const ci = s.ci.meanDifference;
-  const second =
+  const shift =
     ci && (ci[0] > 0 || ci[1] < 0)
       ? ` ${b} scored on average ${Math.abs(d).toFixed(2)} points ${d > 0 ? 'higher' : 'lower'} than ${a} (95% CI ${ci[0].toFixed(2)} to ${ci[1].toFixed(2)}).`
       : ` There was no clear systematic difference between the two (mean difference ${d.toFixed(2)}${ci ? `, 95% CI ${ci[0].toFixed(2)} to ${ci[1].toFixed(2)}` : ''}).`;
-  return first + second;
+  return first + serious + shift;
+}
+
+/** The same figures on texts where at least one run gave a non-zero score. */
+function nonZeroSentence(s: Agreement): string {
+  if (!s.n) return 'No text received a non-zero score from either run.';
+  return `On the ${s.n.toLocaleString('en-US')} texts where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)} and linear-weighted κ = ${num2(s.weightedKappaLinear)}.`;
 }

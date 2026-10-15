@@ -250,6 +250,7 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
     n_with_label: a.nLabelled,
     ...withCi('percent_agreement', a.stats.percentAgreement, a.stats.ci.percentAgreement),
     ...withCi('cohen_kappa', a.stats.cohenKappa, a.stats.ci.cohenKappa),
+    ...withCi('weighted_kappa_linear', a.stats.weightedKappaLinear, a.stats.ci.weightedKappaLinear),
     ...withCi('weighted_kappa_quadratic', a.stats.weightedKappa, a.stats.ci.weightedKappa),
     ...withCi('krippendorff_alpha', a.stats.krippendorffAlpha, a.stats.ci.krippendorffAlpha),
     ...withCi('gwet_ac1', a.stats.gwetAC1, a.stats.ci.gwetAC1),

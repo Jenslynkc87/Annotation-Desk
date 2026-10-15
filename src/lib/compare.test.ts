@@ -35,3 +35,43 @@ describe('draft text', () => {
     expect(text).toMatch(/Sol scored on average 0\.\d\d points higher than Opus/);
   });
 });
+
+import ExcelJS from 'exceljs';
+import { buildComparisonReport } from './export/packages';
+import type { Doc, Result } from './types';
+
+describe('comparison report', () => {
+  it('has summary rows for all texts and non-zero texts, and a review sheet ordered for reading', async () => {
+    const prompt = { ...DEFAULT_PROMPT, variables: [{ name: 'score', type: 'ordinal' as const, values: ['-3', '-2', '-1', '0', '1', '2', '3'], description: '' }] };
+    const mk = (id: string, n: number): Run => ({ ...textRun, id, number: n, docIds: [], snapshot: { ...textRun.snapshot, prompt } });
+    const a = mk('a', 1);
+    const b = mk('b', 2);
+    const x = [-3, -1, 0, 0, 2, 3, 1, 0, -2, 0, 1, 0];
+    const y = [-2, 1, 0, 0, 2, 1, 1, 0, -3, 1, 0, 0];
+    const docs: Doc[] = x.map((_, i) => ({ id: `d${i}`, studyId: 's', docId: `art_${i}`, text: 't', meta: { file: `art_${i}.md` }, source: 'x', order: i, addedAt: '' }));
+    a.docIds = b.docIds = docs.map((d) => d.id);
+    const res = (run: Run, v: number[]): Result[] =>
+      docs.map((d, i) => ({
+        id: `${run.id}:${d.id}:1`, runId: run.id, studyId: 's', docId: d.id, replicate: 1, status: 'ok', values: { score: String(v[i]) }, rationale: `${run.id} because ${i}`,
+        reasoningSummary: '', rawText: '', parseError: null, error: null, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 },
+        latencyMs: 1, requestedAt: '', completedAt: '', responseId: '', modelReported: 'm', stopReason: 'end_turn',
+      }));
+    const blob = await buildComparisonReport(a, b, docs, [a, b], [...res(a, x), ...res(b, y)], 1);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await blob.arrayBuffer());
+    const rows = (name: string) => {
+      const ws = wb.getWorksheet(name)!;
+      const head = (ws.getRow(1).values as unknown[]).slice(1) as string[];
+      return Array.from({ length: ws.rowCount - 1 }, (_, i) => Object.fromEntries(head.map((h, j) => [h, ws.getRow(i + 2).getCell(j + 1).value])));
+    };
+    const summary = rows('Summary');
+    expect(summary.map((r) => r.texts)).toEqual(['all', 'at least one non-zero']);
+    expect(summary[1].n_compared).toBe(8);
+    expect(summary[1].exact_agreement).toBeCloseTo(0.25, 4);
+    expect(summary[1].weighted_kappa_linear).toBeCloseTo(0.4921, 4);
+    const review = rows('Review');
+    expect(review[0]).toMatchObject({ file: 'art_1.md', first: -1, second: 1, category: 'opposite direction', first_reasoning: 'a because 1', second_reasoning: 'b because 1' });
+    expect(review.at(-1)!.category).toBe('agree');
+    expect(String(rows('Draft text')[0].draft_text)).toContain('in direction for 8.3%');
+  });
+});

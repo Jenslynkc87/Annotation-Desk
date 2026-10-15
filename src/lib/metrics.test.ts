@@ -91,3 +91,21 @@ describe('tolerance and systematic difference', () => {
     expect(r.meanDifference).toBeNull();
   });
 });
+
+describe('serious disagreement and linear weights (−3…+3 scale)', () => {
+  const scale = s([-3, -2, -1, 0, 1, 2, 3]);
+  const x = s([-3, -1, 0, 0, 2, 3, 1, 0, -2, 0, 1, 0]);
+  const y = s([-2, 1, 0, 0, 2, 1, 1, 0, -3, 1, 0, 0]);
+  it('matches sklearn linear-weighted kappa', () => {
+    expect(agreement(x, y, 'ordinal', scale).weightedKappaLinear).toBeCloseTo(0.5675676, 6);
+  });
+  it('counts differences of 2+ points and opposite directions around the midpoint 0', () => {
+    const r = agreement(x, y, 'ordinal', scale);
+    expect(r.midpoint).toBe(0);
+    expect(r.largeDifference).toBeCloseTo(2 / 12, 9);
+    expect(r.oppositeDirection).toBeCloseTo(1 / 12, 9);
+  });
+  it('uses the scale midpoint on a 1–7 scale', () => {
+    expect(agreement(s([3, 5, 4]), s([5, 4, 4]), 'ordinal', s([1, 2, 3, 4, 5, 6, 7])).oppositeDirection).toBeCloseTo(1 / 3, 9);
+  });
+});

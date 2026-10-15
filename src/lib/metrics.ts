@@ -8,6 +8,7 @@ export interface Agreement {
   percentAgreement: number | null;
   cohenKappa: number | null;
   weightedKappa: number | null; // quadratic weights, ordinal/interval only
+  weightedKappaLinear: number | null; // linear weights, ordinal/interval only
   krippendorffAlpha: number | null;
   gwetAC1: number | null;
   spearman: number | null;
@@ -19,6 +20,12 @@ export interface Agreement {
   withinTolerance: number | null;
   /** Numbers only: average of (second − first); positive = the second source scores higher. */
   meanDifference: number | null;
+  /** Numbers only: share of texts whose values differ by 2 or more points. */
+  largeDifference: number | null;
+  /** Numbers only: share of texts where one value is below the scale midpoint and the other above it (null without a midpoint). */
+  oppositeDirection: number | null;
+  /** The midpoint used for `oppositeDirection` (e.g. 0 on a −3…+3 scale, 4 on 1…7). */
+  midpoint: number | null;
   /** 95% bootstrap intervals (percentile method, texts resampled); null when too few texts. */
   ci: Partial<Record<CiStat, [number, number] | null>>;
   categories: string[];
@@ -26,7 +33,18 @@ export interface Agreement {
   confusion: Record<string, Record<string, number>>;
 }
 
-export type CiStat = 'percentAgreement' | 'withinTolerance' | 'cohenKappa' | 'weightedKappa' | 'krippendorffAlpha' | 'gwetAC1' | 'meanDifference' | 'mae';
+export type CiStat =
+  | 'percentAgreement'
+  | 'withinTolerance'
+  | 'largeDifference'
+  | 'oppositeDirection'
+  | 'cohenKappa'
+  | 'weightedKappa'
+  | 'weightedKappaLinear'
+  | 'krippendorffAlpha'
+  | 'gwetAC1'
+  | 'meanDifference'
+  | 'mae';
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
@@ -43,14 +61,14 @@ export function percentAgreement(pairs: [string, string][]): number | null {
  * Cohen's kappa. `scale` (e.g. the codebook's allowed values) adds categories nobody used, so that
  * quadratic weights reflect distances on the full scale (as sklearn's `labels=`); plain kappa is unaffected.
  */
-export function cohenKappa(pairs: [string, string][], weights: 'none' | 'quadratic' = 'none', scale: string[] = []): number | null {
+export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear' | 'quadratic' = 'none', scale: string[] = []): number | null {
   const n = pairs.length;
   if (!n) return null;
   const cats = sortCats([...new Set([...scale, ...pairs.flat()])]);
   if (cats.length < 2) return null;
   const k = cats.length;
   const idx = new Map(cats.map((c, i) => [c, i]));
-  const w = (i: number, j: number) => (weights === 'none' ? (i === j ? 0 : 1) : ((i - j) / (k - 1)) ** 2);
+  const w = (i: number, j: number) => (weights === 'none' ? (i === j ? 0 : 1) : weights === 'linear' ? Math.abs(i - j) / (k - 1) : ((i - j) / (k - 1)) ** 2);
   const obs = Array.from({ length: k }, () => new Array(k).fill(0));
   const ra = new Array(k).fill(0);
   const rb = new Array(k).fill(0);
@@ -203,6 +221,15 @@ const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.l
 export const withinTolerance = (p: [string, string][], tol: number) => mean(numPairs(p).map(([x, y]) => (Math.abs(x - y) <= tol + 1e-9 ? 1 : 0)));
 export const meanDifference = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => y - x));
 export const meanAbsoluteError = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => Math.abs(x - y)));
+export const largeDifference = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => (Math.abs(x - y) >= 2 - 1e-9 ? 1 : 0)));
+export const oppositeDirection = (p: [string, string][], mid: number) =>
+  mean(numPairs(p).map(([x, y]) => ((x < mid && y > mid) || (x > mid && y < mid) ? 1 : 0)));
+
+/** Scale midpoint: from the codebook scale, else 0 when the values run from negative to positive. */
+function scaleMidpoint(scale: number[], observed: number[]): number | null {
+  if (scale.length >= 2) return (Math.min(...scale) + Math.max(...scale)) / 2;
+  return observed.some((x) => x < 0) && observed.some((x) => x > 0) ? 0 : null;
+}
 
 /** `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`. */
 export function agreement(a: string[], b: string[], level: Level, allowed: string[] = [], tolerance = 1): Agreement {
@@ -219,10 +246,18 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
   for (const [x, y] of pairs) confusion[x][y]++;
   const scale = numeric ? allowed.filter(isNum) : [];
   const alphaLevel = numeric ? level : 'nominal';
+  const midpoint = numeric ? scaleMidpoint(scale.map(Number), [...xs, ...ys]) : null;
   const stats = {
     percentAgreement,
     cohenKappa: (p: [string, string][]) => cohenKappa(p),
-    ...(numeric ? { weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale) } : {}),
+    ...(numeric
+      ? {
+          weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale),
+          weightedKappaLinear: (p: [string, string][]) => cohenKappa(p, 'linear', scale),
+          largeDifference,
+          ...(midpoint !== null ? { oppositeDirection: (p: [string, string][]) => oppositeDirection(p, midpoint) } : {}),
+        }
+      : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
     gwetAC1: (p: [string, string][]) => gwetAC1(p, allowed),
     ...(numeric
@@ -238,6 +273,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     percentAgreement: percentAgreement(pairs),
     cohenKappa: cohenKappa(pairs),
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
+    weightedKappaLinear: numeric ? cohenKappa(pairs, 'linear', scale) : null,
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
     gwetAC1: gwetAC1(pairs, allowed),
     ci: bootstrapCI(pairs, stats),
@@ -247,6 +283,9 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     tolerance,
     withinTolerance: numeric ? withinTolerance(pairs, tolerance) : null,
     meanDifference: numeric ? meanDifference(pairs) : null,
+    largeDifference: numeric ? largeDifference(pairs) : null,
+    oppositeDirection: numeric && midpoint !== null ? oppositeDirection(pairs, midpoint) : null,
+    midpoint,
     categories,
     confusion,
   };
