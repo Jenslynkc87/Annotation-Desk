@@ -15,6 +15,11 @@ length and digit counts look normal. This script counts two signals per file:
              (confict, frst, signifcant, diferent, ofers, ...)
   loose    - loose single letters f/i/l next to <mark> tags, left behind by the same fault
 
+It also counts <mark> tags per file (column mark_tags). pymupdf4llm writes highlights that are
+present in the PDF as <mark>...</mark>, so these are not noise: they are someone's highlighting,
+and a model reading the text sees it. If the highlights are your own, they leak your judgement
+into the model's input; if only some files have them, the corpus is inconsistent.
+
 and reports them per 10,000 characters. Severity bands (calibrated on five articles;
 treat them as guidance, not a verdict):
     clean     under 1    nothing to worry about
@@ -88,8 +93,9 @@ def main() -> int:
         t = p.read_text(encoding="utf-8", errors="replace")
         broken = len(BROKEN_RE.findall(t))
         loose = len(LOOSE_RE.findall(t))
+        marks = t.count("<mark>")
         per10k = round(10000 * (broken + loose) / max(len(t), 1), 1)
-        rows.append({"file_stem": p.stem, "chars": len(t), "broken_words": broken, "loose_letters": loose,
+        rows.append({"file_stem": p.stem, "chars": len(t), "broken_words": broken, "loose_letters": loose, "mark_tags": marks,
                      "per_10k_chars": per10k, "severity": band(per10k)})
     rows.sort(key=lambda r: -r["per_10k_chars"])
     counts = {}
@@ -99,6 +105,12 @@ def main() -> int:
     for name in ("clean", "trace", "damaged", "severe"):
         if counts.get(name):
             print(f"  {name:8s} {counts[name]}")
+    with_marks = [r for r in rows if r["mark_tags"]]
+    print(f"\nFiles containing <mark> tags (highlights from the PDF): {len(with_marks)} of {len(rows)}")
+    for r in sorted(with_marks, key=lambda r: -r["mark_tags"])[:15]:
+        print(f"   {r['mark_tags']:5d}  {r['file_stem']}")
+    if len(with_marks) > 15:
+        print(f"   ... and {len(with_marks) - 15} more (see the CSV)")
     flagged = [r for r in rows if r["severity"] in ("damaged", "severe")]
     if flagged:
         print(f"\nFILES WITH MANY LOST LIGATURE LETTERS ({len(flagged)}):")
