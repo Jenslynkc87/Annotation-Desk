@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
 import { effectiveTemplate, fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
 import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
-import { cancelBatch, checkBatch, deleteRunById, renameRun, useStore } from '../lib/store';
+import { cancelBatch, checkBatch, deleteRunById, renameRun, retryableCount, retryFailed, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
 import { buildDocViews, runTitle, runTokens } from '../lib/view';
@@ -19,6 +19,8 @@ const STATUS_BADGE: Record<Run['status'], string> = {
 export function RunsView() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
+  const docs = useStore((s) => s.docs);
+  const busy = useStore((s) => !!s.job);
   const [inspect, setInspect] = useState<Run | null>(null);
   const sorted = [...runs].reverse();
 
@@ -55,6 +57,7 @@ export function RunsView() {
               <tbody>
                 {sorted.map((r) => {
                   const t = runTokens(results, r.id);
+                  const retry = retryableCount(r, results, docs);
                   return (
                     <tr key={r.id}>
                       <td className="mono">#{r.number}</td>
@@ -99,6 +102,16 @@ export function RunsView() {
                           <button className="btn small" onClick={() => setInspect(r)}>
                             Settings
                           </button>
+                          {retry > 0 && (
+                            <button
+                              className="btn small"
+                              disabled={busy}
+                              title="Re-send the failed (or never sent) requests in this run, with the same frozen settings; new answers replace the failed ones"
+                              onClick={() => retryFailed(r.id)}
+                            >
+                              Retry failed ({retry})
+                            </button>
+                          )}
                           {r.status === 'submitted' && (
                             <>
                               <button className="btn small" onClick={() => checkBatch(r.id)}>
@@ -151,6 +164,12 @@ export function RunsView() {
             <dd>{cachingLabel(inspect)}</dd>
             <dt>Runs per text</dt>
             <dd>{inspect.snapshot.options.replicates}</dd>
+            {inspect.retries?.length ? (
+              <>
+                <dt>Retries</dt>
+                <dd>{inspect.retries.map((x) => `${x.requests} request${x.requests === 1 ? '' : 's'} re-sent ${fmtDateTime(x.at)}`).join('; ')}</dd>
+              </>
+            ) : null}
             <dt>App version</dt>
             <dd>{inspect.snapshot.appVersion}</dd>
           </dl>
@@ -195,8 +214,12 @@ function AgreementPanel() {
   const matching = firstField ? goldColumnsFor(firstField, docs)[0] : undefined;
   const [b, setB] = useState(matching ? encode({ kind: 'meta', col: matching }) : '');
   const srcA = decode(a);
-  const runA = srcA?.kind === 'run' ? runs.find((r) => r.id === srcA.id) : srcA?.kind === 'rep' ? runs.find((r) => r.id === srcA.runId) : undefined;
+  const runOf = (src: Source | null) =>
+    src?.kind === 'run' ? runs.find((r) => r.id === src.id) : src?.kind === 'rep' ? runs.find((r) => r.id === src.runId) : undefined;
+  // Either side may be a label column (e.g. two human coders); the field list comes from whichever side is a run.
+  const runA = runOf(srcA) ?? runOf(decode(b));
   const fields = runA ? outputFields(runA.snapshot.prompt) : [];
+  const bothColumns = srcA?.kind === 'meta' && decode(b)?.kind === 'meta';
   const [field, setField] = useState('');
   const f = fields.includes(field) ? field : fields[0] ?? '';
   const variable = runA?.snapshot.prompt.variables.find((v) => v.name === f);
@@ -219,21 +242,27 @@ function AgreementPanel() {
     return out;
   };
 
-  const stats = useMemo(() => {
+  const { stats, nLabelled } = useMemo(() => {
     const va = valuesFor(srcA);
     const vb = valuesFor(decode(b));
+    // Coverage: texts with a value in the second source (for a run on the left: among that run's texts).
+    const runLeft = runOf(srcA);
+    const inScope = runLeft ? new Set(runLeft.docIds) : null;
     const xs: string[] = [];
     const ys: string[] = [];
+    let nLabelled = 0;
     for (const d of docs) {
-      const x = va.get(d.id);
       const y = vb.get(d.id);
-      if (x && y) {
+      if (!y || (inScope && !inScope.has(d.id))) continue;
+      nLabelled++;
+      const x = va.get(d.id);
+      if (x) {
         xs.push(x);
         ys.push(y);
       }
     }
     const allowed = variable && (variable.type === 'category' || variable.type === 'ordinal') ? variable.values.map((x) => normalizeLabel(x)).filter(Boolean) : [];
-    return agreement(xs, ys, level, allowed);
+    return { stats: agreement(xs, ys, level, allowed), nLabelled };
   }, [a, b, f, level, yesNo, docs, runs, results]);
 
   const sourceOptions = (allowMeta: boolean) => (
@@ -282,13 +311,13 @@ function AgreementPanel() {
     <div className="card card-pad">
       <div className="card-head">
         <h2>Agreement</h2>
-        <span className="right">Compare a run with human labels, another run, or another replicate.</span>
+        <span className="right">Compare a run with human labels, another run or replicate, or two human coders with each other.</span>
       </div>
       <div className="grid2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
         <div className="field">
-          <label>Model annotations</label>
+          <label>Annotations</label>
           <select className="select" value={a} onChange={(e) => setA(e.target.value)}>
-            {sourceOptions(false)}
+            {sourceOptions(true)}
           </select>
         </div>
         <div className="field">
@@ -298,16 +327,18 @@ function AgreementPanel() {
             {sourceOptions(true)}
           </select>
         </div>
-        <div className="field">
-          <label>Field</label>
-          <select className="select" value={f} onChange={(e) => setField(e.target.value)}>
-            {fields.map((x) => (
-              <option key={x} value={x}>
-                {runA ? fieldLabel(runA.snapshot.prompt, x) : x}
-              </option>
-            ))}
-          </select>
-        </div>
+        {!bothColumns && (
+          <div className="field">
+            <label>Field</label>
+            <select className="select" value={f} onChange={(e) => setField(e.target.value)}>
+              {fields.map((x) => (
+                <option key={x} value={x}>
+                  {runA ? fieldLabel(runA.snapshot.prompt, x) : x}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="field">
           <label>Level of measurement</label>
           <select className="select" value={levelOverride} onChange={(e) => setLevelOverride(e.target.value as Level | '')}>
@@ -336,17 +367,17 @@ function AgreementPanel() {
       ) : (
         <>
           <div className="stat-grid" style={{ marginTop: 6 }}>
-            <Stat k="Texts compared" v={fmtInt(stats.n)} />
-            <Stat k="Percent agreement" v={fmtPct(stats.percentAgreement)} />
-            <Stat k="Cohen's κ" v={fmtStat(stats.cohenKappa)} />
-            {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={fmtStat(stats.weightedKappa)} />}
-            <Stat k={`Krippendorff's α (${level})`} v={fmtStat(stats.krippendorffAlpha)} />
-            <Stat k="Gwet's AC1" v={fmtStat(stats.gwetAC1)} />
+            <Stat k="Texts compared" v={fmtInt(stats.n)} sub={`of ${fmtInt(nLabelled)} with a value in the second source`} />
+            <Stat k="Percent agreement" v={fmtPct(stats.percentAgreement)} sub={ciText(stats.ci.percentAgreement, true)} />
+            <Stat k="Cohen's κ" v={fmtStat(stats.cohenKappa)} sub={ciText(stats.ci.cohenKappa)} />
+            {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={fmtStat(stats.weightedKappa)} sub={ciText(stats.ci.weightedKappa)} />}
+            <Stat k={`Krippendorff's α (${level})`} v={fmtStat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
+            <Stat k="Gwet's AC1" v={fmtStat(stats.gwetAC1)} sub={ciText(stats.ci.gwetAC1)} />
             {stats.spearman !== null && <Stat k="Spearman ρ" v={fmtStat(stats.spearman)} />}
             {stats.mae !== null && <Stat k="Mean abs. error" v={fmtStat(stats.mae)} />}
           </div>
           <p className="hint">
-            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). Texts missing from either source are left out. When
+            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). Texts missing from either source are left out. Intervals: 95% bootstrap (2,000 resamples of texts). When
             you iterate on prompts, keep a held-out set of labelled texts for the final estimate so the reported agreement isn't inflated by prompt selection.
           </p>
           {showMatrix && (
@@ -384,11 +415,19 @@ function AgreementPanel() {
   );
 }
 
-function Stat({ k, v }: { k: string; v: string }) {
+/** "95% CI 0.71–0.86" (percentages for percent agreement); empty when there are too few texts. */
+function ciText(ci: [number, number] | null | undefined, pct = false): string {
+  if (!ci) return '';
+  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : x.toFixed(2));
+  return `95% CI ${f(ci[0])}–${f(ci[1])}`;
+}
+
+function Stat({ k, v, sub }: { k: string; v: string; sub?: string }) {
   return (
     <div className="stat">
       <div className="k">{k}</div>
       <div className="v">{v}</div>
+      {sub && <div className="sub">{sub}</div>}
     </div>
   );
 }

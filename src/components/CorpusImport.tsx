@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   ACCEPTED_EXTENSIONS,
   baseName,
@@ -8,7 +8,8 @@ import {
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
-import { addDocs, toast, useStore } from '../lib/store';
+import { guessKeyColumn, matchLabels } from '../lib/import/labels';
+import { addDocs, addLabels, toast, useStore } from '../lib/store';
 import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
 
@@ -20,7 +21,16 @@ export function CorpusImport() {
   const [busy, setBusy] = useState('');
   const [paste, setPaste] = useState(false);
   const [tables, setTables] = useState<ParsedTable[]>([]);
+  const [labels, setLabels] = useState<ParsedTable | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const labelsRef = useRef<HTMLInputElement>(null);
+
+  const handleLabels = async (file: File | undefined) => {
+    if (!file) return;
+    const r = await parseFile(file);
+    if (r.kind === 'table') setLabels(r.table);
+    else toast(r.kind === 'error' ? `${r.name}: ${r.error}` : 'Labels must be a table (CSV, TSV, XLSX, JSON or JSONL).', 'error');
+  };
 
   const handleFiles = async (files: File[]) => {
     if (!files.length) return;
@@ -86,8 +96,24 @@ export function CorpusImport() {
         <button className="btn small" onClick={() => setPaste(true)}>
           Paste text…
         </button>
+        {nDocs > 0 && (
+          <button className="btn small" onClick={() => labelsRef.current?.click()} title="Add human labels (an answer key) to the texts already here, matched by file name or ID">
+            Add labels from a spreadsheet…
+          </button>
+        )}
       </div>
+      <input
+        ref={labelsRef}
+        type="file"
+        hidden
+        accept=".csv,.tsv,.xlsx,.xls,.ods,.json,.jsonl"
+        onChange={(e) => {
+          void handleLabels(e.target.files?.[0]);
+          e.target.value = '';
+        }}
+      />
       {paste && <PasteDialog onClose={() => setPaste(false)} />}
+      {labels && <LabelsDialog table={labels} onDone={() => setLabels(null)} />}
       {tables.length > 0 && <TableDialog table={tables[0]} onDone={() => setTables((t) => t.slice(1))} />}
     </>
   );
@@ -219,6 +245,53 @@ function TableDialog({ table, onDone }: { table: ParsedTable; onDone: () => void
             ))}
           </tbody>
         </table>
+      </div>
+    </Modal>
+  );
+}
+
+function LabelsDialog({ table, onDone }: { table: ParsedTable; onDone: () => void }) {
+  const docs = useStore((s) => s.docs);
+  const [keyCol, setKeyCol] = useState(() => guessKeyColumn(docs, table));
+  const m = useMemo(() => matchLabels(docs, table, keyCol), [docs, table, keyCol]);
+  const list = (xs: string[]) => `${xs.slice(0, 5).join(', ')}${xs.length > 5 ? ', …' : ''}`;
+  const apply = async () => {
+    await addLabels(m.updates);
+    onDone();
+  };
+  return (
+    <Modal
+      title={`Add labels: ${table.name}`}
+      onClose={onDone}
+      footer={
+        <>
+          <button className="btn" onClick={onDone}>Cancel</button>
+          <button className="btn primary" disabled={!m.updates.size || !m.columns.length} onClick={apply}>
+            Add labels to {m.updates.size.toLocaleString()} text{m.updates.size === 1 ? '' : 's'}
+          </button>
+        </>
+      }
+    >
+      <p className="hint" style={{ marginTop: 0 }}>
+        Each row is matched to a text by its file name or ID; the other columns are added to that text as labels (e.g. human codes to compare
+        with the model). Texts are not changed, and empty cells are skipped.
+      </p>
+      <div className="field">
+        <label>Column with the file name or ID</label>
+        <select className="select" value={keyCol} onChange={(e) => setKeyCol(e.target.value)}>
+          {table.columns.map((c) => (
+            <option key={c}>{c}</option>
+          ))}
+        </select>
+      </div>
+      <div className={`notice ${m.unmatched.length || m.ambiguous.length ? 'warn' : ''}`}>
+        <div>
+          <strong>{m.updates.size.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched a text. Labels to add:{' '}
+          {m.columns.length ? m.columns.join(', ') : '(none)'}.
+        </div>
+        {m.unmatched.length > 0 && <div>Not found ({m.unmatched.length}): {list(m.unmatched)}</div>}
+        {m.ambiguous.length > 0 && <div>Matches more than one text, skipped ({m.ambiguous.length}): {list(m.ambiguous)}</div>}
+        {m.replaced.length > 0 && <div>Already present, values will be replaced: {m.replaced.join(', ')}</div>}
       </div>
     </Modal>
   );

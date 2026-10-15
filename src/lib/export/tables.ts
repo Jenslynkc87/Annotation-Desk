@@ -156,9 +156,13 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
 
 export interface AgreementRow {
   field: string;
+  /** "model" for the run's annotations, or a metadata column (human–human comparison). */
+  source: string;
   compared_with: string;
   level: Level;
   stats: Agreement;
+  /** Texts with a value in `compared_with` (for the model: among the run's texts). `stats.n` of them were compared. */
+  nLabelled: number;
 }
 
 /** Find metadata columns that look like human labels for a field, e.g. "sentiment", "sentiment_gold", "human_sentiment". */
@@ -178,39 +182,77 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
     for (const v of run.snapshot.prompt.variables) for (const c of goldColumnsFor(v.name, docs)) pairs.push({ field: v.name, column: c });
   }
   for (const e of extra) if (!pairs.some((p) => p.field === e.field && p.column === e.column)) pairs.push(e);
-  for (const { field, column } of pairs) {
+  const inRun = new Set(run.docIds);
+  const setup = (field: string) => {
     const variable = run.snapshot.prompt.variables.find((v) => v.name === field);
     const level: Level = variable?.type === 'ordinal' ? 'ordinal' : variable?.type === 'number' ? 'interval' : 'nominal';
-    const yesNo = variable?.type === 'boolean';
+    const allowed = variable && (variable.type === 'category' || variable.type === 'ordinal') ? variable.values.map((x) => normalizeLabel(x)).filter(Boolean) : [];
+    return { level, allowed, yesNo: variable?.type === 'boolean' };
+  };
+  for (const { field, column } of pairs) {
+    const { level, allowed, yesNo } = setup(field);
     const xs: string[] = [];
     const ys: string[] = [];
+    let nLabelled = 0;
     for (const d of docs) {
+      const y = normalizeLabel(d.meta[column], yesNo);
+      if (!y || !inRun.has(d.id)) continue;
+      nLabelled++;
       const v = views.get(d.id)!;
       const x = normalizeLabel(v.values[field], yesNo);
-      const y = normalizeLabel(d.meta[column], yesNo);
-      if (v.status !== 'none' && x && y) {
+      if (v.status !== 'none' && x) {
         xs.push(x);
         ys.push(y);
       }
     }
-    const allowed = variable && (variable.type === 'category' || variable.type === 'ordinal') ? variable.values.map((x) => normalizeLabel(x)).filter(Boolean) : [];
-    out.push({ field, compared_with: column, level, stats: agreement(xs, ys, level, allowed) });
+    out.push({ field, source: 'model', compared_with: column, level, stats: agreement(xs, ys, level, allowed), nLabelled });
+  }
+  // Human–human baseline: two label columns for the same field (e.g. stance_gold and stance_coder2).
+  const fields = [...new Set(pairs.map((p) => p.field))];
+  for (const field of fields) {
+    const cols = pairs.filter((p) => p.field === field).map((p) => p.column);
+    const { level, allowed, yesNo } = setup(field);
+    for (let i = 0; i < cols.length; i++)
+      for (let j = i + 1; j < cols.length; j++) {
+        const xs: string[] = [];
+        const ys: string[] = [];
+        let nLabelled = 0;
+        for (const d of docs) {
+          const y = normalizeLabel(d.meta[cols[j]], yesNo);
+          if (!y) continue;
+          nLabelled++;
+          const x = normalizeLabel(d.meta[cols[i]], yesNo);
+          if (x) {
+            xs.push(x);
+            ys.push(y);
+          }
+        }
+        out.push({ field, source: cols[i], compared_with: cols[j], level, stats: agreement(xs, ys, level, allowed), nLabelled });
+      }
   }
   return out;
 }
 
 export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
+  const round = (x: number) => Math.round(x * 10000) / 10000;
+  const withCi = (name: string, value: number | null, ci: [number, number] | null | undefined): Row => ({
+    [name]: value,
+    [`${name}_ci_low`]: ci ? round(ci[0]) : null,
+    [`${name}_ci_high`]: ci ? round(ci[1]) : null,
+  });
   return rows.map((a) => ({
     run: runNumber,
     field: a.field,
+    annotations: a.source === 'model' ? `model (run ${runNumber})` : a.source,
     compared_with: a.compared_with,
     level_of_measurement: a.level,
     n: a.stats.n,
-    percent_agreement: a.stats.percentAgreement,
-    cohen_kappa: a.stats.cohenKappa,
-    weighted_kappa_quadratic: a.stats.weightedKappa,
-    krippendorff_alpha: a.stats.krippendorffAlpha,
-    gwet_ac1: a.stats.gwetAC1,
+    n_with_label: a.nLabelled,
+    ...withCi('percent_agreement', a.stats.percentAgreement, a.stats.ci.percentAgreement),
+    ...withCi('cohen_kappa', a.stats.cohenKappa, a.stats.ci.cohenKappa),
+    ...withCi('weighted_kappa_quadratic', a.stats.weightedKappa, a.stats.ci.weightedKappa),
+    ...withCi('krippendorff_alpha', a.stats.krippendorffAlpha, a.stats.ci.krippendorffAlpha),
+    ...withCi('gwet_ac1', a.stats.gwetAC1, a.stats.ci.gwetAC1),
     spearman_rho: a.stats.spearman,
     pearson_r: a.stats.pearson,
     mean_absolute_error: a.stats.mae,
@@ -234,6 +276,7 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       replicates: r.snapshot.options.replicates,
       requests_ok: rs.filter((x) => x.status === 'ok').length,
       requests_failed: rs.filter((x) => x.status === 'error').length,
+      requests_retried: (r.retries ?? []).reduce((s, x) => s + x.requests, 0),
       provider: r.snapshot.model.provider,
       model_requested: r.snapshot.model.model,
       models_reported: [...new Set(rs.map((x) => x.modelReported).filter(Boolean))].join('; '),

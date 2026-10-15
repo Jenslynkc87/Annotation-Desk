@@ -116,6 +116,8 @@ export interface Run {
     lastCheckedAt: string | null;
   };
   error: string | null;
+  /** Failed requests re-sent within this run (same frozen settings, always as immediate requests). */
+  retries?: { at: string; requests: number }[];
 }
 
 export interface Usage {

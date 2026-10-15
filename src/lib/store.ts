@@ -265,6 +265,16 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
   }
 }
 
+/** Add label columns (e.g. human codes) to existing texts. Only metadata changes; texts are untouched. */
+export async function addLabels(updates: Map<string, Record<string, string>>) {
+  const changed = state.docs.filter((d) => updates.has(d.id)).map((d) => ({ ...d, meta: { ...d.meta, ...updates.get(d.id) } }));
+  if (!changed.length) return;
+  await dbApi.putDocs(changed);
+  const byId = new Map(changed.map((d) => [d.id, d]));
+  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
+  toast(`Added labels to ${changed.length} text${changed.length === 1 ? '' : 's'}.`, 'success');
+}
+
 export async function removeDocs(ids: string[]) {
   await dbApi.deleteDocs(ids);
   const drop = new Set(ids);
@@ -438,15 +448,8 @@ export async function startRun(req: RunRequest): Promise<void> {
     batch: null,
     error: null,
   };
-  const docsById = new Map(state.docs.map((d) => [d.id, d]));
   const adapter = provider(snapshot.model.provider);
-  const tasks: { doc: Doc; replicate: number; part: Record<string, unknown> }[] = [];
-  for (const id of req.docIds) {
-    const doc = docsById.get(id);
-    if (!doc) continue;
-    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, doc), snapshot.options, snapshot.model.model);
-    for (let r = 1; r <= snapshot.options.replicates; r++) tasks.push({ doc, replicate: r, part });
-  }
+  const tasks = buildTasks(run, () => true);
 
   if (batch) {
     const map: Record<string, [string, number]> = {};
@@ -468,6 +471,30 @@ export async function startRun(req: RunRequest): Promise<void> {
   }
 
   await saveRun(run);
+  await sendTasks(run, tasks, key, `Run #${run.number} finished`);
+}
+
+type Task = { doc: Doc; replicate: number; part: Record<string, unknown> };
+
+/** Requests for a run's texts × replicates (those `include` accepts), built from the run's frozen settings. */
+function buildTasks(run: Run, include: (docId: string, replicate: number) => boolean): Task[] {
+  const docsById = new Map(state.docs.map((d) => [d.id, d]));
+  const { snapshot } = run;
+  const adapter = provider(snapshot.model.provider);
+  const tasks: Task[] = [];
+  for (const id of run.docIds) {
+    const doc = docsById.get(id);
+    if (!doc) continue;
+    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, doc), snapshot.options, snapshot.model.model);
+    for (let r = 1; r <= snapshot.options.replicates; r++) if (include(doc.id, r)) tasks.push({ doc, replicate: r, part });
+  }
+  return tasks;
+}
+
+/** Send requests one by one (several in parallel), storing each result in the run as it arrives. */
+async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: string) {
+  const { snapshot } = run;
+  const adapter = provider(snapshot.model.provider);
   const job: Job = { runId: run.id, total: tasks.length, done: 0, failed: 0, abort: new AbortController() };
   set({ job });
   const signal = job.abort.signal;
@@ -508,12 +535,46 @@ export async function startRun(req: RunRequest): Promise<void> {
   set({ job: null });
   if (run.status === 'completed') {
     const f = final?.failed ?? 0;
-    toast(`Run #${run.number} finished: ${(final?.done ?? 0) - f} ok${f ? `, ${f} failed` : ''}.`, f ? 'error' : 'success');
+    toast(`${doneMessage}: ${(final?.done ?? 0) - f} ok${f ? `, ${f} failed. Retry them in the same run under Runs & agreement` : ''}.`, f ? 'error' : 'success');
   } else if (run.status === 'failed') {
     toast(run.error ?? 'Run failed', 'error');
   } else {
     toast(`Run #${run.number} cancelled. Completed results were kept.`);
   }
+}
+
+/** Requests in a finished run without a usable result: failed, or never sent (e.g. after cancelling). */
+export function retryableCount(run: Run, results: Result[], docs: Doc[]): number {
+  if (run.status === 'running' || run.status === 'submitted') return 0;
+  const ok = new Set(results.filter((r) => r.runId === run.id && r.status === 'ok').map((r) => r.id));
+  const present = new Set(docs.map((d) => d.id));
+  let n = 0;
+  for (const id of run.docIds) {
+    if (!present.has(id)) continue;
+    for (let rep = 1; rep <= run.snapshot.options.replicates; rep++) if (!ok.has(`${run.id}:${id}:${rep}`)) n++;
+  }
+  return n;
+}
+
+/**
+ * Re-send a run's failed (or never sent) requests within the same run, with its frozen settings, so the
+ * run stays one complete dataset. New answers replace the failed ones; each retry is recorded on the run.
+ */
+export async function retryFailed(runId: string) {
+  const original = state.runs.find((r) => r.id === runId);
+  if (!original) return;
+  if (state.job) return toast('A run is already in progress.', 'error');
+  const key = state.keys[original.snapshot.model.provider];
+  if (!key) return toast(`Add your ${provider(original.snapshot.model.provider).label} API key first (API keys, top right).`, 'error');
+  const ok = new Set(state.results.filter((r) => r.runId === runId && r.status === 'ok').map((r) => r.id));
+  const run: Run = structuredClone(original);
+  const tasks = buildTasks(run, (docId, rep) => !ok.has(`${run.id}:${docId}:${rep}`));
+  if (!tasks.length) return toast(`Run #${run.number} has no failed requests.`);
+  run.retries = [...(run.retries ?? []), { at: nowIso(), requests: tasks.length }];
+  run.status = 'running';
+  run.error = null;
+  await saveRun(run);
+  await sendTasks(run, tasks, key, `Retry in run #${run.number} finished`);
 }
 
 export function cancelJob() {

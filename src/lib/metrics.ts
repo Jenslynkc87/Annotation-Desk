@@ -13,10 +13,14 @@ export interface Agreement {
   spearman: number | null;
   pearson: number | null;
   mae: number | null;
+  /** 95% bootstrap intervals (percentile method, texts resampled); null when too few texts. */
+  ci: Partial<Record<CiStat, [number, number] | null>>;
   categories: string[];
   /** confusion[a][b] = count, a = first source, b = second source */
   confusion: Record<string, Record<string, number>>;
 }
+
+export type CiStat = 'percentAgreement' | 'cohenKappa' | 'weightedKappa' | 'krippendorffAlpha' | 'gwetAC1';
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
@@ -29,10 +33,14 @@ export function percentAgreement(pairs: [string, string][]): number | null {
   return pairs.filter(([a, b]) => a === b).length / pairs.length;
 }
 
-export function cohenKappa(pairs: [string, string][], weights: 'none' | 'quadratic' = 'none'): number | null {
+/**
+ * Cohen's kappa. `scale` (e.g. the codebook's allowed values) adds categories nobody used, so that
+ * quadratic weights reflect distances on the full scale (as sklearn's `labels=`); plain kappa is unaffected.
+ */
+export function cohenKappa(pairs: [string, string][], weights: 'none' | 'quadratic' = 'none', scale: string[] = []): number | null {
   const n = pairs.length;
   if (!n) return null;
-  const cats = sortCats([...new Set(pairs.flat())]);
+  const cats = sortCats([...new Set([...scale, ...pairs.flat()])]);
   if (cats.length < 2) return null;
   const k = cats.length;
   const idx = new Map(cats.map((c, i) => [c, i]));
@@ -148,6 +156,42 @@ export function spearman(xs: number[], ys: number[]): number | null {
   return pearson(ranks(xs), ranks(ys));
 }
 
+// Small seeded random generator (mulberry32), so bootstrap intervals are the same every time.
+function seeded(seed: number) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const BOOTSTRAP_RESAMPLES = 2000;
+
+/** 95% percentile bootstrap intervals: texts are drawn with replacement and each statistic recomputed. */
+function bootstrapCI(pairs: [string, string][], stats: Partial<Record<CiStat, (p: [string, string][]) => number | null>>): Agreement['ci'] {
+  const keys = Object.keys(stats) as CiStat[];
+  if (pairs.length < 10) return Object.fromEntries(keys.map((k) => [k, null]));
+  const rnd = seeded(20260101);
+  const draws: Record<string, number[]> = Object.fromEntries(keys.map((k) => [k, []]));
+  const sample: [string, string][] = new Array(pairs.length);
+  for (let b = 0; b < BOOTSTRAP_RESAMPLES; b++) {
+    for (let i = 0; i < pairs.length; i++) sample[i] = pairs[Math.floor(rnd() * pairs.length)];
+    for (const k of keys) {
+      const v = stats[k]!(sample);
+      if (v !== null && Number.isFinite(v)) draws[k].push(v);
+    }
+  }
+  const pct = (xs: number[], q: number) => xs[Math.min(xs.length - 1, Math.max(0, Math.round(q * (xs.length - 1))))];
+  return Object.fromEntries(
+    keys.map((k) => {
+      const xs = draws[k].sort((x, y) => x - y);
+      // Undefined in many resamples (e.g. only one category drawn): no trustworthy interval.
+      return [k, xs.length >= 0.9 * BOOTSTRAP_RESAMPLES ? [pct(xs, 0.025), pct(xs, 0.975)] : null];
+    }),
+  );
+}
+
 export function agreement(a: string[], b: string[], level: Level, allowed: string[] = []): Agreement {
   const pairs: [string, string][] = [];
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
@@ -160,13 +204,23 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
   const confusion: Record<string, Record<string, number>> = {};
   for (const c of categories) confusion[c] = Object.fromEntries(categories.map((d) => [d, 0]));
   for (const [x, y] of pairs) confusion[x][y]++;
+  const scale = numeric ? allowed.filter(isNum) : [];
+  const alphaLevel = numeric ? level : 'nominal';
+  const stats = {
+    percentAgreement,
+    cohenKappa: (p: [string, string][]) => cohenKappa(p),
+    ...(numeric ? { weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale) } : {}),
+    krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
+    gwetAC1: (p: [string, string][]) => gwetAC1(p, allowed),
+  };
   return {
     n: pairs.length,
     percentAgreement: percentAgreement(pairs),
     cohenKappa: cohenKappa(pairs),
-    weightedKappa: numeric ? cohenKappa(pairs, 'quadratic') : null,
-    krippendorffAlpha: krippendorffAlpha(pairs, numeric ? level : 'nominal'),
+    weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
+    krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
     gwetAC1: gwetAC1(pairs, allowed),
+    ci: bootstrapCI(pairs, stats),
     spearman: numeric ? spearman(xs, ys) : null,
     pearson: numeric ? pearson(xs, ys) : null,
     mae: numeric ? xs.reduce((s, x, i) => s + Math.abs(x - ys[i]), 0) / xs.length : null,

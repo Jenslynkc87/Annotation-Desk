@@ -166,7 +166,7 @@ function TextsAndResults() {
               <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All texts (${docs.length})`, false)} title={study.options.batch ? 'Submit every text as a batch' : 'Annotate every text now'}>
                 All ({docs.length.toLocaleString()})
               </button>
-              <button className="btn" disabled={busy} onClick={remaining} title="Only texts without a successful result for the current prompt">
+              <button className="btn" disabled={busy} onClick={remaining} title="Starts a new run with the texts that have no usable result for the current prompt. To complete a finished run instead, use Retry failed under Runs & agreement.">
                 Remaining
               </button>
             </div>

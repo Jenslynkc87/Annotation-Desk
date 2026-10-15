@@ -50,3 +50,24 @@ describe('aggregate', () => {
     expect(aggregate(['2', '3'], 'median')).toBe('2.5');
   });
 });
+
+describe('full scale and intervals', () => {
+  const x = s([1, 2, 3, 3, 2, 1, 5, 2, 3, 1]);
+  const y = s([1, 2, 2, 3, 2, 1, 5, 1, 3, 2]);
+  it('weighted kappa uses the whole codebook scale (sklearn labels=[1..5])', () => {
+    expect(cohenKappa(zip(x, y), 'quadratic')).toBeCloseTo(0.8387097, 6);
+    expect(cohenKappa(zip(x, y), 'quadratic', s([1, 2, 3, 4, 5]))).toBeCloseTo(0.8920863, 6);
+    expect(agreement(x, y, 'ordinal', s([1, 2, 3, 4, 5])).weightedKappa).toBeCloseTo(0.8920863, 6);
+  });
+  it('gives the same 95% interval every time, around the estimate', () => {
+    const r1 = agreement([...x, ...x, ...x], [...y, ...y, ...y], 'ordinal', s([1, 2, 3, 4, 5]));
+    const r2 = agreement([...x, ...x, ...x], [...y, ...y, ...y], 'ordinal', s([1, 2, 3, 4, 5]));
+    expect(r1.ci).toEqual(r2.ci);
+    const [lo, hi] = r1.ci.cohenKappa!;
+    expect(lo).toBeLessThanOrEqual(r1.cohenKappa!);
+    expect(hi).toBeGreaterThanOrEqual(r1.cohenKappa!);
+  });
+  it('gives no interval for very few texts', () => {
+    expect(agreement(['a', 'b', 'a'], ['a', 'b', 'b'], 'nominal').ci.cohenKappa).toBeNull();
+  });
+});
