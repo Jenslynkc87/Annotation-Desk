@@ -318,3 +318,6 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 
 .label-note { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
 .grid2.model-row { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+/* Now / Batch switch in the run bar: same height and text size as the neighbouring buttons. */
+.runbar .seg.compact { align-self: center; }
+.runbar .seg.compact button { padding: 0 14px; height: 36px; font-size: 13.5px; }
