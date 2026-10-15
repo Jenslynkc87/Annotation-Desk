@@ -322,13 +322,14 @@ function TextsAndResults() {
                       <td>
                         <div className="snippet">{d.text.slice(0, 300)}</div>
                       </td>
-                      {fields.map((f) => {
+                      {fields.map((f, i) => {
                         const val = v.values[f] ?? '';
                         const cmp = compareCol && f === compareField && val && gold ? (normalizeLabel(val, compareYesNo) === normalizeLabel(gold, compareYesNo) ? 'match' : 'mismatch') : '';
                         return (
                           <td key={f}>
                             {v.status === 'error' ? (
-                              <span className="badge err">error</span>
+                              // One badge per failed text, not one per column.
+                              i === 0 && <span className="badge err">failed</span>
                             ) : (
                               <span className={`val ${cmp}`} title={v.consistency[f] !== undefined ? `${Math.round(v.consistency[f] * 100)}% of runs agree` : undefined}>
                                 {f === 'response' ? <span className="snippet" style={{ fontWeight: 400 }}>{val}</span> : val || (v.status === 'none' ? '' : '—')}
@@ -341,7 +342,7 @@ function TextsAndResults() {
                       {compareCol && <td className="val">{gold}</td>}
                       <td>
                         {v.run ? (
-                          <span className={`badge ${v.status === 'ok' ? 'muted' : v.status === 'error' ? 'err' : 'warn'}`} title={`Run ${runTitle(v.run)} · prompt v${v.run.snapshot.promptVersion} · ${v.run.snapshot.model.model}`}>
+                          <span className={`badge ${v.status === 'partial' ? 'warn' : 'muted'}`} title={`Run ${runTitle(v.run)} · prompt v${v.run.snapshot.promptVersion} · ${v.run.snapshot.model.model}`}>
                             #{v.run.number} · v{v.run.snapshot.promptVersion}
                           </span>
                         ) : (

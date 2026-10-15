@@ -35,7 +35,7 @@ export interface RunOptions {
   /** OpenAI: keep requests in the OpenAI dashboard logs (the API's default). Undefined = on. */
   storeInLogs?: boolean;
   caching: boolean;
-  /** Anthropic cache lifetime. */
+  /** Anthropic cache lifetime, set per run: 5m for immediate requests, 1h for batches. */
   cacheTtl: '5m' | '1h';
   batch: boolean;
   replicates: number;

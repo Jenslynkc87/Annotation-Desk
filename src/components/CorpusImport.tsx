@@ -2,7 +2,6 @@ import { useRef, useState } from 'react';
 import {
   ACCEPTED_EXTENSIONS,
   baseName,
-  chunkByWords,
   guessIdColumn,
   guessTextColumn,
   parseFile,
@@ -15,27 +14,12 @@ import { Icon, Modal } from './ui';
 
 type NewDoc = { docId: string; text: string; meta: Record<string, string>; source: string };
 
-function applyChunking(items: NewDoc[], words: number | null): NewDoc[] {
-  if (!words) return items;
-  return items.flatMap((d) => {
-    const chunks = chunkByWords(d.text, words);
-    if (chunks.length <= 1) return [d];
-    return chunks.map((text, i) => ({
-      ...d,
-      docId: `${d.docId}_part${i + 1}`,
-      text,
-      meta: { ...d.meta, parent_id: d.docId, part: String(i + 1), parts: String(chunks.length) },
-    }));
-  });
-}
-
 export function CorpusImport() {
   const nDocs = useStore((s) => s.docs.length);
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState('');
   const [paste, setPaste] = useState(false);
   const [tables, setTables] = useState<ParsedTable[]>([]);
-  const [chunkWords, setChunkWords] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = async (files: File[]) => {
@@ -53,7 +37,7 @@ export function CorpusImport() {
       else errors.push(`${r.name}: ${r.error}`);
     }
     setBusy('');
-    if (texts.length) await addDocs(applyChunking(texts, chunkWords));
+    if (texts.length) await addDocs(texts);
     if (newTables.length) setTables(newTables);
     if (errors.length) toast(`Skipped ${errors.length} file(s): ${errors.slice(0, 3).join('; ')}${errors.length > 3 ? '…' : ''}`, 'error');
   };
@@ -102,39 +86,21 @@ export function CorpusImport() {
         <button className="btn small" onClick={() => setPaste(true)}>
           Paste text…
         </button>
-        <label className="check" style={{ fontSize: 13 }}>
-          <input type="checkbox" checked={chunkWords !== null} onChange={(e) => setChunkWords(e.target.checked ? 1000 : null)} />
-          Split long texts into chunks
-        </label>
-        {chunkWords !== null && (
-          <span className="row" style={{ gap: 6 }}>
-            <input
-              className="input small"
-              type="number"
-              min={50}
-              step={50}
-              style={{ width: 90 }}
-              value={chunkWords}
-              onChange={(e) => setChunkWords(Math.max(50, Number(e.target.value) || 1000))}
-            />
-            <span className="hint">words each (applies to the next import)</span>
-          </span>
-        )}
       </div>
-      {paste && <PasteDialog onClose={() => setPaste(false)} chunkWords={chunkWords} />}
-      {tables.length > 0 && <TableDialog table={tables[0]} chunkWords={chunkWords} onDone={() => setTables((t) => t.slice(1))} />}
+      {paste && <PasteDialog onClose={() => setPaste(false)} />}
+      {tables.length > 0 && <TableDialog table={tables[0]} onDone={() => setTables((t) => t.slice(1))} />}
     </>
   );
 }
 
-function PasteDialog({ onClose, chunkWords }: { onClose: () => void; chunkWords: number | null }) {
+function PasteDialog({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState('');
   const [mode, setMode] = useState<'none' | 'blank' | 'line'>('none');
   const [prefix, setPrefix] = useState('pasted');
   const items = splitPasted(text, mode);
   const add = async () => {
     const docs = items.map((t, i) => ({ docId: items.length === 1 ? prefix : `${prefix}_${i + 1}`, text: t, meta: {}, source: 'pasted' }));
-    await addDocs(applyChunking(docs, chunkWords));
+    await addDocs(docs);
     onClose();
   };
   return (
@@ -172,7 +138,7 @@ function PasteDialog({ onClose, chunkWords }: { onClose: () => void; chunkWords:
   );
 }
 
-function TableDialog({ table, onDone, chunkWords }: { table: ParsedTable; onDone: () => void; chunkWords: number | null }) {
+function TableDialog({ table, onDone }: { table: ParsedTable; onDone: () => void }) {
   const [textCol, setTextCol] = useState(guessTextColumn(table));
   const [idCol, setIdCol] = useState(guessIdColumn(table));
   const [skipEmpty, setSkipEmpty] = useState(true);
@@ -186,7 +152,7 @@ function TableDialog({ table, onDone, chunkWords }: { table: ParsedTable; onDone
       meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
       source: table.name,
     }));
-    await addDocs(applyChunking(docs, chunkWords));
+    await addDocs(docs);
     onDone();
   };
   return (

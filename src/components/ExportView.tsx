@@ -65,9 +65,6 @@ export function ExportView() {
             <h2>Excel workbook</h2>
           </div>
           <p className="hint">Results for the chosen run, one row per text, plus per-replicate results, agreement, settings and a run overview.</p>
-          <ul className="filelist">
-            <li>Results · By replicate · Agreement · Settings · All runs</li>
-          </ul>
           <button
             className="btn primary export-btn"
             disabled={!run || !!busy}
@@ -90,11 +87,6 @@ export function ExportView() {
           <label className="check">
             <input type="checkbox" checked={researchLogs} onChange={(e) => setResearchLogs(e.target.checked)} /> Include full request and response logs
           </label>
-          <ul className="filelist">
-            <li>README.md · study.json · study-backup.json</li>
-            <li>corpus/ · prompts/vN/ · runs/run-NN/</li>
-            <li>results/ · scripts/</li>
-          </ul>
           <button
             className="btn primary export-btn"
             disabled={!!busy || (!docs.length && !runs.length)}
@@ -134,10 +126,6 @@ export function ExportView() {
               <div className="hint">These contain the texts.</div>
             </span>
           </label>
-          <ul className="filelist">
-            <li>README.md · metadata.json</li>
-            <li>prompt/ · results/ · scripts/{supp.includeTexts ? ' · data/' : ''}{supp.includeLogs ? ' · logs/' : ''}</li>
-          </ul>
           <button
             className="btn primary export-btn"
             disabled={!run || !!busy}

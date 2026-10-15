@@ -14,6 +14,7 @@ import {
   type Result,
   type ResultLog,
   type Run,
+  type RunOptions,
   type RunSnapshot,
   type Study,
 } from './types';
@@ -325,24 +326,27 @@ export function versionFor(hash: string, runs: Run[]): number {
   return runs.reduce((m, r) => Math.max(m, r.snapshot.promptVersion), 0) + 1;
 }
 
-export async function buildSnapshot(st: Study): Promise<RunSnapshot> {
+export async function buildSnapshot(st: Study, batch = false): Promise<RunSnapshot> {
   const promptHash = await promptFingerprint(st);
   const outputSchema = buildOutputSchema(st.prompt);
   const adapter = provider(st.model.provider);
   const model = structuredClone(st.model);
   // Record only what is sent: these models take no temperature.
   if (model.provider === 'anthropic' && rejectsTemperature(model.model)) model.temperature = null;
+  // Anthropic cache lifetime: 5 minutes between immediate requests; 1 hour for batches, which are
+  // processed over a longer period (as Anthropic recommends).
+  const options: RunOptions = { ...structuredClone(st.options), cacheTtl: batch ? '1h' : '5m' };
   return {
     appVersion: __APP_VERSION__,
     model,
-    options: structuredClone(st.options),
+    options,
     prompt: structuredClone(st.prompt),
     promptVersion: versionFor(promptHash, state.runs),
     promptHash,
     outputSchema,
     requestBase: adapter.buildRequestBase({
       model,
-      options: st.options,
+      options,
       system: st.prompt.system,
       outputSchema,
       promptHash,
@@ -417,8 +421,8 @@ export async function startRun(req: RunRequest): Promise<void> {
     return toast('Add at least one output field, or switch the output to plain text.', 'error');
   }
 
-  const snapshot = await buildSnapshot(st);
   const batch = st.options.batch && !req.forceSync;
+  const snapshot = await buildSnapshot(st, batch);
   const run: Run = {
     id: uid(),
     studyId: st.id,

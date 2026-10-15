@@ -162,29 +162,6 @@ export function guessIdColumn(t: ParsedTable): string {
   return t.columns.find((c) => /^(id|doc_?id|text_?id|item_?id|uid|key)$/i.test(c)) ?? '';
 }
 
-/** Split text into chunks of at most `words` words (no overlap). */
-export function chunkByWords(text: string, words: number): string[] {
-  const tokens = text.split(/(\s+)/);
-  const chunks: string[] = [];
-  let cur = '';
-  let n = 0;
-  for (const t of tokens) {
-    if (/^\s+$/.test(t)) {
-      cur += t;
-      continue;
-    }
-    if (n === words) {
-      chunks.push(cur.trim());
-      cur = '';
-      n = 0;
-    }
-    cur += t;
-    n++;
-  }
-  if (cur.trim()) chunks.push(cur.trim());
-  return chunks;
-}
-
 /** Split pasted text into items. */
 export function splitPasted(text: string, mode: 'none' | 'blank' | 'line'): string[] {
   const t = text.replace(/\r\n/g, '\n').trim();

@@ -106,9 +106,9 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
 
   const showPreview = async () => {
     const st = currentStudy(getState())!;
-    const snap = await buildSnapshot(st);
+    const snap = await buildSnapshot(st, st.options.batch);
     const doc = getState().docs[0] ?? { docId: 'example', text: '(your text appears here)', meta: {} };
-    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), st.options, st.model.model);
+    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), snap.options, st.model.model);
     setPreview({ ...snap.requestBase, ...part });
   };
 
@@ -117,11 +117,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     .join(' · ');
   const outputSummary =
     p.outputMode === 'text' ? 'Plain text' : `${p.variables.length} field${p.variables.length === 1 ? '' : 's'}: ${p.variables.map((v) => v.name).join(', ')}`;
-  const runSummary = [
-    `${o.replicates}× per text`,
-    o.caching ? 'caching on' : 'caching off',
-    o.batch ? 'batch' : `${o.concurrency} parallel`,
-  ].join(' · ');
+  const runSummary = [`${o.replicates}× per text`, o.caching ? 'caching on' : 'caching off'].join(' · ');
 
   return (
     <div className="card setup-card">
@@ -247,7 +243,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
                   step="0.1"
                   min="0"
                   max="2"
-                  placeholder={noTemperature ? 'Not supported by this model' : 'Model default'}
+                  placeholder={noTemperature ? 'Not supported' : 'Model default'}
                   disabled={noTemperature}
                   value={m.temperature ?? ''}
                   onChange={(e) => updateStudy((s) => void (s.model.temperature = e.target.value === '' ? null : Number(e.target.value)))}
@@ -271,6 +267,22 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
                 ? 'Current Claude models do not accept a temperature setting, so none is sent.'
                 : 'Leave temperature empty unless needed: many reasoning models reject anything but their default.'}
             </div>
+            <div className="grid2" style={{ marginTop: 12 }}>
+              <div className="field">
+                <label htmlFor="conc">Parallel requests</label>
+                <input
+                  id="conc"
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={o.concurrency}
+                  disabled={o.batch}
+                  onChange={(e) => updateStudy((s) => void (s.options.concurrency = Math.min(16, Math.max(1, Math.round(Number(e.target.value)) || 1))))}
+                />
+              </div>
+            </div>
+            <div className="hint tight">How many texts are sent at once (not used for batches). Lower it if you hit rate limits.</div>
           </div>
         </details>
       </Section>
@@ -351,40 +363,16 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
               onChange={(e) => updateStudy((s) => void (s.options.replicates = Math.min(10, Math.max(1, Math.round(Number(e.target.value)) || 1))))}
             />
           </div>
-          <div className="field">
-            <label htmlFor="conc">Parallel requests</label>
-            <input
-              id="conc"
-              className="input"
-              type="number"
-              min={1}
-              max={16}
-              value={o.concurrency}
-              disabled={o.batch}
-              onChange={(e) => updateStudy((s) => void (s.options.concurrency = Math.min(16, Math.max(1, Math.round(Number(e.target.value)) || 1))))}
-            />
-          </div>
         </div>
         <div className="hint tight">{o.replicates > 1 ? `Each text is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}` : 'Use 2 or more to measure how consistent the model is.'}</div>
 
         <label className="check" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={o.caching} onChange={(e) => updateStudy((s) => void (s.options.caching = e.target.checked))} />
-          <span className="grow">
-            <span className="row" style={{ justifyContent: 'space-between' }}>
-              Prompt caching
-              {o.caching && m.provider === 'anthropic' && (
-                <span className="seg compact" onClick={(e) => e.preventDefault()}>
-                  {(['5m', '1h'] as const).map((t) => (
-                    <button key={t} className={o.cacheTtl === t ? 'on' : ''} onClick={() => updateStudy((s) => void (s.options.cacheTtl = t))}>
-                      {t === '5m' ? '5 min' : '1 hour'}
-                    </button>
-                  ))}
-                </span>
-              )}
-            </span>
+          <span>
+            Prompt caching
             <div className="hint">
               {m.provider === 'anthropic'
-                ? 'Reuses the fixed part of the prompt (before the text) between requests: cheaper and faster. Only applies when that part is long enough: about 400 words on Claude 5 models, 800–3,000 words on older ones. Shorter prompts are simply not cached.'
+                ? 'Saves cost when the fixed part of your prompt is long (about 400+ words; more on older models).'
                 : supportsExplicitCaching(m.model)
                   ? 'Caches only the fixed part of your prompt (not the texts). Off: nothing is cached or written.'
                   : 'This OpenAI model caches long prompts automatically and it cannot be turned off.'}
