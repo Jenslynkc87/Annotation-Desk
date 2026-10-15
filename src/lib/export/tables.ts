@@ -58,6 +58,18 @@ function isNumericVar(run: Run, f: string): boolean {
   return t === 'number' || t === 'ordinal';
 }
 
+function hasJson(run: Run, response: string | undefined): boolean {
+  return run.snapshot.prompt.outputMode === 'text' && flattenJsonResponse(response) !== null;
+}
+
+/** Identifying columns first (id, file name), annotations next, bulky columns (raw JSON answer, full text) last. */
+function readingOrder(row: Row, rawLast: boolean): Row {
+  const front = ['doc_id', 'file'].filter((k) => k in row);
+  const back = [...(rawLast ? [TEXT_RESPONSE_KEY] : []), 'text'].filter((k) => k in row);
+  const middle = Object.keys(row).filter((k) => !front.includes(k) && !back.includes(k));
+  return Object.fromEntries([...front, ...middle, ...back].map((k) => [k, row[k]]));
+}
+
 /** One row per request (text × replicate). */
 export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Result[], opts: { rationale: boolean; reasoning: boolean }): Row[] {
   const docById = new Map(docs.map((d) => [d.id, d]));
@@ -133,7 +145,7 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
     for (const c of cols) row[c in row ? `meta_${c}` : c] = d.meta[c] ?? '';
     row.n_ok = v.results.filter((r) => r.status === 'ok').length;
     row.n_error = v.results.filter((r) => r.status === 'error').length;
-    rows.push(row);
+    rows.push(readingOrder(row, hasJson(run, v.values[TEXT_RESPONSE_KEY])));
   }
   return rows;
 }

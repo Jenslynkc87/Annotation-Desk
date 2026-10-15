@@ -51,14 +51,14 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
     ws.columns = cols.map((c) => {
       const long = c === 'text' || c === 'response' || c === 'value';
       const prose = c === 'rationale' || c === 'reasoning_summary' || c.endsWith('_reasoning');
-      return { header: c, key: c, width: long ? 40 : prose ? 55 : Math.min(32, Math.max(9, c.length + 3)) };
+      return { header: c, key: c, width: long ? 40 : prose ? 70 : Math.min(32, Math.max(9, c.length + 3)) };
     });
     ws.addRows(data.map((r) => cols.map((c) => r[c] ?? null)));
     const head = ws.getRow(1);
     head.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2F4B6E' } };
+    head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF003D73' } };
     head.alignment = { vertical: 'middle' };
-    head.height = 22;
+    head.height = 28;
     ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: cols.length } };
     // Wrap short prose columns; leave whole-article text and raw JSON on one line so rows stay compact.
     cols.forEach((c, i) => {
