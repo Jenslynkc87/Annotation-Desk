@@ -7,7 +7,9 @@ export type VariableType = 'category' | 'ordinal' | 'number' | 'boolean' | 'text
 
 /** One annotation field the model must return (a codebook entry). */
 export interface Variable {
-  name: string; // machine name, used as JSON key and column name
+  name: string; // machine key, used as JSON key and export column; derived from `label`
+  /** Name as typed by the user (any characters); shown in the app. Falls back to `name`. */
+  label?: string;
   type: VariableType;
   /** Allowed values for category / ordinal (ordinal values are integers). */
   values: string[];

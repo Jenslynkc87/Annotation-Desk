@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { normalizeLabel, outputFields } from '../lib/prompt';
+import { fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
 import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { sample } from '../lib/util';
@@ -49,6 +49,12 @@ function TextsAndResults() {
     return f;
   }, [study.prompt, runFilter, runs]);
   const compareField = fields[0];
+  // Display names: look the key up in the current prompt, then in the viewed run's prompt.
+  const fieldName = (key: string) => {
+    const viewedRun = runFilter === 'latest' ? null : runs.find((r) => r.id === runFilter);
+    const inCurrent = study.prompt.variables.some((v) => v.name === key);
+    return fieldLabel(inCurrent || !viewedRun ? study.prompt : viewedRun.snapshot.prompt, key);
+  };
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -202,11 +208,11 @@ function TextsAndResults() {
               ))}
             </select>
             {metaColumns.length > 0 && fields.length > 0 && (
-              <select className="select small" style={{ width: 'auto' }} value={compareCol} onChange={(e) => setCompareCol(e.target.value)} title={`Compare ${compareField} with a metadata column (e.g. human labels)`}>
+              <select className="select small" style={{ width: 'auto' }} value={compareCol} onChange={(e) => setCompareCol(e.target.value)} title={`Compare ${fieldName(compareField)} with a metadata column (e.g. human labels)`}>
                 <option value="">Compare with…</option>
                 {metaColumns.map((c) => (
                   <option key={c} value={c}>
-                    {compareField} vs {c}
+                    {fieldName(compareField)} vs {c}
                   </option>
                 ))}
               </select>
@@ -282,7 +288,7 @@ function TextsAndResults() {
                   <th>ID</th>
                   <th>Text</th>
                   {fields.map((f) => (
-                    <th key={f}>{f}</th>
+                    <th key={f}>{fieldName(f)}</th>
                   ))}
                   {compareCol && <th>{compareCol}</th>}
                   <th>Run</th>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getLog } from '../lib/db';
-import { outputFields } from '../lib/prompt';
+import { fieldLabel, outputFields } from '../lib/prompt';
 import { startRun, useStore } from '../lib/store';
 import type { Result, ResultLog, Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
@@ -142,7 +142,7 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
         <div className="annot">
           {fields.map((f) => (
             <div key={f} className={f === 'response' ? 'annot-item wide' : 'annot-item'}>
-              <div className="annot-k">{f}</div>
+              <div className="annot-k">{fieldLabel(run.snapshot.prompt, f)}</div>
               <div className="annot-v">{r.values[f] || <span className="hint">—</span>}</div>
             </div>
           ))}

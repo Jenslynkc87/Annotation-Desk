@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
-import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
+import { effectiveTemplate, fieldLabel, normalizeLabel, outputFields } from '../lib/prompt';
 import { goldColumnsFor } from '../lib/export/tables';
 import { cancelBatch, checkBatch, deleteRunById, renameRun, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
@@ -294,7 +294,9 @@ function AgreementPanel() {
           <label>Field</label>
           <select className="select" value={f} onChange={(e) => setField(e.target.value)}>
             {fields.map((x) => (
-              <option key={x}>{x}</option>
+              <option key={x} value={x}>
+                {runA ? fieldLabel(runA.snapshot.prompt, x) : x}
+              </option>
             ))}
           </select>
         </div>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { RATIONALE_KEY, renderMessageParts, templatePlaceholders, validateVariableName } from '../lib/prompt';
+import { RATIONALE_KEY, renderMessageParts, templatePlaceholders, uniqueKey } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS } from '../lib/providers/openai';
 import { PROVIDERS, provider } from '../lib/providers';
@@ -404,16 +404,20 @@ function VariableEditor() {
   return (
     <div className="vars">
       {vars.map((v, i) => {
-        const err = validateVariableName(v.name, vars.filter((_, j) => j !== i).map((x) => x.name));
         return (
           <div className="var" key={i}>
             <div className="var-top">
               <input
                 className="input"
-                value={v.name}
+                value={v.label ?? v.name}
                 aria-label="Field name"
-                placeholder="field_name"
-                onChange={(e) => upd(i, (x) => void (x.name = e.target.value.replace(/\s+/g, '_')))}
+                placeholder="Name, e.g. Positive score"
+                onChange={(e) =>
+                  upd(i, (x) => {
+                    x.label = e.target.value;
+                    x.name = uniqueKey(e.target.value, vars.filter((_, j) => j !== i).map((o) => o.name));
+                  })
+                }
               />
               <select className="select" value={v.type} aria-label="Field type" onChange={(e) => upd(i, (x) => void (x.type = e.target.value as VariableType))}>
                 {Object.entries(TYPE_LABELS).map(([k, l]) => (
@@ -432,7 +436,6 @@ function VariableEditor() {
                 <Icon name="trash" size={15} />
               </button>
             </div>
-            {err && <div className="hint err">{err}</div>}
             {(v.type === 'category' || v.type === 'ordinal') && (
               <input
                 className="input"

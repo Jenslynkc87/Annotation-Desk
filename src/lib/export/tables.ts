@@ -214,9 +214,9 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
 export function codebookMarkdown(run: Run): string {
   const p = run.snapshot.prompt;
   if (p.outputMode !== 'structured') return '# Codebook\n\nThe model was asked for a free-text response (no structured fields).\n';
-  const lines = ['# Codebook', '', 'Fields the model was required to return (enforced with a JSON schema; see `output_schema.json`).', '', '| Field | Type | Allowed values | Description |', '|---|---|---|---|'];
+  const lines = ['# Codebook', '', 'Fields the model was required to return (enforced with a JSON schema; see `output_schema.json`).', '', '| Field | Column name | Type | Allowed values | Description |', '|---|---|---|---|---|'];
   const esc = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-  if (p.includeRationale) lines.push('| rationale | free text | | Brief justification, generated before the labels |');
-  for (const v of p.variables) lines.push(`| ${v.name} | ${v.type} | ${esc(v.values.filter((x) => x.trim()).join(', '))} | ${esc(v.description)} |`);
+  if (p.includeRationale) lines.push('| Rationale | rationale | free text | | Brief justification, generated before the labels |');
+  for (const v of p.variables) lines.push(`| ${esc(v.label?.trim() || v.name)} | ${v.name} | ${v.type} | ${esc(v.values.filter((x) => x.trim()).join(', '))} | ${esc(v.description)} |`);
   return lines.join('\n') + '\n';
 }

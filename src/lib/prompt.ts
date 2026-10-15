@@ -52,6 +52,37 @@ export function templatePlaceholders(template: string): string[] {
   return [...template.matchAll(PLACEHOLDER)].map((m) => m[1]);
 }
 
+/** Machine key from a display name: "Positive score" → "positive_score". */
+export function slugKey(label: string): string {
+  const s = label
+    .toLowerCase()
+    .replace(/æ/g, 'ae')
+    .replace(/ø/g, 'o')
+    .replace(/å/g, 'a')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!s) return 'field';
+  return /^[a-z_]/.test(s) ? s : `f_${s}`;
+}
+
+/** Unique key among the other fields' keys (and not the reserved "rationale"). */
+export function uniqueKey(label: string, others: string[]): string {
+  let key = slugKey(label);
+  if (key === RATIONALE_KEY) key = `${key}_field`;
+  const base = key;
+  for (let n = 2; others.includes(key); n++) key = `${base}_${n}`;
+  return key;
+}
+
+/** Display name for an output field key. */
+export function fieldLabel(p: PromptSpec, key: string): string {
+  if (key === RATIONALE_KEY) return 'Rationale';
+  const v = p.variables.find((x) => x.name === key);
+  return v?.label?.trim() || key;
+}
+
 export function validateVariableName(name: string, others: string[]): string | null {
   if (!name) return 'Name is required';
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return 'Use letters, digits and _ (no spaces)';
