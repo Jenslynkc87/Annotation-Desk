@@ -329,7 +329,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
     '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
-    '| `scripts/requirements.txt` | Python dependencies |',
+    '| `scripts/requirements.txt` | Python package the script needs (install with `pip install -r requirements.txt`) |',
     '',
     '## Reproducing',
     '',

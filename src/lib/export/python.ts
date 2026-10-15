@@ -337,6 +337,13 @@ export function fillScript(template: string, values: Record<string, string>): st
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (whole, key: string) => (key in values ? values[key] : whole));
 }
 
+/** Minimum SDK versions the generated script was tested with (October 2026). */
 export function requirementsTxt(run: Run): string {
-  return run.snapshot.model.provider === 'anthropic' ? 'anthropic>=0.100\n' : 'openai>=2.0\n';
+  const anthropic = run.snapshot.model.provider === 'anthropic';
+  return [
+    '# Python packages needed by annotate.py. Install with:  pip install -r requirements.txt',
+    `# Minimum versions the script was tested with; for exact reproduction, record the versions you used (pip freeze).`,
+    anthropic ? 'anthropic>=1.14.0' : 'openai>=3.31.0',
+    '',
+  ].join('\n');
 }
