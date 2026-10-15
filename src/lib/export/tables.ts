@@ -37,7 +37,14 @@ export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
 function jsonColumns(run: Run, response: string | undefined): Row {
   if (run.snapshot.prompt.outputMode !== 'text') return {};
   const flat = flattenJsonResponse(response) ?? {};
-  return Object.fromEntries(Object.entries(flat).map(([k, v]) => [k, numify(v)]));
+  // The model writes its reasoning first (better answers), but readers want the scores first:
+  // within each group (e.g. each domain) put the reasoning column last.
+  const isReasoning = (k: string) => k === 'reasoning' || k.endsWith('_reasoning');
+  const groupOf = (k: string) => (k.includes('_') ? k.slice(0, k.lastIndexOf('_')) : '');
+  const order: string[] = [];
+  for (const k of Object.keys(flat)) if (!order.includes(groupOf(k))) order.push(groupOf(k));
+  const keys = Object.keys(flat).sort((a, b) => order.indexOf(groupOf(a)) - order.indexOf(groupOf(b)) || Number(isReasoning(a)) - Number(isReasoning(b)));
+  return Object.fromEntries(keys.map((k) => [k, numify(flat[k])]));
 }
 
 /** Numbers as numbers (so Excel can sort and sum them); anything else unchanged. */
