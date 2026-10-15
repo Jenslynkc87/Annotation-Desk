@@ -318,3 +318,5 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .export-card { display: flex; flex-direction: column; }
 .export-card .export-btn { margin-top: auto; align-self: flex-start; }
 .export-card .filelist { margin-bottom: 16px; }
+
+.label-note { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }

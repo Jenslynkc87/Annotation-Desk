@@ -21,8 +21,6 @@ export interface ModelSettings {
   model: string;
   /** '' = provider/model default (parameter not sent). */
   effort: string;
-  /** Anthropic only: 'default' omits the thinking parameter. */
-  thinking: 'default' | 'adaptive' | 'disabled';
   /** Ask the provider to return a readable reasoning summary (stored per result). */
   reasoningSummary: boolean;
   /** null = not sent. */
@@ -162,7 +160,6 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   provider: 'anthropic',
   model: 'claude-opus-5-5',
   effort: '',
-  thinking: 'default',
   reasoningSummary: false,
   temperature: null,
   maxOutputTokens: 16000,

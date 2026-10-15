@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { getLogsForRun } from '../db';
 import { fmtStat } from '../metrics';
 import { buildOutputSchema } from '../prompt';
+import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
 import { dateStamp, nowIso, slug } from '../util';
 import { buildBackup } from './backup';
@@ -66,7 +67,7 @@ function settingsRows(study: Study, run: Run): Row[] {
     { setting: 'Provider', value: m.provider },
     { setting: 'Model', value: m.model },
     { setting: 'Effort / reasoning', value: m.effort || 'model default' },
-    { setting: 'Thinking', value: m.provider === 'anthropic' ? (m.reasoningSummary ? 'adaptive, summarized' : m.thinking) : 'n/a' },
+    { setting: 'Thinking', value: m.provider === 'anthropic' ? thinkingLabel(m.model, m.reasoningSummary) : 'n/a (reasoning controlled by effort)' },
     { setting: 'Temperature', value: m.temperature ?? 'model default' },
     { setting: 'Max output tokens', value: m.maxOutputTokens },
     { setting: 'Runs per text', value: o.replicates },
@@ -223,7 +224,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       requested: m.model,
       reported_by_api: [...new Set(rs.map((r) => r.modelReported).filter(Boolean))],
       effort: m.effort || 'model default',
-      thinking: m.provider === 'anthropic' ? (m.reasoningSummary ? 'adaptive (summarized)' : m.thinking) : null,
+      thinking: m.provider === 'anthropic' ? thinkingLabel(m.model, m.reasoningSummary) : null,
       reasoning_summary_requested: m.reasoningSummary,
       temperature: m.temperature ?? 'model default',
       max_output_tokens: m.maxOutputTokens,

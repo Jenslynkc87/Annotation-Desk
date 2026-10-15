@@ -85,7 +85,6 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
       s.model.provider = id;
       s.model.model = id === 'anthropic' ? 'claude-opus-5-5' : '';
       s.model.effort = '';
-      s.model.thinking = 'default';
     });
 
   const showPreview = async () => {
@@ -182,42 +181,27 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           </div>
         </div>
 
-        <div className={m.provider === 'anthropic' ? 'grid2' : ''}>
-          <div className="field">
-            <label htmlFor="effort">{effortLabel}</label>
-            <select id="effort" className="select" value={m.effort} onChange={(e) => updateStudy((s) => void (s.model.effort = e.target.value))}>
-              <option value="">Model default</option>
-              {effortChoices.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </select>
-          </div>
-          {m.provider === 'anthropic' && (
-            <div className="field">
-              <label htmlFor="thinking">Thinking</label>
-              <select
-                id="thinking"
-                className="select"
-                value={m.reasoningSummary ? 'adaptive' : m.thinking}
-                disabled={m.reasoningSummary}
-                onChange={(e) => updateStudy((s) => void (s.model.thinking = e.target.value as typeof m.thinking))}
-              >
-                <option value="default">Model default</option>
-                <option value="adaptive">On (adaptive)</option>
-                <option value="disabled">Off</option>
-              </select>
-            </div>
-          )}
+        <div className="field">
+          <label htmlFor="effort">{effortLabel}</label>
+          <select id="effort" className="select" value={m.effort} onChange={(e) => updateStudy((s) => void (s.model.effort = e.target.value))}>
+            <option value="">Model default</option>
+            {effortChoices.map((e) => (
+              <option key={e} value={e}>
+                {e}
+              </option>
+            ))}
+          </select>
         </div>
-        {!m.effort && <div className="hint tight">Tip: set {effortLabel.toLowerCase()} explicitly for reported runs; defaults differ between models.</div>}
+        <div className="hint tight">
+          How much the model reasons before answering{m.provider === 'anthropic' ? ' (thinking is always on)' : ''}.
+          {!m.effort && ' Set it explicitly for reported runs; defaults differ between models.'}
+        </div>
 
         <label className="check" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={m.reasoningSummary} onChange={(e) => updateStudy((s) => void (s.model.reasoningSummary = e.target.checked))} />
           <span>
             Record the model's reasoning summary
-            <div className="hint">Saved with each result{m.provider === 'anthropic' ? '; turns thinking on' : ''}.</div>
+            <div className="hint">A readable summary of the model's reasoning, saved with each result.</div>
           </span>
         </label>
 
@@ -271,7 +255,9 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
 
       <Section id="prompt" title="Prompt" summary={p.system ? `${p.system.slice(0, 60).replace(/\s+/g, ' ')}…` : 'Empty'}>
         <div className="field">
-          <label htmlFor="system">Instructions (system prompt)</label>
+          <label htmlFor="system">
+            Instructions <span className="label-note">system prompt · same for every text</span>
+          </label>
           <textarea
             id="system"
             className="textarea prompt"
@@ -287,7 +273,9 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           </div>
         </div>
         <div className="field">
-          <label htmlFor="usertpl">Message per text</label>
+          <label htmlFor="usertpl">
+            Message per text <span className="label-note">user message · changes per text</span>
+          </label>
           <textarea id="usertpl" className="textarea mono" rows={2} value={p.userTemplate} onChange={(e) => updateStudy((s) => void (s.prompt.userTemplate = e.target.value))} />
           <div className="hint">
             <code>{'{{text}}'}</code> becomes each text, <code>{'{{id}}'}</code> its id

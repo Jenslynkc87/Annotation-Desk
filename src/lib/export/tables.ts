@@ -2,6 +2,7 @@
 import Papa from 'papaparse';
 import { agreement, type Agreement, type Level } from '../metrics';
 import { normalizeLabel, outputFields } from '../prompt';
+import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
 import { buildDocViews } from '../view';
 
@@ -193,7 +194,7 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       model_requested: r.snapshot.model.model,
       models_reported: [...new Set(rs.map((x) => x.modelReported).filter(Boolean))].join('; '),
       effort: r.snapshot.model.effort || 'default',
-      thinking: r.snapshot.model.provider === 'anthropic' ? (r.snapshot.model.reasoningSummary ? 'adaptive (summarized)' : r.snapshot.model.thinking) : '',
+      thinking: r.snapshot.model.provider === 'anthropic' ? thinkingLabel(r.snapshot.model.model, r.snapshot.model.reasoningSummary) : '',
       temperature: r.snapshot.model.temperature ?? 'default',
       max_output_tokens: r.snapshot.model.maxOutputTokens,
       caching: r.snapshot.options.caching ? 'on' : 'off',

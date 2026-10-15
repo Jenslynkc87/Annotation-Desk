@@ -16,6 +16,21 @@ function client(apiKey: string) {
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+/**
+ * Claude models with adaptive thinking. Thinking is always requested for these: on the newest
+ * models it is on regardless, and on Opus/Sonnet 4.6-4.8 it would otherwise be off.
+ * Older models (e.g. Haiku 4.5) only support fixed thinking budgets and run without it.
+ */
+export function supportsAdaptiveThinking(model: string): boolean {
+  return /^claude-(fable|mythos)/.test(model) || /^claude-(opus|sonnet|haiku)-([5-9]|4-[6-9])(\b|-|$)/.test(model);
+}
+
+/** Human-readable thinking setting, for exports. */
+export function thinkingLabel(model: string, summary: boolean): string {
+  if (!supportsAdaptiveThinking(model)) return 'not used (model has no adaptive thinking)';
+  return summary ? 'adaptive (on), summary recorded' : 'adaptive (on)';
+}
+
 /** Models that accept the server-side refusal fallback (`fallbacks: "default"`). */
 export const FALLBACK_MODELS = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5'];
 const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
@@ -112,10 +127,8 @@ export const anthropicAdapter: ProviderAdapter = {
         body.system = system;
       }
     }
-    if (model.reasoningSummary) {
-      body.thinking = { type: 'adaptive', display: 'summarized' };
-    } else if (model.thinking !== 'default') {
-      body.thinking = { type: model.thinking };
+    if (supportsAdaptiveThinking(model.model)) {
+      body.thinking = model.reasoningSummary ? { type: 'adaptive', display: 'summarized' } : { type: 'adaptive' };
     }
     const outputConfig: Record<string, unknown> = {};
     if (model.effort) outputConfig.effort = model.effort;
