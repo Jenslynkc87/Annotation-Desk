@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
 import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
+import { goldColumnsFor } from '../lib/export/tables';
 import { cancelBatch, checkBatch, deleteRunById, renameRun, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
@@ -182,7 +183,10 @@ function AgreementPanel() {
   const metaCols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const latest = runs[runs.length - 1];
   const [a, setA] = useState(encode({ kind: 'run', id: latest.id }));
-  const [b, setB] = useState(metaCols[0] ? encode({ kind: 'meta', col: metaCols[0] }) : runs.length > 1 ? encode({ kind: 'run', id: runs[runs.length - 2].id }) : '');
+  // Pre-select a metadata column only when its name matches an output field (e.g. sentiment ↔ sentiment_gold).
+  const firstField = latest ? outputFields(latest.snapshot.prompt)[0] : '';
+  const matching = firstField ? goldColumnsFor(firstField, docs)[0] : undefined;
+  const [b, setB] = useState(matching ? encode({ kind: 'meta', col: matching }) : '');
   const srcA = decode(a);
   const runA = srcA?.kind === 'run' ? runs.find((r) => r.id === srcA.id) : srcA?.kind === 'rep' ? runs.find((r) => r.id === srcA.runId) : undefined;
   const fields = runA ? outputFields(runA.snapshot.prompt) : [];
@@ -259,7 +263,12 @@ function AgreementPanel() {
     </>
   );
 
-  const showMatrix = stats.categories.length > 1 && stats.categories.length <= 12;
+  const isFreeText = runA?.snapshot.prompt.outputMode === 'text' || variable?.type === 'text';
+  const srcB = decode(b);
+  // A metadata column where (almost) every row is different is an identifier, not a set of labels.
+  const bDistinct = srcB?.kind === 'meta' ? new Set(docs.map((d) => d.meta[srcB.col] ?? '')).size : 0;
+  const looksLikeIds = srcB?.kind === 'meta' && docs.length >= 5 && bDistinct > docs.length * 0.7;
+  const showMatrix = !isFreeText && !looksLikeIds && stats.categories.length > 1 && stats.categories.length <= 12;
 
   return (
     <div className="card card-pad">
@@ -300,7 +309,17 @@ function AgreementPanel() {
         </div>
       </div>
 
-      {!b ? (
+      {isFreeText ? (
+        <div className="notice warn" style={{ marginTop: 6 }}>
+          Agreement isn't meaningful for free-text output: every distinct answer would count as its own category. Use a field of type Category, Ordinal scale,
+          Number or Yes / no (set under Output in the setup) for fields you want to compare with human labels.
+        </div>
+      ) : looksLikeIds ? (
+        <div className="notice warn" style={{ marginTop: 6 }}>
+          "{srcB?.kind === 'meta' ? srcB.col : ''}" looks like an identifier (nearly every text has a different value), not a set of labels. Choose the column that
+          holds your human labels.
+        </div>
+      ) : !b ? (
         <div className="hint">Choose what to compare with. To compare with human labels, import them as a column alongside your texts.</div>
       ) : stats.n === 0 ? (
         <div className="notice warn">No texts have a value in both sources for "{f}".</div>
