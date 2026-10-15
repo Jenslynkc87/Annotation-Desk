@@ -2,7 +2,7 @@
 import JSZip from 'jszip';
 import { getLogsForRun } from '../db';
 import { fmtStat } from '../metrics';
-import { buildOutputSchema } from '../prompt';
+import { buildOutputSchema, effectiveTemplate } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
 import type { Doc, Result, Run, Study } from '../types';
 import { dateStamp, nowIso, slug } from '../util';
@@ -74,8 +74,8 @@ function settingsRows(study: Study, run: Run): Row[] {
     { setting: 'Prompt caching', value: o.caching ? 'on' : 'off' },
     { setting: 'Mode', value: run.mode === 'batch' ? 'Batch API' : 'immediate requests' },
     { setting: 'Prompt version', value: `v${run.snapshot.promptVersion} (${run.snapshot.promptHash})` },
-    { setting: 'Instructions (system prompt)', value: p.system },
-    { setting: 'Message per text', value: p.userTemplate },
+    { setting: 'Prompt (sent with each text)', value: effectiveTemplate(p.userTemplate) },
+    { setting: 'System prompt', value: p.system || '(none)' },
     { setting: 'Output', value: p.outputMode === 'structured' ? JSON.stringify(run.snapshot.outputSchema) : 'plain text' },
     { setting: 'Annotation Desk version', value: run.snapshot.appVersion },
   ];
@@ -112,8 +112,8 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[]) {
 
 function promptFiles(zip: JSZip, run: Run) {
   const p = run.snapshot.prompt;
-  zip.file('system_prompt.txt', p.system);
-  zip.file('user_template.txt', p.userTemplate);
+  zip.file('prompt.txt', effectiveTemplate(p.userTemplate));
+  if (p.system.trim()) zip.file('system_prompt.txt', p.system);
   zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
   zip.file('codebook.md', codebookMarkdown(run));
   zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
@@ -316,8 +316,8 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '| File | Contents |',
     '|---|---|',
     '| `metadata.json` | Machine-readable record of model, settings, dates, counts and token use |',
-    '| `prompt/system_prompt.txt` | Instructions sent with every request |',
-    '| `prompt/user_template.txt` | Per-text message; `{{text}}` is replaced by each text |',
+    '| `prompt/prompt.txt` | The prompt sent with each text; `{{text}}` marks where the text was inserted |',
+    ...(run.snapshot.prompt.system.trim() ? ['| `prompt/system_prompt.txt` | System prompt sent with every request |'] : []),
     '| `prompt/output_schema.json` | JSON schema the responses had to follow |',
     '| `prompt/codebook.md`, `codebook.json` | Annotation fields, types and allowed values |',
     `| \`results/results.csv\` | One row per text${opts.includeTexts ? ' (with text)' : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
@@ -352,7 +352,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
     ['`study-backup.json`', 'Full backup, re-importable via Studies → Import study backup'],
     ['`corpus/corpus.csv`, `corpus.jsonl`', 'All texts with metadata'],
-    ['`prompts/vN/`', 'Each prompt version: instructions, per-text template, output schema, codebook'],
+    ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), output schema, codebook'],
     ['`runs/run-NN/run.json`', 'Frozen run configuration (model, settings, prompt, exact shared request body)'],
     ['`runs/run-NN/results_long.csv`', 'One row per request: annotations, rationale, reasoning summary, status, tokens, timing'],
     ['`runs/run-NN/results_wide.csv`', 'One row per text: aggregated annotations'],

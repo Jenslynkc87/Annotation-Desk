@@ -1,5 +1,6 @@
 // Generates a standalone Python script that reproduces a run's requests.
 // The template marks every study-specific value as {{PLACEHOLDER}}; `fillScript` inserts the values.
+import { effectiveTemplate } from '../prompt';
 import type { Run, Study } from '../types';
 
 /** Split a run's shared request body into readable parts + the remaining settings. */
@@ -9,8 +10,8 @@ export function splitRequestBase(run: Run) {
   delete base.model;
   let cacheControl: unknown = null;
   if (provider === 'anthropic') {
-    const sys = base.system;
-    if (Array.isArray(sys) && sys[0] && typeof sys[0] === 'object') cacheControl = (sys[0] as Record<string, unknown>).cache_control ?? null;
+    const o = run.snapshot.options;
+    if (o.caching) cacheControl = o.cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
     delete base.system;
     const oc = base.output_config as Record<string, unknown> | undefined;
     if (oc) {
@@ -62,8 +63,8 @@ Study:  {{STUDY_NAME}}
 Run:    {{RUN_DESCRIPTION}}
 
 This script reproduces the requests sent in the run above: the same model,
-instructions, per-text message, output schema and request settings. Values
-marked with {{...}} in annotate_template.py are inserted from the study.
+prompt, output schema and request settings. Values marked with {{...}} in
+annotate_template.py are inserted from the study.
 
 Usage
 -----
@@ -96,12 +97,12 @@ PROVIDER = {{PROVIDER}}  # "anthropic" or "openai"
 
 MODEL = {{MODEL}}
 
-# Instructions sent as the system prompt (identical for every text).
-SYSTEM_PROMPT = {{SYSTEM_PROMPT}}
+# The prompt sent with each text. {{text}} marks where the text is inserted;
+# {{id}} and {{meta.<column>}} insert its id and metadata columns.
+PROMPT = {{PROMPT}}
 
-# Message sent for each text. {{text}}, {{id}} and {{meta.<column>}} are
-# replaced with the text, its id and its metadata columns.
-USER_TEMPLATE = {{USER_TEMPLATE}}
+# Optional system prompt, sent unchanged with every request ("" = none).
+SYSTEM_PROMPT = {{SYSTEM_PROMPT}}
 
 # JSON schema the response must follow (None = free-text output).
 OUTPUT_SCHEMA = {{OUTPUT_SCHEMA}}
@@ -113,7 +114,8 @@ FIELDS = {{FIELDS}}
 # (token limit, effort / reasoning, thinking, temperature, caching key, ...).
 REQUEST_SETTINGS = {{REQUEST_SETTINGS}}
 
-# Prompt caching marker for the system prompt (Anthropic only; None = off).
+# Prompt caching marker (Anthropic only; None = off). Applied to the system
+# prompt and to the fixed part of the prompt before the first {{...}} marker.
 CACHE_CONTROL = {{CACHE_CONTROL}}
 
 # Number of times each text is annotated.
@@ -125,7 +127,9 @@ REPLICATES = {{REPLICATES}}
 PLACEHOLDER = re.compile(r"\\{\\{\\s*([\\w.\\- ]+?)\\s*\\}\\}")
 
 
-def render_message(row, doc_id, text):
+def message_parts(row, doc_id, text):
+    """Split PROMPT at its first {{...}} marker: (fixed prefix, rest with values filled in)."""
+
     def sub(m):
         key = m.group(1)
         if key == "text":
@@ -136,10 +140,12 @@ def render_message(row, doc_id, text):
             return str(row.get(key[5:], "") or "")
         return m.group(0)
 
-    return PLACEHOLDER.sub(sub, USER_TEMPLATE)
+    first = PLACEHOLDER.search(PROMPT)
+    idx = first.start() if first else len(PROMPT)
+    return PROMPT[:idx], PLACEHOLDER.sub(sub, PROMPT[idx:])
 
 
-def build_request(message):
+def build_request(prefix, rest):
     body = json.loads(json.dumps(REQUEST_SETTINGS))
     body["model"] = MODEL
     if PROVIDER == "anthropic":
@@ -150,7 +156,11 @@ def build_request(message):
                 body["system"] = SYSTEM_PROMPT
         if OUTPUT_SCHEMA is not None:
             body.setdefault("output_config", {})["format"] = {"type": "json_schema", "schema": OUTPUT_SCHEMA}
-        body["messages"] = [{"role": "user", "content": message}]
+        if CACHE_CONTROL and prefix.strip() and rest.strip():
+            content = [{"type": "text", "text": prefix, "cache_control": CACHE_CONTROL}, {"type": "text", "text": rest}]
+        else:
+            content = prefix + rest
+        body["messages"] = [{"role": "user", "content": content}]
     else:
         if SYSTEM_PROMPT.strip():
             body["instructions"] = SYSTEM_PROMPT
@@ -161,7 +171,7 @@ def build_request(message):
                 "schema": OUTPUT_SCHEMA,
                 "strict": True,
             }
-        body["input"] = message
+        body["input"] = prefix + rest
     return body
 
 
@@ -251,7 +261,7 @@ def main():
 
     if args.dry_run:
         r = rows[0]
-        print(json.dumps(build_request(render_message(r, r.get(args.id_column, "1"), r[args.text_column])), indent=2, ensure_ascii=False))
+        print(json.dumps(build_request(*message_parts(r, r.get(args.id_column, "1"), r[args.text_column])), indent=2, ensure_ascii=False))
         return
 
     client = make_client()
@@ -264,9 +274,9 @@ def main():
         writer.writeheader()
         for i, row in enumerate(rows, 1):
             doc_id = row.get(args.id_column) or str(i)
-            message = render_message(row, doc_id, row[args.text_column])
+            prefix, rest = message_parts(row, doc_id, row[args.text_column])
             for rep in range(1, REPLICATES + 1):
-                body = build_request(message)
+                body = build_request(prefix, rest)
                 started = time.time()
                 record = {"doc_id": doc_id, "replicate": rep}
                 try:
@@ -304,8 +314,8 @@ export function scriptValues(study: Study, run: Run, exportedAt: string): Record
     API_KEY_ENV: provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY',
     PROVIDER: JSON.stringify(provider),
     MODEL: JSON.stringify(run.snapshot.model.model),
+    PROMPT: pyStr(effectiveTemplate(p.userTemplate)),
     SYSTEM_PROMPT: pyStr(p.system),
-    USER_TEMPLATE: pyStr(p.userTemplate),
     OUTPUT_SCHEMA: pyLiteral(run.snapshot.outputSchema),
     FIELDS: pyLiteral(fields),
     REQUEST_SETTINGS: pyLiteral(settings),

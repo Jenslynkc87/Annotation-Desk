@@ -102,8 +102,9 @@ export const openaiAdapter: ProviderAdapter = {
     return body;
   },
 
-  buildRequestPart(userMessage) {
-    return { input: userMessage };
+  buildRequestPart({ prefix, rest }) {
+    // OpenAI caches identical prompt prefixes automatically.
+    return { input: prefix + rest };
   },
 
   async send(apiKey, base, part, signal) {

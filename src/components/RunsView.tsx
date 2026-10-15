@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
-import { normalizeLabel, outputFields } from '../lib/prompt';
+import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
 import { cancelBatch, checkBatch, deleteRunById, renameRun, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
@@ -146,10 +146,14 @@ export function RunsView() {
             <dt>App version</dt>
             <dd>{inspect.snapshot.appVersion}</dd>
           </dl>
-          <p className="section-title" style={{ marginTop: 16 }}>Instructions</p>
-          <pre className="textblock">{inspect.snapshot.prompt.system || '(none)'}</pre>
-          <p className="section-title" style={{ marginTop: 16 }}>Message per text</p>
-          <pre className="textblock mono">{inspect.snapshot.prompt.userTemplate}</pre>
+          <p className="section-title" style={{ marginTop: 16 }}>Prompt (sent with each text)</p>
+          <pre className="textblock">{effectiveTemplate(inspect.snapshot.prompt.userTemplate)}</pre>
+          {inspect.snapshot.prompt.system.trim() && (
+            <>
+              <p className="section-title" style={{ marginTop: 16 }}>System prompt</p>
+              <pre className="textblock">{inspect.snapshot.prompt.system}</pre>
+            </>
+          )}
           <p className="section-title" style={{ marginTop: 16 }}>Shared request body</p>
           <pre className="textblock mono">{JSON.stringify(inspect.snapshot.requestBase, null, 2)}</pre>
         </Modal>

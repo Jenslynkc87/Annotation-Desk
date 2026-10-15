@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import * as dbApi from './db';
-import { buildOutputSchema, parseModelOutput, renderUserMessage } from './prompt';
+import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
 import { describeApiError, provider } from './providers';
 import type { BatchLine, CallOutcome, ModelInfo } from './providers/types';
 import { ZERO_USAGE } from './providers/types';
@@ -302,7 +302,7 @@ export async function promptFingerprint(st: Study): Promise<string> {
   return shortHash(
     JSON.stringify({
       system: p.system,
-      userTemplate: p.userTemplate,
+      userTemplate: effectiveTemplate(p.userTemplate),
       outputMode: p.outputMode,
       variables: p.outputMode === 'structured' ? p.variables : [],
       includeRationale: p.outputMode === 'structured' && p.includeRationale,
@@ -430,7 +430,7 @@ export async function startRun(req: RunRequest): Promise<void> {
   for (const id of req.docIds) {
     const doc = docsById.get(id);
     if (!doc) continue;
-    const part = adapter.buildRequestPart(renderUserMessage(snapshot.prompt.userTemplate, doc));
+    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, doc), snapshot.options);
     for (let r = 1; r <= snapshot.options.replicates; r++) tasks.push({ doc, replicate: r, part });
   }
 
@@ -561,7 +561,7 @@ async function storeBatchResults(run: Run, lines: BatchLine[]) {
     const doc = docsById.get(ref[0]);
     if (!doc) continue; // text deleted since submission
     const result = makeResult(run, doc, ref[1], run.createdAt, line.ok ? line.outcome : null, line.ok ? null : line.error, null);
-    const part = adapter.buildRequestPart(renderUserMessage(run.snapshot.prompt.userTemplate, doc));
+    const part = adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc), run.snapshot.options);
     const log: ResultLog = {
       id: result.id,
       runId: run.id,

@@ -6,7 +6,7 @@ Everything runs in your browser. Your API key, texts and results never pass thro
 
 ## What it does
 
-- **Set up a study:** pick a provider and model (the list is loaded from your account), set effort / reasoning level, thinking, temperature and token limits, write the instructions and a per-text message template (`{{text}}`, `{{id}}`, `{{meta.column}}`).
+- **Set up a study:** pick a provider and model (the list is loaded from your account), set the effort / reasoning level, token limit and (optionally) temperature, and write one prompt. Each text is added after the prompt between `<text>` tags, or wherever you put `{{text}}`; `{{id}}` and `{{meta.column}}` insert the id and metadata. An optional system prompt is available for setups that use one.
 - **Structured output:** define the fields the model must return (category, ordinal scale, number, yes/no, free text), optionally preceded by a rationale. Responses are enforced with a JSON schema, so every annotation becomes a clean column.
 - **Add texts:** drag and drop TXT, MD, PDF, DOCX or HTML files (one text each), a whole corpus as CSV, TSV, XLSX, JSON or JSONL (choose the text and ID columns; other columns become metadata), or paste text. Long texts can be split into chunks.
 - **Tinker quickly:** test the prompt on one text or a random sample, look at the result and rationale, adjust, repeat. Each run is numbered and the prompt is versioned automatically, so earlier results stay comparable.
@@ -42,6 +42,7 @@ The app is a static site (Vite + React + TypeScript) and uses the official `@ant
 ## Methodological notes
 
 - Every run freezes the model, settings and prompt it used; the exact shared request body is stored with the run and each text's message with its result.
+- Claude models always run with (adaptive) thinking; effort controls how much they reason.
 - "Model default" settings are recorded as such. For reported runs, set effort explicitly, because defaults differ between models and can change.
 - For Anthropic models that support it, a refused request can be re-run on a fallback model (server-side fallback). The answering model is recorded per result and flagged; switch this off under *Sampling & limits* if every label must come from the chosen model. Batch runs never use fallbacks.
 - When iterating on prompts against human labels, keep a held-out set for the final agreement estimate, so prompt selection doesn't inflate it.

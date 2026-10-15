@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { anthropicAdapter } from '../providers/anthropic';
 import { openaiAdapter } from '../providers/openai';
-import { buildOutputSchema, renderUserMessage } from '../prompt';
+import { buildOutputSchema, renderMessageParts } from '../prompt';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_RUN_OPTIONS, type PromptSpec, type ProviderId, type Run, type Study } from '../types';
 import { fillScript, pyStr, SCRIPT_TEMPLATE, scriptValues } from './python';
 
@@ -22,9 +22,9 @@ function hasPython(): boolean {
 
 const TRICKY = 'Line one with "quotes" and \'single\' quotes.\nA backslash \\ and \\n literal, a triple """ quote,\nunicode: æøå — 你好 🎉\n{{not_a_placeholder}} and {{MODEL}} kept as written\nends with a quote"';
 
-const prompt: PromptSpec = {
+const promptWithMarkers: PromptSpec = {
   system: TRICKY,
-  userTemplate: 'ID {{id}} ({{meta.year}}):\n{{text}}',
+  userTemplate: TRICKY + '\nID {{id}} ({{meta.year}}):\n{{text}}\nAnswer now.',
   outputMode: 'structured',
   variables: [
     { name: 'stance', type: 'category', values: ['for', 'against'], description: 'Stance "towards" X' },
@@ -33,8 +33,10 @@ const prompt: PromptSpec = {
   ],
   includeRationale: true,
 };
+// The common case: one prompt, no markers, no system prompt; the text is appended.
+const promptPlain: PromptSpec = { ...promptWithMarkers, system: '', userTemplate: TRICKY };
 
-function makeRun(provider: ProviderId): { study: Study; run: Run } {
+function makeRun(provider: ProviderId, prompt: PromptSpec): { study: Study; run: Run } {
   const model = {
     ...DEFAULT_MODEL_SETTINGS,
     provider,
@@ -67,24 +69,25 @@ describe('pyStr', () => {
 });
 
 describe('exported script', () => {
+  for (const [label, prompt] of [['with markers', promptWithMarkers], ['plain prompt', promptPlain]] as const)
   for (const provider of ['anthropic', 'openai'] as const) {
-    it(`rebuilds the exact ${provider} request (dry run)`, () => {
+    it(`rebuilds the exact ${provider} request, ${label} (dry run)`, () => {
       if (!hasPython()) return;
-      const { study, run } = makeRun(provider);
+      const { study, run } = makeRun(provider, prompt);
       const dir = mkdtempSync(join(tmpdir(), 'annot-'));
       writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
       writeFileSync(join(dir, 'corpus.csv'), 'doc_id,text,year\nd1,"Some text, with ""quotes""\nand a newline",2024\n');
       const out = execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run']).toString();
       const doc = { docId: 'd1', text: 'Some text, with "quotes"\nand a newline', meta: { year: '2024' } };
       const adapter = provider === 'anthropic' ? anthropicAdapter : openaiAdapter;
-      const expected = { ...run.snapshot.requestBase, ...adapter.buildRequestPart(renderUserMessage(prompt.userTemplate, doc)) };
+      const expected = { ...run.snapshot.requestBase, ...adapter.buildRequestPart(renderMessageParts(prompt.userTemplate, doc), run.snapshot.options) };
       expect(JSON.parse(out)).toEqual(expected);
     });
   }
 
   it('template keeps placeholders; filled script has none left', () => {
-    const { study, run } = makeRun('anthropic');
-    expect(SCRIPT_TEMPLATE).toContain('{{SYSTEM_PROMPT}}');
+    const { study, run } = makeRun('anthropic', promptWithMarkers);
+    expect(SCRIPT_TEMPLATE).toContain('{{PROMPT}}');
     const filled = fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now'));
     expect(filled).not.toMatch(/\{\{[A-Z_]+\}\}(?![^\n]*kept as written)/);
   });

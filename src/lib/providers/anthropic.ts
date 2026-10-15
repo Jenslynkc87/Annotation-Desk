@@ -139,8 +139,16 @@ export const anthropicAdapter: ProviderAdapter = {
     return body;
   },
 
-  buildRequestPart(userMessage) {
-    return { messages: [{ role: 'user', content: userMessage }] };
+  buildRequestPart({ prefix, rest }, options) {
+    // Cache the fixed start of the prompt (everything before the text) as its own block.
+    if (options.caching && prefix.trim() && rest.trim()) {
+      const cache: Record<string, unknown> = { type: 'ephemeral' };
+      if (options.cacheTtl === '1h') cache.ttl = '1h';
+      return {
+        messages: [{ role: 'user', content: [{ type: 'text', text: prefix, cache_control: cache }, { type: 'text', text: rest }] }],
+      };
+    }
+    return { messages: [{ role: 'user', content: prefix + rest }] };
   },
 
   async send(apiKey, base, part, signal) {

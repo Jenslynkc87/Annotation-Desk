@@ -40,8 +40,10 @@ export interface RunOptions {
 }
 
 export interface PromptSpec {
+  /** Optional system prompt (advanced); sent unchanged with every text. */
   system: string;
-  /** User message template; {{text}}, {{id}} and {{meta.<column>}} are substituted. */
+  /** The prompt sent with each text. {{text}}, {{id}} and {{meta.<column>}} are substituted;
+   *  without {{text}}, the text is added at the end (see effectiveTemplate). */
   userTemplate: string;
   outputMode: OutputMode;
   variables: Variable[];
@@ -176,7 +178,7 @@ export const DEFAULT_RUN_OPTIONS: RunOptions = {
 
 export const DEFAULT_PROMPT: PromptSpec = {
   system: '',
-  userTemplate: '{{text}}',
+  userTemplate: '',
   outputMode: 'structured',
   variables: [{ name: 'label', type: 'category', values: [], description: '' }],
   includeRationale: true,

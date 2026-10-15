@@ -1,3 +1,4 @@
+import type { MessageParts } from '../prompt';
 import type { ModelSettings, ProviderId, RunOptions, Usage } from '../types';
 
 export interface ModelInfo {
@@ -61,7 +62,7 @@ export interface ProviderAdapter {
   effortOptions: string[];
   listModels(apiKey: string): Promise<ModelInfo[]>;
   buildRequestBase(inp: RequestInputs): Record<string, unknown>;
-  buildRequestPart(userMessage: string): Record<string, unknown>;
+  buildRequestPart(message: MessageParts, options: RunOptions): Record<string, unknown>;
   send(
     apiKey: string,
     base: Record<string, unknown>,

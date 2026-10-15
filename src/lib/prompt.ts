@@ -5,8 +5,38 @@ export const TEXT_RESPONSE_KEY = 'response';
 
 const PLACEHOLDER = /\{\{\s*([\w.\- ]+?)\s*\}\}/g;
 
-/** Substitute {{text}}, {{id}} and {{meta.<column>}} in the user template. */
-export function renderUserMessage(template: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): string {
+/** Appended to a prompt that doesn't say where the text goes. The tags mark where the text starts and ends. */
+export const TEXT_SUFFIX = '\n\n<text>\n{{text}}\n</text>';
+
+/** The prompt as actually sent: if it has no {{text}} marker, each text is added at the end. */
+export function effectiveTemplate(prompt: string): string {
+  if (templatePlaceholders(prompt).includes('text')) return prompt;
+  const base = prompt.trimEnd();
+  return base ? base + TEXT_SUFFIX : '{{text}}';
+}
+
+export interface MessageParts {
+  /** Everything before the first placeholder: identical for every text, so it can be cached. */
+  prefix: string;
+  /** The rest, with placeholders filled in for this text. */
+  rest: string;
+}
+
+/** Split the prompt at its first placeholder and fill in the text. Mirrored exactly by the exported Python script. */
+export function renderMessageParts(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): MessageParts {
+  const t = effectiveTemplate(prompt);
+  const m = new RegExp(PLACEHOLDER.source).exec(t);
+  const idx = m ? m.index : t.length;
+  return { prefix: t.slice(0, idx), rest: fillPlaceholders(t.slice(idx), doc) };
+}
+
+export function renderMessage(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): string {
+  const { prefix, rest } = renderMessageParts(prompt, doc);
+  return prefix + rest;
+}
+
+/** Substitute {{text}}, {{id}} and {{meta.<column>}}. */
+function fillPlaceholders(template: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): string {
   return template.replace(PLACEHOLDER, (whole, key: string) => {
     if (key === 'text') return doc.text;
     if (key === 'id') return doc.docId;

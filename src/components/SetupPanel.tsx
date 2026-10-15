@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { RATIONALE_KEY, renderUserMessage, templatePlaceholders, validateVariableName } from '../lib/prompt';
+import { RATIONALE_KEY, renderMessageParts, templatePlaceholders, validateVariableName } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, FALLBACK_MODELS } from '../lib/providers/anthropic';
 import { PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
@@ -74,7 +74,6 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const effortChoices = info?.effortLevels?.length ? info.effortLevels : adapter.effortOptions;
   const effortLabel = m.provider === 'anthropic' ? 'Effort' : 'Reasoning effort';
   const metaColumns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))].slice(0, 30), [docs]);
-  const approxTokens = Math.round(p.system.length / 4);
   const unknownPlaceholders = templatePlaceholders(p.userTemplate).filter(
     (k) => k !== 'text' && k !== 'id' && !(k.startsWith('meta.') && metaColumns.includes(k.slice(5))),
   );
@@ -91,7 +90,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     const st = currentStudy(getState())!;
     const snap = await buildSnapshot(st);
     const doc = getState().docs[0] ?? { docId: 'example', text: '(your text appears here)', meta: {} };
-    const part = provider(st.model.provider).buildRequestPart(renderUserMessage(st.prompt.userTemplate, doc));
+    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), st.options);
     setPreview(JSON.stringify({ ...snap.requestBase, ...part }, null, 2));
   };
 
@@ -253,42 +252,43 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
         </details>
       </Section>
 
-      <Section id="prompt" title="Prompt" summary={p.system ? `${p.system.slice(0, 60).replace(/\s+/g, ' ')}…` : 'Empty'}>
+      <Section id="prompt" title="Prompt" summary={p.userTemplate.trim() ? `${p.userTemplate.slice(0, 60).replace(/\s+/g, ' ')}…` : p.system.trim() ? 'System prompt only' : 'Empty'}>
         <div className="field">
-          <label htmlFor="system">
-            Instructions <span className="label-note">system prompt · same for every text</span>
+          <label htmlFor="prompt" className="sr-only">
+            Prompt
           </label>
           <textarea
-            id="system"
+            id="prompt"
             className="textarea prompt"
-            value={p.system}
-            placeholder="Describe the task, the codebook or rubric, edge-case rules and examples. Sent unchanged with every text."
-            onChange={(e) => updateStudy((s) => void (s.prompt.system = e.target.value))}
+            value={p.userTemplate}
+            placeholder={'Your instructions, e.g.:\n\nClassify the sentiment of the review as positive, negative or neutral.\n- Mixed reviews are neutral.\n- Sarcasm counts as negative.'}
+            onChange={(e) => updateStudy((s) => void (s.prompt.userTemplate = e.target.value))}
           />
-          <div className="hint row" style={{ justifyContent: 'space-between' }}>
-            <span>
-              {p.system.length.toLocaleString()} characters · ≈{approxTokens.toLocaleString()} tokens
-            </span>
-            {o.caching && p.system && approxTokens < 512 && <span>Probably too short to be cached</span>}
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="usertpl">
-            Message per text <span className="label-note">user message · changes per text</span>
-          </label>
-          <textarea id="usertpl" className="textarea mono" rows={2} value={p.userTemplate} onChange={(e) => updateStudy((s) => void (s.prompt.userTemplate = e.target.value))} />
           <div className="hint">
-            <code>{'{{text}}'}</code> becomes each text, <code>{'{{id}}'}</code> its id
-            {metaColumns.length > 0 && (
+            Each text is added after your prompt, between <code>{'<text>'}</code> tags. To put it somewhere else, write <code>{'{{text}}'}</code> where it
+            should go{metaColumns.length > 0 && (
               <>
-                , <code>{`{{meta.${metaColumns[0]}}}`}</code> a metadata column
+                ; <code>{`{{meta.${metaColumns[0]}}}`}</code> inserts a metadata column
               </>
             )}
             .
-            {!p.userTemplate.includes('{{text}}') && <div className="warn">This template doesn't include {'{{text}}'}, so the texts won't be sent.</div>}
-            {unknownPlaceholders.length > 0 && <div className="warn">Unknown placeholder(s): {unknownPlaceholders.join(', ')} (sent as written).</div>}
           </div>
+          {unknownPlaceholders.length > 0 && <div className="hint warn">Unknown placeholder(s): {unknownPlaceholders.join(', ')} (sent as written).</div>}
         </div>
+        <details className="more" open={!!p.system.trim()}>
+          <summary>System prompt (optional)</summary>
+          <div className="more-body">
+            <textarea
+              id="system"
+              className="textarea"
+              rows={4}
+              value={p.system}
+              placeholder="Rarely needed. Standing instructions sent separately from the prompt, e.g. a role: “You are an expert in educational assessment.”"
+              onChange={(e) => updateStudy((s) => void (s.prompt.system = e.target.value))}
+            />
+            <div className="hint">Sent unchanged with every request, separately from the prompt. Leave empty unless you want to follow a setup that uses one.</div>
+          </div>
+        </details>
       </Section>
 
       <Section id="output" title="Output" summary={outputSummary}>
@@ -357,7 +357,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             </span>
             <div className="hint">
               {m.provider === 'anthropic'
-                ? 'Reuses the instructions between requests: cheaper and faster.'
+                ? 'Reuses the fixed part of the prompt between requests: cheaper and faster. Only applies to long prompts (roughly 500+ words).'
                 : 'OpenAI caches long prompts automatically; this adds a cache key for better hit rates.'}
             </div>
           </span>
