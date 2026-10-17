@@ -134,7 +134,7 @@ function TextsAndResults() {
       : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est, batch)}.${long}`,
     );
   };
 
@@ -216,7 +216,7 @@ function TextsAndResults() {
           {reps > 1 && <div className="hint" style={{ marginTop: 6 }}>Each text is annotated {reps}× per run.</div>}
           {allEstimate && docs.length > 1 && (
             <div className="hint" style={{ marginTop: 6 }}>
-              All {docs.length.toLocaleString()} texts: {describeEstimate(allEstimate)}
+              All {docs.length.toLocaleString()} texts: {describeEstimate(allEstimate, study.options.batch)}
               {allEstimate.tooLong.length > 0 && <span className="warn"> · {allEstimate.tooLong.length} probably too long for this model</span>}
             </div>
           )}

@@ -177,7 +177,7 @@ export function fmtUsd(x: number): string {
 }
 
 /** One line for the hint under the run buttons and the confirmation dialog. */
-export function describeEstimate(e: Estimate): string {
-  const cost = e.cost === null ? 'no price known for this model' : `about ${fmtUsd(e.cost)}`;
+export function describeEstimate(e: Estimate, batch = false): string {
+  const cost = e.cost === null ? 'no price known for this model' : `about ${fmtUsd(e.cost)}${batch ? ' at batch price (½)' : ''}`;
   return `${cost} (≈${fmtTokens(e.inputTokens)} input and ≈${fmtTokens(e.outputTokens)} output tokens${e.outputAssumed ? ', output assumed' : ''}; before caching)`;
 }
