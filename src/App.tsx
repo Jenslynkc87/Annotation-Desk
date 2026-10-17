@@ -26,9 +26,10 @@ export function App() {
         <div className="topbar-inner">
           <div className="brand">
             <div className="brand-mark">
-              <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden>
-                <path d="M8 7h16v4h-6v14h-4V11H8z" fill="#fff" />
-                <rect x="6" y="19" width="20" height="3" rx="1" fill="#f2b33d" opacity=".9" />
+              <svg width="46" height="46" viewBox="0 0 32 32" aria-hidden>
+                <g fill="#fff" opacity=".6"><rect x="12" y="7" width="14" height="2.6" rx="1.3"/><rect x="12" y="23.4" width="10" height="2.6" rx="1.3"/></g>
+                <g fill="#fff"><rect x="12" y="12.2" width="14" height="2.6" rx="1.3"/><rect x="12" y="17.6" width="11" height="2.6" rx="1.3"/></g>
+                <path d="M9.5 11H7v10.2h2.5" fill="none" stroke="#f2b33d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </div>
             <div>
