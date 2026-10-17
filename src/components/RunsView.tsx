@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { agreement, fmtPct, fmtStat, type Level } from '../lib/metrics';
+import { agreement, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
 import { comparableFields, fieldValue } from '../lib/compare';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
@@ -426,6 +426,8 @@ function AgreementPanel() {
         <div className="notice warn">No texts have a value in both sources for "{f}".</div>
       ) : (
         <>
+          <Glance stats={stats} />
+          <p className="section-title" style={{ marginTop: 18 }}>Agreement statistics</p>
           <div className="stat-grid" style={{ marginTop: 6 }}>
             <Stat k="Texts compared" v={fmtInt(stats.n)} sub={`of ${fmtInt(nLabelled)} with a value in the second source`} />
             <Stat k="Percent agreement" v={fmtPct(stats.percentAgreement)} sub={ciText(stats.ci.percentAgreement, true)} />
@@ -478,6 +480,88 @@ function AgreementPanel() {
             </>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+const plural = (n: number, word: string) => `${fmtInt(n)} ${word}${n === 1 ? '' : 's'}`;
+const share = (n: number, total: number) => `${Math.round((n / Math.max(1, total)) * 100)}%`;
+
+/** Plain-language summary: how many texts got the same answer, how far apart the others are, and the commonest mix-ups. */
+function Glance({ stats }: { stats: Agreement }) {
+  const n = stats.n;
+  const g = stats.gaps;
+  const same = g ? g.same : Math.round((stats.percentAgreement ?? 0) * n);
+  const diff = n - same;
+  const small = g ? g.secondHigherSmall + g.secondLowerSmall : 0;
+  const large = g ? g.secondHigherLarge + g.secondLowerLarge : 0;
+  const higher = g ? g.secondHigherSmall + g.secondHigherLarge : 0;
+  const lower = g ? g.secondLowerSmall + g.secondLowerLarge : 0;
+  const segments = g
+    ? [
+        { n: same, cls: 'same', label: 'Same answer' },
+        { n: small, cls: 'near', label: 'Off by 1' },
+        { n: large, cls: 'far', label: 'Off by 2 or more' },
+      ]
+    : [
+        { n: same, cls: 'same', label: 'Same answer' },
+        { n: diff, cls: 'far', label: 'Different answer' },
+      ];
+  const mixups = g
+    ? []
+    : stats.categories
+        .flatMap((a) => stats.categories.filter((b) => b !== a && stats.confusion[a][b] > 0).map((b) => ({ a, b, n: stats.confusion[a][b] })))
+        .sort((x, y) => y.n - x.n)
+        .slice(0, 3);
+  return (
+    <div className="glance">
+      <p className="section-title" style={{ marginTop: 6 }}>At a glance</p>
+      <p className="glance-head">
+        <strong>{plural(same, 'text')}</strong> ({share(same, n)}) got the same answer from both sides
+        {diff > 0 ? (
+          <>
+            ; <strong>{plural(diff, 'text')}</strong> ({share(diff, n)}) got different answers.
+          </>
+        ) : (
+          '.'
+        )}
+      </p>
+      <div className="glance-bar" role="img" aria-label={segments.map((x) => `${x.label}: ${x.n}`).join(', ')}>
+        {segments.map((x) => (
+          <div key={x.cls} className={`glance-seg ${x.cls}`} style={{ width: `${(x.n / Math.max(1, n)) * 100}%` }} title={`${x.label}: ${x.n}`} />
+        ))}
+      </div>
+      <div className="glance-legend">
+        {segments.map((x) => (
+          <span key={x.cls}>
+            <i className={`glance-dot ${x.cls}`} /> {x.label}: <strong>{fmtInt(x.n)}</strong> ({share(x.n, n)})
+          </span>
+        ))}
+      </div>
+      {g && diff > 0 && (
+        <ul className="glance-list">
+          <li>
+            When they differ, the “Compared with” side gives the <strong>higher</strong> value in {plural(higher, 'text')} and the <strong>lower</strong> value in{' '}
+            {plural(lower, 'text')}.
+          </li>
+          {stats.oppositeDirection !== null && stats.midpoint !== null && (
+            <li>
+              In {plural(Math.round(stats.oppositeDirection * n), 'text')} ({share(Math.round(stats.oppositeDirection * n), n)}) the two land on opposite sides of the middle of the scale ({stats.midpoint}), i.e. they
+              disagree about the direction, not just the degree.
+            </li>
+          )}
+        </ul>
+      )}
+      {mixups.length > 0 && (
+        <ul className="glance-list">
+          <li className="glance-title">Most common mix-ups (Annotations → Compared with):</li>
+          {mixups.map((m) => (
+            <li key={`${m.a}|${m.b}`}>
+              “{m.a}” where the other side says “{m.b}”: <strong>{plural(m.n, 'text')}</strong>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

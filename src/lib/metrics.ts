@@ -3,6 +3,16 @@
 
 export type Level = 'nominal' | 'ordinal' | 'interval';
 
+export interface Gaps {
+  same: number;
+  /** Differ by less than 2 points ("off by 1" on whole-number scales); "second" = the compared-with source. */
+  secondHigherSmall: number;
+  secondLowerSmall: number;
+  /** Differ by 2 points or more. */
+  secondHigherLarge: number;
+  secondLowerLarge: number;
+}
+
 export interface Agreement {
   n: number;
   percentAgreement: number | null;
@@ -26,6 +36,8 @@ export interface Agreement {
   largeDifference: number | null;
   /** Numbers only: share of texts where one value is below the scale midpoint and the other above it (null without a midpoint). */
   oppositeDirection: number | null;
+  /** Numbers only: how many texts have the same value, differ by less than 2 points, or by 2 or more, split by which source is higher. */
+  gaps: Gaps | null;
   /** The midpoint used for `oppositeDirection` (e.g. 0 on a −3…+3 scale, 4 on 1…7). */
   midpoint: number | null;
   /** 95% bootstrap intervals (percentile method, texts resampled); null when too few texts. */
@@ -254,6 +266,17 @@ export const largeDifference = (p: [string, string][]) => mean(numPairs(p).map((
 export const oppositeDirection = (p: [string, string][], mid: number) =>
   mean(numPairs(p).map(([x, y]) => ((x < mid && y > mid) || (x > mid && y < mid) ? 1 : 0)));
 
+export function gapCounts(p: [string, string][]): Gaps {
+  const g: Gaps = { same: 0, secondHigherSmall: 0, secondLowerSmall: 0, secondHigherLarge: 0, secondLowerLarge: 0 };
+  for (const [x, y] of numPairs(p)) {
+    const d = y - x;
+    if (Math.abs(d) < 1e-9) g.same++;
+    else if (Math.abs(d) >= 2 - 1e-9) d > 0 ? g.secondHigherLarge++ : g.secondLowerLarge++;
+    else d > 0 ? g.secondHigherSmall++ : g.secondLowerSmall++;
+  }
+  return g;
+}
+
 /** Scale midpoint: from the codebook scale, else 0 when the values run from negative to positive. */
 function scaleMidpoint(scale: number[], observed: number[]): number | null {
   if (scale.length >= 2) return (Math.min(...scale) + Math.max(...scale)) / 2;
@@ -315,6 +338,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     withinTolerance: numeric ? withinTolerance(pairs, tolerance) : null,
     meanDifference: numeric ? meanDifference(pairs) : null,
     largeDifference: numeric ? largeDifference(pairs) : null,
+    gaps: numeric ? gapCounts(pairs) : null,
     oppositeDirection: numeric && midpoint !== null ? oppositeDirection(pairs, midpoint) : null,
     midpoint,
     categories,
