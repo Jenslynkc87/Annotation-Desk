@@ -6,6 +6,7 @@ import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } fr
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
 import { samePrompt, upsertSavedPrompt } from '../lib/savedPrompts';
 import type { ProviderId, SavedPrompt, Variable, VariableType } from '../lib/types';
+import { builtInPrice, PRICES_AS_OF, setPriceOverride, usePriceOverrides } from '../lib/pricing';
 import { nowIso, uid } from '../lib/util';
 import { RequestView } from './RequestView';
 import { Icon, Menu, Modal } from './ui';
@@ -61,6 +62,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const docs = useStore((s) => s.docs);
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [customModel, setCustomModel] = useState(false);
+  const priceOverrides = usePriceOverrides();
 
   const m = study.model;
   const o = study.options;
@@ -84,6 +86,14 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     ...templatePlaceholders(p.userTemplate).filter((k) => k !== 'text' && k !== 'id' && !(k.startsWith('meta.') && allMetaColumns.has(k.slice(5)))),
     ...invalidPlaceholders(p.userTemplate),
   ];
+
+  const ownPrice = priceOverrides[m.model];
+  const price = ownPrice ?? builtInPrice(m.model);
+  const setPrice = (which: 'input' | 'output', value: string) => {
+    const cur = price ?? { input: 0, output: 0 };
+    const n = value === '' ? 0 : Math.max(0, Number(value) || 0);
+    setPriceOverride(m.model, { input: cur.input, output: cur.output, [which]: n });
+  };
 
   // Keep the settings valid for the chosen model: an effort it supports (medium by default) and no
   // temperature where the model rejects one. The dropdowns then always show what is sent.
@@ -224,14 +234,6 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           )}
         </div>
 
-        <label className="check" style={{ marginTop: 12 }}>
-          <input type="checkbox" checked={m.reasoningSummary} onChange={(e) => updateStudy((s) => void (s.model.reasoningSummary = e.target.checked))} />
-          <span>
-            Record the model's reasoning summary
-            <div className="hint">A readable summary of the model's reasoning, saved with each result.</div>
-          </span>
-        </label>
-
         <details className="more">
           <summary>Sampling & limits</summary>
           <div className="more-body">
@@ -285,6 +287,34 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
               </div>
             </div>
             <div className="hint tight">How many texts are sent at once (not used for batches). Lower it if you hit rate limits.</div>
+            <div className="grid2" style={{ marginTop: 12 }}>
+              <div className="field">
+                <label htmlFor="price-in">Price per million input tokens ($)</label>
+                <input id="price-in" className="input" type="number" min="0" step="any" value={price?.input ?? ''} placeholder="Unknown" onChange={(e) => setPrice('input', e.target.value)} />
+              </div>
+              <div className="field">
+                <label htmlFor="price-out">Price per million output tokens ($)</label>
+                <input id="price-out" className="input" type="number" min="0" step="any" value={price?.output ?? ''} placeholder="Unknown" onChange={(e) => setPrice('output', e.target.value)} />
+              </div>
+            </div>
+            <div className="hint tight">
+              Used only for the cost estimate before a run. Built-in prices are list prices as of {PRICES_AS_OF} and can go out of date; type your own to override
+              them.{ownPrice && (
+                <>
+                  {' '}
+                  <button className="linkbtn" onClick={() => setPriceOverride(m.model, null)}>
+                    Use built-in
+                  </button>
+                </>
+              )}
+            </div>
+            <label className="check" style={{ marginTop: 14 }}>
+              <input type="checkbox" checked={m.reasoningSummary} onChange={(e) => updateStudy((s) => void (s.model.reasoningSummary = e.target.checked))} />
+              <span>
+                Record the model's reasoning summary
+                <div className="hint">A readable summary of the model's reasoning, saved with each result.</div>
+              </span>
+            </label>
           </div>
         </details>
       </Section>

@@ -3,6 +3,7 @@ import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/p
 import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { provider } from '../lib/providers';
+import { describeEstimate, estimateRun, fixedChars, observedOutputTokens, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
 import { CorpusImport } from './CorpusImport';
@@ -105,15 +106,41 @@ function TextsAndResults() {
     });
   const allPageSelected = pageDocs.length > 0 && pageDocs.every((d) => selected.has(d.id));
 
-  const confirmLarge = (n: number, batch: boolean) =>
-    n * reps <= 50 ||
-    confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${(n * reps).toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${n} texts × ${reps} runs)` : ''}? Provider charges apply.`,
+  usePriceOverrides(); // re-estimate when the owner edits a price
+  const estimateFor = (ds: Doc[]): Estimate =>
+    estimateRun({
+      docs: ds,
+      fixedChars: fixedChars(study),
+      model: study.model.model,
+      maxOutputTokens: study.model.maxOutputTokens,
+      replicates: reps,
+      batch: study.options.batch,
+      observedOutput: observedOutputTokens(study.model.model, runs, results),
+    });
+  const allEstimate = useMemo(
+    () => (docs.length ? estimateFor(docs) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [docs, study.prompt, study.model.model, study.model.maxOutputTokens, reps, study.options.batch, runs, results],
+  );
+
+  const confirmLarge = (ds: Doc[], batch: boolean) => {
+    const est = estimateFor(ds);
+    const n = est.requests;
+    const long = est.tooLong.length
+      ? `\n\n${est.tooLong.length} text${est.tooLong.length === 1 ? ' is' : 's are'} probably too long for this model (about ${Math.round((est.window ?? 0) / 1000)}k tokens including the answer), e.g. ${est.tooLong
+          .slice(0, 3)
+          .map((d) => d.docId)
+          .join(', ')}. Those requests will most likely fail.`
+      : '';
+    if (n <= 50 && !long) return true;
+    return confirm(
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}`,
     );
+  };
 
   const runDocs = async (ds: Doc[], scope: string, forceSync: boolean) => {
     if (!ds.length) return;
-    if (!confirmLarge(ds.length, study.options.batch && !forceSync)) return;
+    if (!confirmLarge(ds, study.options.batch && !forceSync)) return;
     await startRun({ docIds: ds.map((d) => d.id), scope, forceSync });
   };
 
@@ -187,6 +214,12 @@ function TextsAndResults() {
             </div>
           </div>
           {reps > 1 && <div className="hint" style={{ marginTop: 6 }}>Each text is annotated {reps}× per run.</div>}
+          {allEstimate && docs.length > 1 && (
+            <div className="hint" style={{ marginTop: 6 }}>
+              All {docs.length.toLocaleString()} texts: {describeEstimate(allEstimate)}
+              {allEstimate.tooLong.length > 0 && <span className="warn"> · {allEstimate.tooLong.length} probably too long for this model</span>}
+            </div>
+          )}
 
           {job && (
             <div>
