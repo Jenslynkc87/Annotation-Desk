@@ -257,9 +257,26 @@ export async function removeStudy(id: string) {
 
 // ---------- corpus ----------
 
+/** What a text is called where it came from: its file name, else its ID. */
+const nameOf = (x: { docId: string; meta: Record<string, string> }) => x.meta.file || x.docId.trim();
+
 export async function addDocs(items: { docId: string; text: string; meta: Record<string, string>; source: string }[]) {
   const cur = currentStudy();
   if (!cur || !items.length) return;
+  // A text that is already here (same name, identical text), e.g. after dropping the whole folder again to add
+  // a few new files, is skipped rather than added again as a copy. Same name with a different text is added.
+  const present = new Map<string, string[]>();
+  for (const d of state.docs) present.set(nameOf(d), [...(present.get(nameOf(d)) ?? []), d.text]);
+  const before = items.length;
+  items = items.filter((it) => {
+    const texts = present.get(nameOf(it)) ?? [];
+    if (texts.includes(it.text)) return false;
+    present.set(nameOf(it), [...texts, it.text]);
+    return true;
+  });
+  const skipped = before - items.length;
+  if (skipped) toast(`Skipped ${skipped.toLocaleString()} text${skipped === 1 ? '' : 's'} already in this study (same name and identical text).`);
+  if (!items.length) return;
   const taken = new Set(state.docs.map((d) => d.docId));
   let order = state.docs.reduce((m, d) => Math.max(m, d.order), 0);
   const t = nowIso();
