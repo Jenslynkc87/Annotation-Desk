@@ -9,6 +9,8 @@ export interface ParsedTable {
   name: string;
   columns: string[];
   rows: Record<string, string>[];
+  /** Rows that didn't split into as many values as there are columns (shown before importing). */
+  problems?: string[];
 }
 
 export type ParsedFile =
@@ -104,12 +106,7 @@ export async function parseFile(file: File): Promise<ParsedFile> {
       }
       case '.csv':
       case '.tsv': {
-        const res = Papa.parse<Record<string, string>>(await file.text(), {
-          header: true,
-          skipEmptyLines: 'greedy',
-          delimiter: e === '.tsv' ? '\t' : '',
-        });
-        return { kind: 'table', table: { name: file.name, columns: res.meta.fields ?? [], rows: res.data } };
+        return { kind: 'table', table: readDelimited(file.name, await file.text(), e === '.tsv' ? '\t' : '') };
       }
       case '.xlsx':
       case '.xls':
@@ -147,6 +144,31 @@ export async function parseFile(file: File): Promise<ParsedFile> {
   }
 }
 
+/** A CSV/TSV table; the first row holds the column names. `delimiter` '' = detect. */
+function readDelimited(name: string, text: string, delimiter: string): ParsedTable {
+  const res = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: 'greedy', delimiter });
+  const lines = res.errors.filter((x) => x.type === 'FieldMismatch').map((x) => (x.row ?? 0) + 2);
+  const problems = lines.length
+    ? [
+        `${lines.length} row${lines.length === 1 ? ' has' : 's have'} more or fewer values than there are column names (line ${lines.slice(0, 5).join(', ')}${lines.length > 5 ? ', …' : ''}). ` +
+          'A value with a comma in it (e.g. Smith, John) must be in "quotes", or copy the rows from Excel or Word instead.',
+      ]
+    : [];
+  const columns = (res.meta.fields ?? []).filter((c) => c.trim() !== '');
+  const rows = res.data.map((r) => Object.fromEntries(columns.map((c) => [c, r[c] ?? ''])));
+  return { name, columns, rows, problems };
+}
+
+/**
+ * A table pasted as text: rows copied from Excel or a Word table (columns separated by tabs) or typed with
+ * commas, the column names in the first row.
+ */
+export function parsePastedTable(text: string): ParsedTable {
+  const t = readDelimited('pasted', text.trim(), text.includes('\t') ? '\t' : '');
+  if (t.rows.length && t.columns.length < 2) t.problems = [...(t.problems ?? []), 'Only one column was found: separate the columns with tabs (copy from Excel or Word) or commas.'];
+  return t;
+}
+
 /** Guess which column holds the text: the one with the longest average content. */
 export function guessTextColumn(t: ParsedTable): string {
   const pref = t.columns.find((c) => /^(text|content|body|document|conversation|paragraph|response)$/i.test(c));
@@ -162,6 +184,21 @@ export function guessTextColumn(t: ParsedTable): string {
     }
   }
   return best;
+}
+
+/** A table of short values only (names, years, places), not one with a column of texts: likely one entry per row. */
+export function looksLikeEntries(t: ParsedTable): boolean {
+  const sample = t.rows.slice(0, 50);
+  return t.columns.length > 1 && t.columns.every((c) => sample.reduce((s, r) => s + (r[c]?.length ?? 0), 0) / Math.max(1, sample.length) < 200);
+}
+
+/** A row as the model reads it when it describes an entry: "column: value" for the chosen columns, empty ones left out. */
+export function describeRow(row: Record<string, string>, columns: string[]): string {
+  return columns
+    .map((c) => [c, (row[c] ?? '').trim()])
+    .filter(([, v]) => v)
+    .map(([c, v]) => `${c}: ${v}`)
+    .join('\n');
 }
 
 export function guessIdColumn(t: ParsedTable): string {

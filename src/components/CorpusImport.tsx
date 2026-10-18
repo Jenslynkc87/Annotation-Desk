@@ -2,9 +2,12 @@ import { useMemo, useRef, useState } from 'react';
 import {
   ACCEPTED_EXTENSIONS,
   baseName,
+  describeRow,
   guessIdColumn,
   guessTextColumn,
+  looksLikeEntries,
   parseFile,
+  parsePastedTable,
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
@@ -14,6 +17,9 @@ import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
 
 type NewDoc = { docId: string; text: string; meta: Record<string, string>; source: string };
+
+/** The "text column" choice for tables that describe one entry per row (e.g. people or books) instead of holding texts. */
+const ENTRY = '\u0001entry';
 
 export function CorpusImport() {
   const nDocs = useStore((s) => s.docs.length);
@@ -119,7 +125,15 @@ export function CorpusImport() {
           e.target.value = '';
         }}
       />
-      {paste && <PasteDialog onClose={() => setPaste(false)} />}
+      {paste && (
+        <PasteDialog
+          onClose={() => setPaste(false)}
+          onTable={(t) => {
+            setPaste(false);
+            setTables([t]);
+          }}
+        />
+      )}
       {labels && <LabelsDialog table={labels} onDone={() => setLabels(null)} />}
       {tables.length > 0 && (
         <TableDialog
@@ -135,11 +149,13 @@ export function CorpusImport() {
   );
 }
 
-function PasteDialog({ onClose }: { onClose: () => void }) {
+function PasteDialog({ onClose, onTable }: { onClose: () => void; onTable: (t: ParsedTable) => void }) {
   const [text, setText] = useState('');
-  const [mode, setMode] = useState<'none' | 'blank' | 'line'>('none');
+  const [mode, setMode] = useState<'none' | 'blank' | 'line' | 'table'>('none');
   const [prefix, setPrefix] = useState('pasted');
-  const items = splitPasted(text, mode);
+  const asTable = mode === 'table';
+  const table = useMemo(() => (asTable && text.trim() ? parsePastedTable(text) : null), [asTable, text]);
+  const items = asTable ? [] : splitPasted(text, mode);
   const add = async () => {
     const docs = items.map((t, i) => ({ docId: items.length === 1 ? prefix : `${prefix}_${i + 1}`, text: t, meta: {}, source: 'pasted' }));
     await addDocs(docs);
@@ -152,30 +168,65 @@ function PasteDialog({ onClose }: { onClose: () => void }) {
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={!items.length} onClick={add}>
-            Add {items.length || ''} text{items.length === 1 ? '' : 's'}
-          </button>
+          {asTable ? (
+            <button className="btn primary" disabled={!table?.rows.length || table.columns.length < 2} onClick={() => table && onTable(table)}>
+              Continue with {table?.rows.length.toLocaleString() ?? 0} row{table?.rows.length === 1 ? '' : 's'}…
+            </button>
+          ) : (
+            <button className="btn primary" disabled={!items.length} onClick={add}>
+              Add {items.length || ''} text{items.length === 1 ? '' : 's'}
+            </button>
+          )}
         </>
       }
     >
-      <textarea className="textarea" rows={12} autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste one or more texts…" />
+      <textarea
+        className="textarea"
+        rows={12}
+        autoFocus
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={asTable ? 'name\tborn\tcountry\nNiels Bohr\t1885\tDenmark\nKaren Blixen\t1885\tDenmark' : 'Paste one or more texts…'}
+      />
       <div className="grid2" style={{ marginTop: 12 }}>
         <div className="field">
-          <span className="label">Split into separate texts</span>
+          <span className="label">What you paste</span>
           <select className="select" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-            <option value="none">No: one text</option>
-            <option value="blank">At blank lines (paragraphs)</option>
-            <option value="line">At every line</option>
+            <option value="none">One text</option>
+            <option value="blank">Several texts, split at blank lines</option>
+            <option value="line">Several texts, one per line</option>
+            <option value="table">A table: one row each, column names in the first row</option>
           </select>
         </div>
-        <div className="field">
-          <span className="label">ID prefix</span>
-          <input className="input mono" value={prefix} onChange={(e) => setPrefix(e.target.value.replace(/\s+/g, '_') || 'pasted')} />
+        {!asTable && (
+          <div className="field">
+            <span className="label">ID prefix</span>
+            <input className="input mono" value={prefix} onChange={(e) => setPrefix(e.target.value.replace(/\s+/g, '_') || 'pasted')} />
+          </div>
+        )}
+      </div>
+      {asTable ? (
+        <>
+          <div className="hint">
+            Copy the rows from Excel or a Word table (or type them, separated by commas), with the column names in the first row.
+            {table && table.columns.length > 0 && (
+              <>
+                {' '}
+                {table.rows.length.toLocaleString()} row{table.rows.length === 1 ? '' : 's'} · columns: {table.columns.join(', ')}
+              </>
+            )}
+          </div>
+          {table?.problems?.map((p) => (
+            <div key={p} className="hint warn">
+              {p}
+            </div>
+          ))}
+        </>
+      ) : (
+        <div className="hint">
+          {items.length} text{items.length === 1 ? '' : 's'} · {countWords(text).toLocaleString()} words
         </div>
-      </div>
-      <div className="hint">
-        {items.length} text{items.length === 1 ? '' : 's'} · {countWords(text).toLocaleString()} words
-      </div>
+      )}
     </Modal>
   );
 }
@@ -184,19 +235,29 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
   const docs = useStore((s) => s.docs);
   // A metadata or label sheet dropped here would otherwise become one junk "text" per row.
   const matched = useMemo(() => (docs.length ? matchLabels(docs, table, guessKeyColumn(docs, table)).updates.size : 0), [docs, table]);
-  const [textCol, setTextCol] = useState(guessTextColumn(table));
+  // A table of short values (names, years, …) most likely describes one entry per row, rather than holding texts.
+  const [textCol, setTextCol] = useState(() => (looksLikeEntries(table) ? ENTRY : guessTextColumn(table)));
   const [idCol, setIdCol] = useState(guessIdColumn(table));
   const [skipEmpty, setSkipEmpty] = useState(true);
-  const rows = skipEmpty ? table.rows.filter((r) => (r[textCol] ?? '').trim()) : table.rows;
-  const metaCols = table.columns.filter((c) => c !== textCol && c !== idCol);
+  // Entries: the columns the model sees, in the table's order (not the coder's own answers).
+  const [shown, setShown] = useState<string[]>([]);
+  const entry = textCol === ENTRY;
+  const textOf = (r: Record<string, string>) => (entry ? describeRow(r, shown) : String(r[textCol] ?? ''));
+  // (Entries with no column ticked yet: count every row, the button waits for a column.)
+  const rows = skipEmpty && (!entry || shown.length) ? table.rows.filter((r) => textOf(r).trim()) : table.rows;
+  // For entries every column is also kept as metadata (filters, samples, comparisons).
+  const metaCols = table.columns.filter((c) => c !== idCol && (entry || c !== textCol));
   const add = async () => {
     const base = baseName(table.name);
-    const docs = rows.map((r, i) => ({
-      docId: idCol ? String(r[idCol] ?? '').trim() || `${base}_${i + 1}` : `${base}_${i + 1}`,
-      text: String(r[textCol] ?? ''),
-      meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
-      source: table.name,
-    }));
+    const docs = rows.map((r, i) => {
+      const fallback = entry && shown.length ? String(r[shown[0]] ?? '').trim() : '';
+      return {
+        docId: (idCol ? String(r[idCol] ?? '').trim() : '') || fallback || `${base}_${i + 1}`,
+        text: textOf(r),
+        meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
+        source: table.name,
+      };
+    });
     await addDocs(docs);
     onDone();
   };
@@ -207,8 +268,8 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
       footer={
         <>
           <button className="btn" onClick={onDone}>Cancel</button>
-          <button className="btn primary" disabled={!textCol || !rows.length} onClick={add}>
-            Import {rows.length.toLocaleString()} texts
+          <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !rows.length} onClick={add}>
+            Import {rows.length.toLocaleString()} {entry ? 'entries' : 'texts'}
           </button>
         </>
       }
@@ -222,10 +283,16 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
           </button>
         </div>
       )}
+      {table.problems?.map((p) => (
+        <div key={p} className="notice warn" style={{ marginBottom: 12 }}>
+          {p}
+        </div>
+      ))}
       <div className="grid2">
         <div className="field">
           <label>Text column</label>
           <select className="select" value={textCol} onChange={(e) => setTextCol(e.target.value)}>
+            <option value={ENTRY}>None: each row is an entry</option>
             {table.columns.map((c) => (
               <option key={c}>{c}</option>
             ))}
@@ -234,28 +301,59 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
         <div className="field">
           <label>ID column</label>
           <select className="select" value={idCol} onChange={(e) => setIdCol(e.target.value)}>
-            <option value="">(number the rows)</option>
+            <option value="">{entry ? '(the first ticked column)' : '(number the rows)'}</option>
             {table.columns.map((c) => (
               <option key={c}>{c}</option>
             ))}
           </select>
         </div>
       </div>
+      {entry && (
+        <div className="field">
+          <span className="label">Columns the model sees</span>
+          <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
+            {table.columns.map((c) => (
+              <label key={c} className="check">
+                <input
+                  type="checkbox"
+                  checked={shown.includes(c)}
+                  onChange={(e) => setShown(table.columns.filter((x) => (x === c ? e.target.checked : shown.includes(x))))}
+                />
+                {c}
+              </label>
+            ))}
+          </div>
+          <div className="hint">
+            Tick what identifies each entry (e.g. name, year, country). Leave out your own answers: they stay with each entry, to compare with the model under{' '}
+            <em>Runs &amp; agreement</em>.
+          </div>
+          {shown.length > 0 && rows[0] && (
+            <>
+              <p className="section-title" style={{ marginTop: 10 }}>
+                What the model gets for the first row (after your prompt)
+              </p>
+              <pre className="textblock">{textOf(rows[0])}</pre>
+            </>
+          )}
+        </div>
+      )}
       <label className="check">
-        <input type="checkbox" checked={skipEmpty} onChange={(e) => setSkipEmpty(e.target.checked)} /> Skip rows with an empty text
+        <input type="checkbox" checked={skipEmpty} onChange={(e) => setSkipEmpty(e.target.checked)} /> Skip rows with {entry ? 'nothing in the ticked columns' : 'an empty text'}
       </label>
       <p className="hint">
-        All other columns are kept as metadata{metaCols.length ? `: ${metaCols.slice(0, 8).join(', ')}${metaCols.length > 8 ? '…' : ''}` : ''}. Columns with
-        human or gold-standard labels can be compared with model annotations under <em>Runs &amp; agreement</em>.
+        {entry ? 'All columns are also kept as metadata' : 'All other columns are kept as metadata'}
+        {metaCols.length ? `: ${metaCols.slice(0, 8).join(', ')}${metaCols.length > 8 ? '…' : ''}` : ''}. Columns with human or gold-standard labels can be compared
+        with model annotations under <em>Runs &amp; agreement</em>.
       </p>
       <div className="table-wrap" style={{ maxHeight: 260 }}>
         <table className="data">
           <thead>
             <tr>
               {table.columns.slice(0, 6).map((c) => (
-                <th key={c} className={c === textCol || c === idCol ? 'col-role' : ''}>
+                <th key={c} className={c === textCol || c === idCol || (entry && shown.includes(c)) ? 'col-role' : ''}>
                   {c}
                   {c === textCol && <span className="badge" style={{ marginLeft: 6 }}>used as text</span>}
+                  {entry && shown.includes(c) && <span className="badge" style={{ marginLeft: 6 }}>model sees</span>}
                   {c === idCol && <span className="badge" style={{ marginLeft: 6 }}>used as ID</span>}
                 </th>
               ))}
@@ -265,7 +363,7 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
             {table.rows.slice(0, 5).map((r, i) => (
               <tr key={i}>
                 {table.columns.slice(0, 6).map((c) => (
-                  <td key={c} className={c === textCol || c === idCol ? 'col-role' : ''}>
+                  <td key={c} className={c === textCol || c === idCol || (entry && shown.includes(c)) ? 'col-role' : ''}>
                     <div className="snippet">{r[c]}</div>
                   </td>
                 ))}
