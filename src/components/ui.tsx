@@ -61,7 +61,7 @@ export function Menu({ button, children, align = 'right' }: { button: (open: () 
   );
 }
 
-export function Icon({ name, size = 16 }: { name: 'upload' | 'play' | 'download' | 'key' | 'check' | 'refresh' | 'plus' | 'trash' | 'flask' | 'stop' | 'chevron'; size?: number }) {
+export function Icon({ name, size = 16 }: { name: 'upload' | 'play' | 'download' | 'key' | 'check' | 'refresh' | 'plus' | 'trash' | 'flask' | 'stop' | 'chevron' | 'calculator'; size?: number }) {
   const p = {
     upload: 'M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3',
     play: 'M7 5v14l11-7z',
@@ -74,6 +74,7 @@ export function Icon({ name, size = 16 }: { name: 'upload' | 'play' | 'download'
     flask: 'M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3',
     stop: 'M7 7h10v10H7z',
     chevron: 'm6 9 6 6 6-6',
+    calculator: 'M7 3h10a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 7h8v3H8zM8.5 14h.01M12 14h.01M15.5 14h.01M8.5 17.5h.01M12 17.5h.01M15.5 17.5h.01',
   }[name];
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>

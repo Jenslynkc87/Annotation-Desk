@@ -3,10 +3,11 @@ import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/p
 import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { provider } from '../lib/providers';
-import { describeEstimate, estimateRun, fixedChars, observedOutputTokens, usePriceOverrides, type Estimate } from '../lib/pricing';
+import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
 import { CorpusImport } from './CorpusImport';
+import { CostEstimate, EstimateLink } from './CostEstimate';
 import { DocDrawer } from './DocDrawer';
 import { SampleDialog } from './SampleDialog';
 import { SetupPanel } from './SetupPanel';
@@ -45,6 +46,7 @@ function TextsAndResults() {
   const [page, setPage] = useState(0);
   const [openDoc, setOpenDoc] = useState<string | null>(null);
   const [sampleN, setSampleN] = useState(10);
+  const [showEstimate, setShowEstimate] = useState(false);
 
   const views = useMemo(() => buildDocViews(docs, runs, results, runFilter), [docs, runs, results, runFilter]);
   const metaColumns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
@@ -107,24 +109,25 @@ function TextsAndResults() {
   const allPageSelected = pageDocs.length > 0 && pageDocs.every((d) => selected.has(d.id));
 
   usePriceOverrides(); // re-estimate when the owner edits a price
-  const estimateFor = (ds: Doc[]): Estimate =>
+  const estimateFor = (ds: Doc[], batch: boolean): Estimate =>
     estimateRun({
       docs: ds,
-      fixedChars: fixedChars(study),
-      model: study.model.model,
-      maxOutputTokens: study.model.maxOutputTokens,
+      prompt: study.prompt,
+      model: study.model,
+      caching: study.options.caching,
       replicates: reps,
-      batch: study.options.batch,
-      observedOutput: observedOutputTokens(study.model.model, runs, results),
+      batch,
+      calibration: calibrate(study.model, study.prompt, runs, results, docs),
     });
-  const allEstimate = useMemo(
-    () => (docs.length ? estimateFor(docs) : null),
+  // Only the length check is shown all the time; the cost is in the Estimate cost panel.
+  const tooLongCount = useMemo(
+    () => (docs.length ? estimateFor(docs, false).tooLong.length : 0),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [docs, study.prompt, study.model.model, study.model.maxOutputTokens, reps, study.options.batch, runs, results],
+    [docs, study.prompt, study.model.model, study.model.maxOutputTokens],
   );
 
   const confirmLarge = (ds: Doc[], batch: boolean) => {
-    const est = estimateFor(ds);
+    const est = estimateFor(ds, batch);
     const n = est.requests;
     const long = est.tooLong.length
       ? `\n\n${est.tooLong.length} text${est.tooLong.length === 1 ? ' is' : 's are'} probably too long for this model (about ${Math.round((est.window ?? 0) / 1000)}k tokens including the answer), e.g. ${est.tooLong
@@ -134,7 +137,7 @@ function TextsAndResults() {
       : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est, batch)}.${long}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}`,
     );
   };
 
@@ -214,12 +217,12 @@ function TextsAndResults() {
             </div>
           </div>
           {reps > 1 && <div className="hint" style={{ marginTop: 6 }}>Each text is annotated {reps}× per run.</div>}
-          {allEstimate && docs.length > 1 && (
-            <div className="hint" style={{ marginTop: 6 }}>
-              All {docs.length.toLocaleString()} texts: {describeEstimate(allEstimate, study.options.batch)}
-              {allEstimate.tooLong.length > 0 && <span className="warn"> · {allEstimate.tooLong.length} probably too long for this model</span>}
+          {tooLongCount > 0 && (
+            <div className="hint warn" style={{ marginTop: 6 }}>
+              {tooLongCount} text{tooLongCount === 1 ? ' is' : 's are'} probably too long for this model.
             </div>
           )}
+          {showEstimate ? <CostEstimate selected={selected} onClose={() => setShowEstimate(false)} /> : <EstimateLink onClick={() => setShowEstimate(true)} />}
 
           {job && (
             <div>

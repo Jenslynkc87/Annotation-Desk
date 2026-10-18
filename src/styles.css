@@ -197,6 +197,17 @@ details.more > .more-body { padding-top: 8px; }
 .btn-group { display: inline-flex; }
 .btn-group > .btn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .btn-group > .input { width: 64px; height: auto; border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
+.estimate-link { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 13px; }
+.estimate { margin-top: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); max-width: 640px; }
+.estimate-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
+.estimate-total { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.estimate-n { font-size: 14px; font-weight: 450; color: var(--muted); }
+table.data.estimate-table { max-width: 420px; font-size: 13px; }
+table.data.estimate-table th { position: static; padding: 4px 8px; }
+table.data.estimate-table td { padding: 4px 8px; }
+table.data.estimate-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.estimate-notes { margin: 10px 0 0; padding-left: 18px; }
+.estimate-notes li + li { margin-top: 4px; }
 .progress { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 12px; }
 .progress > div { height: 100%; background: var(--navy); transition: width .25s; }
 .progress-label { font-size: 13px; color: var(--muted); margin-top: 6px; display: flex; justify-content: space-between; gap: 8px; }
