@@ -187,7 +187,7 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
           {asTable ? (
-            <button className="btn primary" disabled={!table?.rows.length || table.columns.length < 2} onClick={() => table && onTable(table)}>
+            <button className="btn primary" disabled={!table?.rows.length || !table.columns.length} onClick={() => table && onTable(table)}>
               Continue with {table?.rows.length.toLocaleString() ?? 0} row{table?.rows.length === 1 ? '' : 's'}…
             </button>
           ) : (
@@ -258,7 +258,7 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   const [idCol, setIdCol] = useState(guessIdColumn(table));
   const [skipEmpty, setSkipEmpty] = useState(true);
   // Entries: the columns the model sees, in the table's order (not the coder's own answers).
-  const [shown, setShown] = useState<string[]>([]);
+  const [shown, setShown] = useState<string[]>(() => (table.columns.length === 1 ? [...table.columns] : []));
   // In a model-knowledge study each row is an entry, described by the columns the model sees.
   const entry = entries;
   const textOf = (r: Record<string, string>) => (entry ? describeRow(r, shown) : String(r[textCol] ?? ''));

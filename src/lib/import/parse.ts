@@ -164,9 +164,8 @@ function readDelimited(name: string, text: string, delimiter: string): ParsedTab
  * commas, the column names in the first row.
  */
 export function parsePastedTable(text: string): ParsedTable {
-  const t = readDelimited('pasted', text.trim(), text.includes('\t') ? '\t' : '');
-  if (t.rows.length && t.columns.length < 2) t.problems = [...(t.problems ?? []), 'Only one column was found: separate the columns with tabs (copy from Excel or Word) or commas.'];
-  return t;
+  // One column is fine too (e.g. a list of names under a heading).
+  return readDelimited('pasted', text.trim(), text.includes('\t') ? '\t' : '');
 }
 
 /** Guess which column holds the text: the one with the longest average content. */

@@ -13,8 +13,9 @@ describe('pasted tables', () => {
     expect(t.rows[0]).toEqual({ name: 'Bohr, Niels', born: '1885' });
     expect(t.problems?.[0]).toMatch(/^1 row has more or fewer values than there are column names \(line 3\)/);
   });
-  it('notices a table with only one column', () => {
-    expect(parsePastedTable('Niels Bohr\nKaren Blixen').problems?.at(-1)).toMatch(/Only one column/);
+  it('takes a single column, e.g. a list of names under a heading', () => {
+    const t = parsePastedTable('American presidents\nGeorge Washington\nJohn Adams\n');
+    expect([t.columns, t.rows.length, t.problems]).toEqual([['American presidents'], 2, []]);
   });
 });
 
