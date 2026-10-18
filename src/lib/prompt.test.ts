@@ -62,6 +62,8 @@ describe('plain-text answers with JSON', () => {
     expect(parseModelOutput('Here you go: {"score": 2}', text).parseError).not.toBeNull();
     expect(parseModelOutput('```json\n{"score": 2}\n```', text).parseError).toBeNull();
     expect(parseModelOutput('The text is broadly supportive.', text).parseError).toBeNull();
+    // Prose that merely uses braces is not JSON.
+    expect(parseModelOutput('Both groups {a, b} are named.', text).parseError).toBeNull();
   });
 });
 

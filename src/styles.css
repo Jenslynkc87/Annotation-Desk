@@ -239,7 +239,7 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 /* ---------- variable editor ---------- */
 .vars { display: flex; flex-direction: column; gap: 10px; }
 .var { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; background: color-mix(in srgb, var(--bg) 50%, var(--card)); display: flex; flex-direction: column; gap: 8px; }
-.var-top { display: grid; grid-template-columns: minmax(0, 1fr) 132px 30px; gap: 8px; align-items: center; }
+.var-top { display: grid; grid-template-columns: minmax(0, 1fr) 132px repeat(3, 30px); gap: 8px; align-items: center; }
 .var .input, .var .select { height: 34px; padding: 4px 9px; font-size: 14px; }
 .var .var-top .input { font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
 
@@ -275,6 +275,8 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .menu-item:hover { background: var(--navy-050); }
 .menu-item.active { font-weight: 600; color: var(--navy); }
 .menu-item small { color: var(--muted); margin-left: auto; }
+.menu-item:disabled { opacity: 0.45; cursor: not-allowed; background: none; }
+.menu-note { padding: 6px 10px; font-size: 12px; color: var(--muted); max-width: 260px; }
 .menu-sep { height: 1px; background: var(--line); margin: 6px 0; }
 
 .toasts { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: min(440px, calc(100vw - 36px)); }

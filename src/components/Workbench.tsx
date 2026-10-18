@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/prompt';
-import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, updateStudy, useStore } from '../lib/store';
+import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
@@ -11,7 +11,7 @@ import { CostEstimate, EstimateLink } from './CostEstimate';
 import { DocDrawer } from './DocDrawer';
 import { SampleDialog } from './SampleDialog';
 import { SetupPanel } from './SetupPanel';
-import { Icon, Menu } from './ui';
+import { Icon, Menu, NumberField } from './ui';
 
 const PAGE = 50;
 
@@ -34,6 +34,7 @@ function TextsAndResults() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
   const job = useStore((s) => s.job);
+  const submitting = useStore((s) => s.submitting);
   const keys = useStore((s) => s.keys);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
@@ -154,13 +155,18 @@ function TextsAndResults() {
         .results.filter((r) => r.status === 'ok' && runs.find((x) => x.id === r.runId)?.snapshot.promptHash === hash)
         .map((r) => r.docId),
     );
-    const todo = docs.filter((d) => !doneIds.has(d.id));
-    if (!todo.length) return alert('Every text already has a result with the current prompt.');
+    // Texts still waiting in a batch with this prompt are on their way: sending them again would pay twice.
+    const waiting = new Set(runs.filter((r) => r.status === 'submitted' && r.snapshot.promptHash === hash).flatMap((r) => r.docIds));
+    const todo = docs.filter((d) => !doneIds.has(d.id) && !waiting.has(d.id));
+    const inBatch = docs.filter((d) => !doneIds.has(d.id) && waiting.has(d.id)).length;
+    const batchNote = inBatch ? ` ${inBatch.toLocaleString()} text${inBatch === 1 ? ' is' : 's are'} still waiting in a batch and left out.` : '';
+    if (!todo.length) return alert(`Every text already has a result with the current prompt.${batchNote}`);
+    if (inBatch) toast(batchNote.trim());
     await runDocs(todo, `Not yet annotated with the current prompt (${todo.length})`, false);
   };
 
   const testDoc = docs.find((d) => selected.has(d.id)) ?? docs[0];
-  const busy = !!job;
+  const busy = !!job || !!submitting;
 
   return (
     <>
@@ -190,7 +196,7 @@ function TextsAndResults() {
                 >
                   <Icon name="play" size={14} /> Random sample of
                 </button>
-                <input className="input" type="number" min={1} aria-label="Sample size" value={sampleN} onChange={(e) => setSampleN(Math.max(1, Number(e.target.value) || 1))} />
+                <NumberField className="input" min={1} aria-label="Sample size" value={sampleN} onChange={setSampleN} />
               </span>
             </div>
             <div className="runbar-group">
@@ -224,6 +230,7 @@ function TextsAndResults() {
           )}
           {showEstimate ? <CostEstimate selected={selected} onClose={() => setShowEstimate(false)} /> : <EstimateLink onClick={() => setShowEstimate(true)} />}
 
+          {submitting && !job && <div className="progress-label">{submitting}</div>}
           {job && (
             <div>
               <div className="progress">

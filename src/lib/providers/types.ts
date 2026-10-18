@@ -75,6 +75,9 @@ export interface ProviderAdapter {
   cancelBatch(apiKey: string, batchId: string): Promise<void>;
 }
 
+/** Thrown when a finished batch reports errors instead of results (e.g. OpenAI's validation or token limits). */
+export class BatchFailedError extends Error {}
+
 export const ZERO_USAGE: Usage = {
   inputTokens: 0,
   outputTokens: 0,

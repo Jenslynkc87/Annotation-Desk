@@ -1,7 +1,7 @@
 import type { ProviderId } from '../types';
 import { anthropicAdapter } from './anthropic';
 import { openaiAdapter } from './openai';
-import type { ModelInfo, ProviderAdapter } from './types';
+import { BatchFailedError, type ModelInfo, type ProviderAdapter } from './types';
 
 export const PROVIDERS: Record<ProviderId, ProviderAdapter> = {
   anthropic: anthropicAdapter,
@@ -22,6 +22,13 @@ export function pickEffort(current: string, choices: string[]): string {
   if (!choices.length) return '';
   if (choices.includes(current)) return current;
   return choices.includes('medium') ? 'medium' : choices[0];
+}
+
+/** An error that trying again won't fix: a failed batch, or a 4xx answer other than rate limits and timeouts. */
+export function isPermanentError(e: unknown): boolean {
+  if (e instanceof BatchFailedError) return true;
+  const status = (e as { status?: unknown } | null)?.status;
+  return typeof status === 'number' && status >= 400 && status < 500 && ![408, 409, 429].includes(status);
 }
 
 /** Turn SDK errors into one readable line. */

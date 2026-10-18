@@ -34,7 +34,10 @@ export function ExportView() {
     }
   };
 
-  const gold = run && run.snapshot.prompt.outputMode === 'structured' ? run.snapshot.prompt.variables.flatMap((v) => goldColumnsFor(v.name, docs).map((c) => `${v.name} ↔ ${c}`)) : [];
+  const gold =
+    run && run.snapshot.prompt.outputMode === 'structured'
+      ? run.snapshot.prompt.variables.filter((v) => v.type !== 'text').flatMap((v) => goldColumnsFor(v.name, docs).map((c) => `${v.name} ↔ ${c}`))
+      : [];
   const study = currentStudy(getState())!;
 
   return (
@@ -154,7 +157,7 @@ export function ExportView() {
               go('backup', async () => {
                 const d = exportData();
                 const b = await buildBackup(d.study, d.docs, d.runs, d.results, true);
-                download(`${slug(d.study.name)}_backup_${dateStamp()}.json`, JSON.stringify(b), 'application/json');
+                download(`${slug(d.study.name)}_backup_${dateStamp()}.json`, b);
               })
             }
           >

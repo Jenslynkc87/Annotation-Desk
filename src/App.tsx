@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ExportView } from './components/ExportView';
 import { KeysDialog } from './components/KeysDialog';
 import { RunsView } from './components/RunsView';
 import { StudyMenu } from './components/StudyMenu';
 import { Icon } from './components/ui';
 import { Workbench } from './components/Workbench';
-import { currentStudy, dismissToast, updateStudy, useStore } from './lib/store';
+import { currentStudy, dismissToast, isBusy, updateStudy, useStore } from './lib/store';
 
 type Tab = 'workbench' | 'runs' | 'export';
 
@@ -19,6 +19,14 @@ export function App() {
   const [tab, setTab] = useState<Tab>('workbench');
   const [keysOpen, setKeysOpen] = useState(false);
   const keyCount = Object.values(keys).filter(Boolean).length;
+  // Closing or reloading the tab stops a run that is being sent (or a batch being uploaded): ask first.
+  const busy = useStore((s) => isBusy(s));
+  useEffect(() => {
+    if (!busy) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [busy]);
 
   return (
     <>
@@ -29,7 +37,7 @@ export function App() {
               <svg width="46" height="46" viewBox="0 0 32 32" aria-hidden>
                 <g fill="#fff" opacity=".6"><rect x="12" y="7" width="14" height="2.6" rx="1.3"/><rect x="12" y="23.4" width="10" height="2.6" rx="1.3"/></g>
                 <g fill="#fff"><rect x="12" y="12.2" width="14" height="2.6" rx="1.3"/><rect x="12" y="17.6" width="11" height="2.6" rx="1.3"/></g>
-                <path d="M9.5 11H7v10.2h2.5" fill="none" stroke="#f2b33d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M9.5 11H7v10.2h2.5" fill="none" stroke="#f2b33d" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
             </div>
             <div>
@@ -69,9 +77,10 @@ export function App() {
               </button>
               <button className={`tab ${tab === 'export' ? 'active' : ''}`} onClick={() => setTab('export')}>Export</button>
             </nav>
-            {tab === 'workbench' && <Workbench onOpenKeys={() => setKeysOpen(true)} />}
-            {tab === 'runs' && <RunsView />}
-            {tab === 'export' && <ExportView />}
+            {/* Keyed by study: filters, selections and chosen runs belong to one study and start fresh in another. */}
+            {tab === 'workbench' && <Workbench key={study.id} onOpenKeys={() => setKeysOpen(true)} />}
+            {tab === 'runs' && <RunsView key={study.id} />}
+            {tab === 'export' && <ExportView key={study.id} />}
           </>
         )}
       </main>

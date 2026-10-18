@@ -49,6 +49,10 @@ export async function loadStudyData(studyId: string) {
   return { docs, runs, results };
 }
 
+export async function getDocsForStudy(studyId: string): Promise<Doc[]> {
+  return (await db()).getAllFromIndex('docs', 'byStudy', studyId);
+}
+
 export async function putDocs(docs: Doc[]) {
   const tx = (await db()).transaction('docs', 'readwrite');
   await Promise.all([...docs.map((x) => tx.store.put(x)), tx.done]);
@@ -68,6 +72,12 @@ export async function putResult(r: Result, log: ResultLog | null) {
   const ops: Promise<unknown>[] = [tx.objectStore('results').put(r)];
   if (log) ops.push(tx.objectStore('logs').put(log));
   await Promise.all([...ops, tx.done]);
+}
+
+/** Many results or logs in one transaction (used when importing a backup). */
+export async function putMany(store: 'results' | 'logs', items: Result[] | ResultLog[]) {
+  const tx = (await db()).transaction(store, 'readwrite');
+  await Promise.all([...items.map((x) => tx.store.put(x as Result & ResultLog)), tx.done]);
 }
 
 export async function getLog(id: string): Promise<ResultLog | undefined> {

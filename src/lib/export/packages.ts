@@ -22,7 +22,6 @@ import {
   resultsWide,
   runSummaryRows,
   toCsv,
-  toJsonl,
   type Row,
 } from './tables';
 
@@ -51,9 +50,9 @@ type Workbook = import('exceljs').Workbook;
 const isProse = (c: string) => c === 'rationale' || c === 'reasoning_summary' || isExplanationKey(c) || c === 'draft_text';
 
 /** One styled sheet: header row, frozen panes, filters, sensible column widths, numbers as numbers. */
-function addSheet(wb: Workbook, name: string, rows: Row[]) {
+function addSheet(wb: Workbook, name: string, rows: Row[], columns?: string[]) {
   const data = clipRows(rows.length ? rows : [{ note: 'No data' }]);
-  const cols = [...new Set(data.flatMap((r) => Object.keys(r)))];
+  const cols = rows.length && columns ? columns : [...new Set(data.flatMap((r) => Object.keys(r)))];
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', xSplit: cols[0] === 'doc_id' || cols[0] === 'file' || cols[0] === 'setting' ? 1 : 0, ySplit: 1 }] });
   ws.columns = cols.map((c) => {
     const long = c === 'text' || c === 'response' || c === 'value';
@@ -98,6 +97,7 @@ function settingsRows(study: Study, run: Run): Row[] {
   const p = run.snapshot.prompt;
   return [
     { setting: 'Study', value: study.name },
+    ...(study.description.trim() ? [{ setting: 'Study notes (e.g. how samples were drawn)', value: study.description.trim() }] : []),
     { setting: 'Run', value: `#${run.number}${run.label ? ` (${run.label})` : ''}` },
     { setting: 'Started', value: run.createdAt },
     { setting: 'Finished', value: run.finishedAt },
@@ -129,7 +129,7 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[]) {
   logs.sort((a, b) => (order(a.id)[1] + order(a.id)[2]).localeCompare(order(b.id)[1] + order(b.id)[2]));
   zip.file(
     'requests.jsonl',
-    toJsonl(
+    jsonlBlob(
       logs.map((l) => {
         const [, docId, rep] = l.id.split(':');
         return { doc_id: docById.get(docId) ?? docId, replicate: Number(rep), request: { ...run.snapshot.requestBase, ...l.requestPart } };
@@ -138,13 +138,18 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[]) {
   );
   zip.file(
     'responses.jsonl',
-    toJsonl(
+    jsonlBlob(
       logs.map((l) => {
         const [, docId, rep] = l.id.split(':');
         return { doc_id: docById.get(docId) ?? docId, replicate: Number(rep), response: l.response };
       }),
     ),
   );
+}
+
+/** JSON Lines as a Blob, one line per item: the whole file never has to fit in one string (a full run's logs hold every text). */
+function jsonlBlob(items: unknown[]): Blob {
+  return new Blob(items.map((x) => JSON.stringify(x) + '\n'), { type: 'application/jsonl' });
 }
 
 function promptFiles(zip: JSZip, run: Run) {
@@ -174,10 +179,10 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
   const finished = d.runs.filter((r) => d.results.some((x) => x.runId === r.id));
 
   root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
-  root.file('study-backup.json', JSON.stringify(await buildBackup(d.study, d.docs, d.runs, d.results, opts.includeLogs)));
+  root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, d.results, opts.includeLogs));
   const corpus = root.folder('corpus')!;
   corpus.file('corpus.csv', toCsv(corpusRows(d.docs, true)));
-  corpus.file('corpus.jsonl', toJsonl(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
+  corpus.file('corpus.jsonl', jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
 
   const results = root.folder('results')!;
   results.file('runs.csv', toCsv(runSummaryRows(d.runs, d.results)));
@@ -256,6 +261,8 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     software: { name: 'Annotation Desk', version: run.snapshot.appVersion },
     exported_at: exportedAt,
     study: d.study.name,
+    // Notes kept with the study, e.g. how a validation sample was drawn (rule and seed).
+    study_notes: d.study.description.trim() || null,
     run: { number: run.number, label: run.label, mode: run.mode === 'batch' ? 'batch API' : 'immediate requests', batch_id: run.batch?.batchId ?? null, started_at: run.createdAt, finished_at: run.finishedAt },
     model: {
       provider: m.provider,
@@ -313,7 +320,11 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
     run.snapshot.prompt.outputMode === 'structured'
       ? `The model was required to return the fields listed in the codebook as JSON conforming to a schema (structured outputs)${run.snapshot.prompt.includeRationale ? ', preceded by a brief rationale' : ''}.`
       : 'The model returned free-text responses.',
-    reps > 1 ? `Each text was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.` : '',
+    reps > 1
+      ? run.snapshot.prompt.outputMode === 'structured'
+        ? `Each text was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.`
+        : `Each text was annotated ${reps} times; numbers in the answers were combined by the median, other values by majority vote.`
+      : '',
     failed
       ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} texts without a label` : ''}.`
       : '',
@@ -360,7 +371,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     for (const a of agr) {
       const s = a.stats;
       lines.push(
-        `| ${a.field} | ${a.source === 'model' ? 'model' : a.source} | ${a.compared_with} | ${s.n} (of ${a.nLabelled}) | ${s.percentAgreement === null ? '—' : (s.percentAgreement * 100).toFixed(1) + '%' + ci(s.ci.percentAgreement, true)} | ${fmtStat(s.cohenKappa)}${ci(s.ci.cohenKappa)} | ${fmtStat(s.krippendorffAlpha)}${ci(s.ci.krippendorffAlpha)} (${a.level}) | ${fmtStat(s.gwetAC1)}${ci(s.ci.gwetAC1)} |`,
+        `| ${a.field} | ${a.source === 'model' ? 'model' : a.source} | ${a.compared_with} | ${s.n} (of ${a.nLabelled}) | ${s.percentAgreement === null ? '—' : (s.percentAgreement * 100).toFixed(1) + '%' + ci(s.ci.percentAgreement, true)} | ${fmtStat(s.cohenKappa)}${ci(s.ci.cohenKappa)} | ${fmtStat(s.krippendorffAlpha)}${ci(s.ci.krippendorffAlpha)} (${s.level}) | ${fmtStat(s.gwetAC1)}${ci(s.ci.gwetAC1)} |`,
       );
     }
     lines.push(
@@ -509,10 +520,10 @@ export async function buildComparisonReport(
   const withCi = (label: string, s: Agreement, key: CiStat, value: number | null): Row =>
     value === null ? {} : { [label]: r4(value), [`${label}_ci_low`]: r4(s.ci[key]?.[0]), [`${label}_ci_high`]: r4(s.ci[key]?.[1]) };
   const tolName = `within_${tolerance}_point${tolerance === 1 ? '' : 's'}`;
-  const summaryRow = (label: string, texts: string, level: string, s: Agreement): Row => ({
+  const summaryRow = (label: string, texts: string, s: Agreement): Row => ({
     field: label,
     texts,
-    level,
+    level: s.level,
     n_compared: s.n,
     n_texts_in_both_runs: both.length,
     ...withCi('exact_agreement', s, 'percentAgreement', s.percentAgreement),
@@ -533,8 +544,8 @@ export async function buildComparisonReport(
     wb,
     'Summary',
     compared.flatMap(({ f, all, nonZero }) => [
-      summaryRow(f.label, 'all', f.level, all),
-      ...(nonZero ? [summaryRow(f.label, 'at least one non-zero', f.level, nonZero)] : []),
+      summaryRow(f.label, 'all', all),
+      ...(nonZero ? [summaryRow(f.label, 'at least one non-zero', nonZero)] : []),
     ]),
   );
   addSheet(
@@ -542,7 +553,7 @@ export async function buildComparisonReport(
     'Draft text',
     compared.map(({ f, all, nonZero }) => ({
       field: f.label,
-      draft_text: comparisonSentence(f.label, name(runA), name(runB), all, both.length, f.level) + (nonZero ? ' ' + nonZeroSentence(nonZero) : ''),
+      draft_text: comparisonSentence(f.label, name(runA), name(runB), all, both.length) + (nonZero ? ' ' + nonZeroSentence(nonZero) : ''),
     })),
   );
 
@@ -595,7 +606,7 @@ export async function buildComparisonReport(
       compared.flatMap(({ f, items }) =>
         groups.map((g) => {
           const sub = items.filter((i) => (i.doc.meta[groupBy] ?? '') === g);
-          const { field, texts: _t, ...rest } = summaryRow(f.label, '', f.level, agreement(sub.map((i) => i.x), sub.map((i) => i.y), f.level, f.allowed, tolerance));
+          const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((i) => i.x), sub.map((i) => i.y), f.level, f.allowed, tolerance));
           return { field, [groupBy]: g || '(none)', ...rest, n_texts_in_both_runs: both.filter((d) => (d.meta[groupBy] ?? '') === g).length };
         }),
       ),
@@ -626,13 +637,13 @@ export async function buildComparisonReport(
     let sheet = `Table ${f.label}`.replace(/[[\]:*?/\\]/g, '_').slice(0, 31);
     for (let k = 2; used.has(sheet); k++) sheet = `${sheet.slice(0, 28)}_${k}`;
     used.add(sheet);
+    const corner = 'first \\ second';
     addSheet(
       wb,
       sheet,
-      all.categories.map((r) => ({
-        [`first \\ second`]: r,
-        ...Object.fromEntries(all.categories.map((c) => [c, all.confusion[r][c]])),
-      })),
+      all.categories.map((r) => ({ [corner]: r, ...Object.fromEntries(all.categories.map((c) => [c, all.confusion[r][c]])) })),
+      // Explicit order: JavaScript would put number-like keys ("0", "1", …) before "-3" and the row labels.
+      [corner, ...all.categories],
     );
   }
 
@@ -654,7 +665,7 @@ const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)}
 const num2 = (x: number | null) => (x === null ? '—' : x.toFixed(2));
 
 /** Draft sentence for a paper describing how well two runs agree on one field. */
-export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number, level = 'ordinal'): string {
+export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number): string {
   if (!s.n) return `No texts had a usable value for ${label} in both runs.`;
   const ciP = (k: CiStat) => (s.ci[k] ? ` (95% CI ${pct(s.ci[k]![0])}–${pct(s.ci[k]![1])})` : '');
   const ciN = (k: CiStat) => (s.ci[k] ? ` [${num2(s.ci[k]![0])}, ${num2(s.ci[k]![1])}]` : '');
@@ -665,7 +676,7 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
   const within = s.tolerance > 0 && s.withinTolerance !== null ? ` and scores within ${s.tolerance} point${s.tolerance === 1 ? '' : 's'} for ${pct(s.withinTolerance)}${ciP('withinTolerance')}` : '';
   const serious = ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of texts${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`;
   const kappa = s.weightedKappaLinear !== null ? `linear-weighted κ = ${num2(s.weightedKappaLinear)}${ciN('weightedKappaLinear')}, ` : '';
-  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}linear-weighted Gwet's AC2 = ${num2(s.gwetAC2Linear)}${ciN('gwetAC2Linear')}, Krippendorff's α (${level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}linear-weighted Gwet's AC2 = ${num2(s.gwetAC2Linear)}${ciN('gwetAC2Linear')}, Krippendorff's α (${s.level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   const d = s.meanDifference;
   const ci = s.ci.meanDifference;
   const shift =

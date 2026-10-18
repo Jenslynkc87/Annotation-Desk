@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceholders, uniqueKey } from '../lib/prompt';
+import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceholders, toNumber, uniqueKey } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
@@ -9,7 +9,7 @@ import type { ProviderId, SavedPrompt, Variable, VariableType } from '../lib/typ
 import { builtInPrice, PRICES_AS_OF, setPriceOverride, usePriceOverrides } from '../lib/pricing';
 import { nowIso, uid } from '../lib/util';
 import { RequestView } from './RequestView';
-import { Icon, Menu, Modal } from './ui';
+import { Icon, Menu, Modal, NumberField } from './ui';
 
 const TYPE_LABELS: Record<VariableType, string> = {
   category: 'Category',
@@ -255,15 +255,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
               </div>
               <div className="field">
                 <label htmlFor="maxtok">Max output tokens</label>
-                <input
-                  id="maxtok"
-                  className="input"
-                  type="number"
-                  min="16"
-                  step="256"
-                  value={m.maxOutputTokens}
-                  onChange={(e) => updateStudy((s) => void (s.model.maxOutputTokens = Math.max(16, Number(e.target.value) || 16000)))}
-                />
+                <NumberField id="maxtok" className="input" min={16} step={256} value={m.maxOutputTokens} onChange={(n) => updateStudy((s) => void (s.model.maxOutputTokens = n))} />
               </div>
             </div>
             <div className="hint tight">
@@ -274,16 +266,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             <div className="grid2" style={{ marginTop: 12 }}>
               <div className="field">
                 <label htmlFor="conc">Parallel requests</label>
-                <input
-                  id="conc"
-                  className="input"
-                  type="number"
-                  min={1}
-                  max={16}
-                  value={o.concurrency}
-                  disabled={o.batch}
-                  onChange={(e) => updateStudy((s) => void (s.options.concurrency = Math.min(16, Math.max(1, Math.round(Number(e.target.value)) || 1))))}
-                />
+                <NumberField id="conc" className="input" min={1} max={16} value={o.concurrency} disabled={o.batch} onChange={(n) => updateStudy((s) => void (s.options.concurrency = n))} />
               </div>
             </div>
             <div className="hint tight">How many texts are sent at once (not used for batches). Lower it if you hit rate limits.</div>
@@ -386,15 +369,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
         <div className="grid2">
           <div className="field">
             <label htmlFor="reps">Annotations per text</label>
-            <input
-              id="reps"
-              className="input"
-              type="number"
-              min={1}
-              max={10}
-              value={o.replicates}
-              onChange={(e) => updateStudy((s) => void (s.options.replicates = Math.min(10, Math.max(1, Math.round(Number(e.target.value)) || 1))))}
-            />
+            <NumberField id="reps" className="input" min={1} max={10} value={o.replicates} onChange={(n) => updateStudy((s) => void (s.options.replicates = n))} />
           </div>
         </div>
         <div className="hint tight">{o.replicates > 1 ? `Each text is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}` : 'Use 2 or more to measure how consistent the model is.'}</div>
@@ -541,7 +516,11 @@ function VariableEditor() {
                 title="Remove field"
                 aria-label="Remove field"
                 disabled={vars.length === 1}
-                onClick={() => updateStudy((s) => void s.prompt.variables.splice(i, 1))}
+                onClick={() => {
+                  const filled = v.description.trim() || v.values.some((x) => x.trim());
+                  if (filled && !confirm(`Remove the field “${v.label?.trim() || v.name}” with its description and values?`)) return;
+                  updateStudy((s) => void s.prompt.variables.splice(i, 1));
+                }}
               >
                 <Icon name="trash" size={15} />
               </button>
@@ -555,13 +534,21 @@ function VariableEditor() {
                 onChange={(e) => upd(i, (x) => void (x.values = e.target.value.split(',').map((s) => s.trimStart())))}
               />
             )}
-            {v.type === 'ordinal' && v.values.some((x) => x.trim() && !Number.isInteger(Number(x))) && <div className="hint err">Ordinal values must be whole numbers.</div>}
+            {v.type === 'ordinal' && v.values.some((x) => x.trim() && !Number.isInteger(toNumber(x))) && <div className="hint err">Ordinal values must be whole numbers.</div>}
             <input className="input" aria-label="Field description" placeholder="Description for the model (optional)" value={v.description} onChange={(e) => upd(i, (x) => void (x.description = e.target.value))} />
           </div>
         );
       })}
       <div>
-        <button className="btn small" onClick={() => updateStudy((s) => void s.prompt.variables.push({ name: `field_${s.prompt.variables.length + 1}`, type: 'category', values: [], description: '' }))}>
+        <button
+          className="btn small"
+          onClick={() =>
+            updateStudy((s) => {
+              const others = s.prompt.variables.map((v) => v.name);
+              s.prompt.variables.push({ name: uniqueKey(`field_${others.length + 1}`, others), type: 'category', values: [], description: '' });
+            })
+          }
+        >
           <Icon name="plus" size={14} /> Add field
         </button>
       </div>

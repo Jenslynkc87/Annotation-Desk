@@ -1,18 +1,21 @@
 import { useRef } from 'react';
 import { importBackup } from '../lib/export/backup';
-import { createStudy, currentStudy, duplicateStudy, getState, refreshStudies, removeStudy, selectStudy, toast, useStore } from '../lib/store';
+import { createStudy, currentStudy, duplicateStudy, getState, isBusy, refreshStudies, removeStudy, selectStudy, toast, useStore } from '../lib/store';
 import { errorMessage, fmtDateTime } from '../lib/util';
 import { Icon, Menu } from './ui';
 
 export function StudyMenu() {
   const studies = useStore((s) => s.studies);
   const current = useStore((s) => currentStudy(s));
+  // While a run is being sent or uploaded, the open study must stay open (and in place).
+  const busy = useStore((s) => isBusy(s));
   const fileRef = useRef<HTMLInputElement>(null);
 
   const onImport = async (f: File | undefined) => {
     if (!f) return;
     try {
-      const s = await importBackup(await f.text());
+      toast(`Importing ${f.name}…`);
+      const s = await importBackup(f);
       await refreshStudies();
       await selectStudy(s.id);
       toast(`Imported "${s.name}".`, 'success');
@@ -35,6 +38,7 @@ export function StudyMenu() {
             {studies.map((s) => (
               <button
                 key={s.id}
+                disabled={busy && s.id !== current?.id}
                 className={`menu-item ${s.id === current?.id ? 'active' : ''}`}
                 onClick={() => {
                   close();
@@ -46,8 +50,10 @@ export function StudyMenu() {
               </button>
             ))}
             <div className="menu-sep" />
+            {busy && <div className="menu-note">A run is in progress: switch, add or delete studies when it has finished.</div>}
             <button
               className="menu-item"
+              disabled={busy}
               onClick={() => {
                 close();
                 void createStudy('Untitled study');
@@ -55,25 +61,28 @@ export function StudyMenu() {
             >
               <Icon name="plus" size={14} /> New study
             </button>
-            <button className="menu-item" onClick={() => (close(), void duplicateStudy(false))}>
+            <button className="menu-item" disabled={busy} onClick={() => (close(), void duplicateStudy(false))}>
               Duplicate settings & prompt
             </button>
-            <button className="menu-item" onClick={() => (close(), void duplicateStudy(true))}>
+            <button className="menu-item" disabled={busy} onClick={() => (close(), void duplicateStudy(true))}>
               Duplicate with texts
             </button>
-            <button className="menu-item" onClick={() => (close(), fileRef.current?.click())}>
+            <button className="menu-item" disabled={busy} onClick={() => (close(), fileRef.current?.click())}>
               Import study backup (.json)…
             </button>
             <div className="menu-sep" />
             <button
               className="menu-item"
               style={{ color: 'var(--err)' }}
+              disabled={busy}
               onClick={() => {
                 close();
                 const s = getState();
                 const cur = currentStudy(s);
                 if (!cur) return;
-                if (confirm(`Delete "${cur.name}" with all ${s.docs.length} texts and ${s.runs.length} runs? This cannot be undone.`)) {
+                const pending = s.runs.filter((r) => r.status === 'submitted').length;
+                const note = pending ? ` ${pending} batch${pending === 1 ? ' is' : 'es are'} still processing and will be cancelled.` : '';
+                if (confirm(`Delete "${cur.name}" with all ${s.docs.length} texts and ${s.runs.length} runs?${note} This cannot be undone.`)) {
                   void removeStudy(cur.id);
                 }
               }}

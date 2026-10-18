@@ -41,7 +41,16 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
   }
   return [...values.entries()]
     .filter(([, vs]) => vs.every(isNum))
-    .map(([key, vs]) => ({ key, label: key, level: vs.every((v) => Number.isInteger(Number(v))) ? 'ordinal' : 'interval', allowed: [], yesNo: false }));
+    .map(([key, vs]) => {
+      const nums = vs.map(Number);
+      const ordinal = nums.every(Number.isInteger);
+      // Whole-number scores: the scale is every value from the lowest to the highest seen, so weighted κ measures
+      // distances on the scale even where a value (e.g. −2) was never used. (No codebook says what the scale is.)
+      const lo = Math.min(...nums);
+      const hi = Math.max(...nums);
+      const allowed = ordinal && hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [];
+      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, yesNo: false };
+    });
 }
 
 /** A field's value in a run's (aggregated) values, reading inside JSON answers for plain-text runs. */

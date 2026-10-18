@@ -121,7 +121,16 @@ export function CorpusImport() {
       />
       {paste && <PasteDialog onClose={() => setPaste(false)} />}
       {labels && <LabelsDialog table={labels} onDone={() => setLabels(null)} />}
-      {tables.length > 0 && <TableDialog table={tables[0]} onDone={() => setTables((t) => t.slice(1))} />}
+      {tables.length > 0 && (
+        <TableDialog
+          table={tables[0]}
+          onDone={() => setTables((t) => t.slice(1))}
+          onUseAsLabels={() => {
+            setLabels(tables[0]);
+            setTables((t) => t.slice(1));
+          }}
+        />
+      )}
     </>
   );
 }
@@ -171,7 +180,10 @@ function PasteDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function TableDialog({ table, onDone }: { table: ParsedTable; onDone: () => void }) {
+function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onDone: () => void; onUseAsLabels: () => void }) {
+  const docs = useStore((s) => s.docs);
+  // A metadata or label sheet dropped here would otherwise become one junk "text" per row.
+  const matched = useMemo(() => (docs.length ? matchLabels(docs, table, guessKeyColumn(docs, table)).updates.size : 0), [docs, table]);
   const [textCol, setTextCol] = useState(guessTextColumn(table));
   const [idCol, setIdCol] = useState(guessIdColumn(table));
   const [skipEmpty, setSkipEmpty] = useState(true);
@@ -201,6 +213,15 @@ function TableDialog({ table, onDone }: { table: ParsedTable; onDone: () => void
         </>
       }
     >
+      {matched > 0 && matched >= table.rows.length / 2 && (
+        <div className="notice warn" style={{ marginBottom: 12 }}>
+          {matched.toLocaleString()} of {table.rows.length.toLocaleString()} rows match texts already in this study by file name or ID. If this file holds
+          labels or metadata for those texts, add it as columns instead of importing new texts.{' '}
+          <button className="btn small" onClick={onUseAsLabels}>
+            Add as labels or metadata instead
+          </button>
+        </div>
+      )}
       <div className="grid2">
         <div className="field">
           <label>Text column</label>

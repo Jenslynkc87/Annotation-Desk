@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { drawStratifiedSample } from '../lib/sample';
 import { markSample, useStore } from '../lib/store';
-import { Modal } from './ui';
+import { Modal, NumberField } from './ui';
 
 /** Draw a stratified random sample (e.g. held-out validation texts) and mark it in a metadata column. */
 export function SampleDialog({ onClose }: { onClose: () => void }) {
@@ -42,7 +42,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       (strata.length ? ` within ${strata.join(' × ')} strata (proportional allocation, at least one per stratum)` : '') +
       (exclude ? `, excluding ${exclude.column} = ${exclude.value}` : '') +
       `; seed ${seed}.`;
-    await markSample(column.trim(), value.trim(), r.ids, note);
+    await markSample(column.trim(), value.trim(), r.ids, note, seed);
     onClose();
   };
 
@@ -68,11 +68,11 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       <div className="grid2">
         <div className="field">
           <label htmlFor="s-size">Number of texts</label>
-          <input id="s-size" className="input" type="number" min={1} value={size} onChange={(e) => setSize(Math.max(1, Number(e.target.value) || 1))} />
+          <NumberField id="s-size" className="input" min={1} value={size} onChange={setSize} />
         </div>
         <div className="field">
           <label htmlFor="s-seed">Seed</label>
-          <input id="s-seed" className="input" type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value) || 0)} />
+          <NumberField id="s-seed" className="input" value={seed} onChange={setSeed} />
         </div>
       </div>
       <div className="field">

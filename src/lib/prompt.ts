@@ -100,6 +100,12 @@ export function validateVariableName(name: string, others: string[]): string | n
   return null;
 }
 
+/** A number as people type it: "−3" (minus sign) and "–3" (dash) count as -3. NaN if it isn't one. */
+export function toNumber(s: string): number {
+  const t = s.trim().replace(/^[\u2212\u2013]/, '-');
+  return t === '' ? NaN : Number(t);
+}
+
 function variableSchema(v: Variable): Record<string, unknown> {
   const base: Record<string, unknown> = {};
   if (v.description.trim()) base.description = v.description.trim();
@@ -108,7 +114,7 @@ function variableSchema(v: Variable): Record<string, unknown> {
     case 'category':
       return values.length ? { ...base, type: 'string', enum: values } : { ...base, type: 'string' };
     case 'ordinal': {
-      const nums = values.map(Number).filter((n) => Number.isInteger(n));
+      const nums = values.map(toNumber).filter((n) => Number.isInteger(n));
       return nums.length ? { ...base, type: 'integer', enum: nums } : { ...base, type: 'integer' };
     }
     case 'number':
@@ -190,8 +196,8 @@ export interface ParsedOutput {
 export function parseModelOutput(rawText: string, p: PromptSpec): ParsedOutput {
   if (p.outputMode === 'text') {
     // A JSON answer is split into columns in the exports; if it can't be read, those columns would be
-    // silently empty, so it counts as failed. Answers without JSON (plain prose) are fine.
-    const unreadable = rawText.includes('{') && !flattenJsonResponse(rawText);
+    // silently empty, so it counts as failed. Answers without JSON (plain prose, even with {braces}) are fine.
+    const unreadable = looksLikeJson(rawText) && !flattenJsonResponse(rawText);
     return { values: { [TEXT_RESPONSE_KEY]: rawText.trim() }, rationale: '', parseError: unreadable ? 'Answer contains JSON that could not be read' : null };
   }
   let obj: unknown;
@@ -222,14 +228,8 @@ export function parseModelOutput(rawText: string, p: PromptSpec): ParsedOutput {
  * with "_" (e.g. race_ethnicity_negative). Returns null when the answer is not a JSON object.
  */
 export function flattenJsonResponse(raw: string | undefined): Record<string, string> | null {
-  if (!raw) return null;
-  let obj: unknown;
-  try {
-    obj = JSON.parse(stripFences(raw));
-  } catch {
-    return null;
-  }
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const obj = raw ? jsonObjectIn(raw) : null;
+  if (!obj) return null;
   const out: Record<string, string> = {};
   const walk = (v: unknown, key: string) => {
     if (v && typeof v === 'object' && !Array.isArray(v)) {
@@ -238,6 +238,21 @@ export function flattenJsonResponse(raw: string | undefined): Record<string, str
   };
   walk(obj, '');
   return out;
+}
+
+/** An answer that contains a JSON object (`{"key": …`), as opposed to prose that happens to use braces. */
+export function looksLikeJson(raw: string): boolean {
+  return /\{\s*"/.test(raw);
+}
+
+/** The answer as a JSON object (the whole answer, optionally in a ```json fence); null if it isn't one. */
+function jsonObjectIn(raw: string): Record<string, unknown> | null {
+  try {
+    const o: unknown = JSON.parse(stripFences(raw));
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -255,6 +270,6 @@ export function normalizeLabel(v: string | undefined, yesNo = false): string {
   const s = v.trim().toLowerCase();
   if (s === 'true' || s === 'yes' || (yesNo && s === '1')) return 'true';
   if (s === 'false' || s === 'no' || (yesNo && s === '0')) return 'false';
-  if (s !== '' && !Number.isNaN(Number(s))) return String(Number(s));
+  if (!Number.isNaN(toNumber(s))) return String(toNumber(s));
   return s;
 }

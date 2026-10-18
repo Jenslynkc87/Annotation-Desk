@@ -15,10 +15,6 @@ export function toCsv(rows: Row[], columns?: string[]): string {
   return '﻿' + Papa.unparse({ fields: cols, data: rows.map((r) => cols.map((c) => r[c] ?? '')) });
 }
 
-export function toJsonl(items: unknown[]): string {
-  return items.map((x) => JSON.stringify(x)).join('\n') + (items.length ? '\n' : '');
-}
-
 export function metaColumns(docs: Doc[]): string[] {
   return [...new Set(docs.flatMap((d) => Object.keys(d.meta)))];
 }
@@ -46,7 +42,18 @@ function jsonColumns(run: Run, response: string | undefined): Row {
   const groupOf = (k: string) => (k.includes('_') ? k.slice(0, k.lastIndexOf('_')) : '');
   const order: string[] = [];
   for (const k of Object.keys(flat)) if (!order.includes(groupOf(k))) order.push(groupOf(k));
-  const keys = Object.keys(flat).sort((a, b) => order.indexOf(groupOf(a)) - order.indexOf(groupOf(b)) || Number(isReasoning(a)) - Number(isReasoning(b)));
+  const sorted = Object.keys(flat).sort((a, b) => order.indexOf(groupOf(a)) - order.indexOf(groupOf(b)) || Number(isReasoning(a)) - Number(isReasoning(b)));
+  // Flat names ("race", "race_explanation"): each explanation goes right after its own score.
+  const scoreOf = (k: string) => {
+    for (const suffix of ['_explanation', '_reasoning']) if (k.endsWith(suffix) && k.slice(0, -suffix.length) in flat) return k.slice(0, -suffix.length);
+    return null;
+  };
+  const keys: string[] = [];
+  const place = (k: string) => {
+    keys.push(k);
+    for (const m of sorted) if (scoreOf(m) === k) place(m);
+  };
+  for (const k of sorted) if (scoreOf(k) === null) place(k);
   return Object.fromEntries(keys.map((k) => [k, numify(flat[k])]));
 }
 
@@ -139,7 +146,8 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
     if (opts.text) row.text = d.text;
     for (const f of fields) {
       row[f] = isNumericVar(run, f) ? numify(v.values[f]) : (v.values[f] ?? '');
-      if (reps > 1) row[`${f}_agreement_across_runs`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
+      // (Plain-text answers are combined value by value, so a share of identical answers says nothing.)
+      if (reps > 1 && run.snapshot.prompt.outputMode === 'structured') row[`${f}_agreement_across_runs`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
     }
     Object.assign(row, jsonColumns(run, v.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale && run.snapshot.prompt.includeRationale && run.snapshot.prompt.outputMode === 'structured') {
@@ -165,11 +173,13 @@ export interface AgreementRow {
   nLabelled: number;
 }
 
-/** Find metadata columns that look like human labels for a field, e.g. "sentiment", "sentiment_gold", "human_sentiment". */
+/** Find metadata columns that look like human labels for a field, e.g. "sentiment", "sentiment_gold", "human_sentiment".
+ *  Coders' notes (e.g. "sentiment_explanation") are not labels. */
 export function goldColumnsFor(field: string, docs: Doc[]): string[] {
   const f = field.toLowerCase();
   return metaColumns(docs).filter((c) => {
     const x = c.toLowerCase();
+    if (isExplanationKey(x) && !isExplanationKey(f)) return false;
     return x === f || x.startsWith(`${f}_`) || x.endsWith(`_${f}`) || x === `gold_${f}` || x === `human_${f}`;
   });
 }
@@ -179,7 +189,8 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
   const out: AgreementRow[] = [];
   const pairs: { field: string; column: string }[] = [];
   if (run.snapshot.prompt.outputMode === 'structured') {
-    for (const v of run.snapshot.prompt.variables) for (const c of goldColumnsFor(v.name, docs)) pairs.push({ field: v.name, column: c });
+    // Free-text fields (e.g. explanations) have no agreement to compute: every answer is its own category.
+    for (const v of run.snapshot.prompt.variables) if (v.type !== 'text') for (const c of goldColumnsFor(v.name, docs)) pairs.push({ field: v.name, column: c });
   }
   for (const e of extra) if (!pairs.some((p) => p.field === e.field && p.column === e.column)) pairs.push(e);
   const inRun = new Set(run.docIds);
@@ -245,7 +256,7 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
     field: a.field,
     annotations: a.source === 'model' ? `model (run ${runNumber})` : a.source,
     compared_with: a.compared_with,
-    level_of_measurement: a.level,
+    level_of_measurement: a.stats.level,
     n: a.stats.n,
     n_with_label: a.nLabelled,
     ...withCi('percent_agreement', a.stats.percentAgreement, a.stats.ci.percentAgreement),

@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
 import { comparableFields, fieldValue } from '../lib/compare';
+import { computeIntervals } from '../lib/intervals';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
 import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
-import { cancelBatch, checkBatch, currentStudy, deleteRunById, getState, renameRun, retryableCount, retryFailed, toast, useStore } from '../lib/store';
+import { cancelBatch, checkBatch, currentStudy, deleteRunById, getState, isBusy, renameRun, retryableCount, retryFailed, toast, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, runTitle, runTokens } from '../lib/view';
@@ -22,7 +23,7 @@ export function RunsView() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
   const docs = useStore((s) => s.docs);
-  const busy = useStore((s) => !!s.job);
+  const busy = useStore((s) => isBusy(s));
   const [inspect, setInspect] = useState<Run | null>(null);
   const sorted = [...runs].reverse();
 
@@ -109,7 +110,11 @@ export function RunsView() {
                               className="btn small"
                               disabled={busy}
                               title="Re-send the failed (or never sent) requests in this run, with the same frozen settings; new answers replace the failed ones"
-                              onClick={() => retryFailed(r.id)}
+                              onClick={() => {
+                                // Retries are sent as immediate requests (full price), also for batch runs.
+                                if (retry > 50 && !confirm(`Re-send ${retry.toLocaleString()} requests in run #${r.number} now, as immediate requests (full price, not batch)?`)) return;
+                                void retryFailed(r.id);
+                              }}
                             >
                               Retry failed ({retry})
                             </button>
@@ -210,11 +215,18 @@ function AgreementPanel() {
   const results = useStore((s) => s.results);
   const metaCols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const latest = runs[runs.length - 1];
-  const [a, setA] = useState(encode({ kind: 'run', id: latest.id }));
+  const [aPicked, setA] = useState(encode({ kind: 'run', id: latest.id }));
   // Pre-select a metadata column only when its name matches an output field (e.g. sentiment ↔ sentiment_gold).
   const firstField = latest ? outputFields(latest.snapshot.prompt)[0] : '';
   const matching = firstField ? goldColumnsFor(firstField, docs)[0] : undefined;
-  const [b, setB] = useState(matching ? encode({ kind: 'meta', col: matching }) : '');
+  const [bPicked, setB] = useState(matching ? encode({ kind: 'meta', col: matching }) : '');
+  // A run picked here may have been deleted since: fall back to the latest run (left) or nothing (right).
+  const exists = (v: string) => {
+    const s = decode(v);
+    return !!s && (s.kind === 'meta' || runs.some((r) => r.id === (s.kind === 'run' ? s.id : s.runId)));
+  };
+  const a = exists(aPicked) ? aPicked : encode({ kind: 'run', id: latest.id });
+  const b = exists(bPicked) ? bPicked : '';
   const srcA = decode(a);
   const runOf = (src: Source | null) =>
     src?.kind === 'run' ? runs.find((r) => r.id === src.id) : src?.kind === 'rep' ? runs.find((r) => r.id === src.runId) : undefined;
@@ -251,7 +263,7 @@ function AgreementPanel() {
     return out;
   };
 
-  const { stats, nLabelled } = useMemo(() => {
+  const { stats: figures, nLabelled, xs, ys } = useMemo(() => {
     const va = valuesFor(srcA);
     const vb = valuesFor(decode(b));
     // Coverage: texts with a value in the second source (for a run on the left: among that run's texts).
@@ -270,8 +282,24 @@ function AgreementPanel() {
         ys.push(y);
       }
     }
-    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance), nLabelled };
+    // The figures at once; the 95% intervals (several seconds on a full corpus) follow from a background worker.
+    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, false), nLabelled, xs, ys };
   }, [a, b, f, level, yesNo, tolerance, docs, runs, results]);
+  const [intervals, setIntervals] = useState<{ for: Agreement; ci: Agreement['ci'] } | null>(null);
+  useEffect(() => {
+    if (figures.n < 10) return; // too few texts for intervals
+    let stop = () => {};
+    // A short pause first, so quick changes (or results arriving during a run) don't start a job each time.
+    const t = setTimeout(() => (stop = computeIntervals({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance }, (ci) => setIntervals({ for: figures, ci }))), 300);
+    return () => {
+      clearTimeout(t);
+      stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [figures]);
+  const stats: Agreement = intervals?.for === figures ? { ...figures, ci: intervals.ci } : figures;
+  const ciPending = figures.n >= 10 && intervals?.for !== figures;
+  const ciText = (ci: [number, number] | null | undefined, pct = false) => (ciPending ? 'computing 95% CI…' : formatCi(ci, pct));
 
   const sourceOptions = (allowMeta: boolean) => (
     <>
@@ -437,7 +465,7 @@ function AgreementPanel() {
             <Stat k="Cohen's κ" v={fmtStat(stats.cohenKappa)} sub={ciText(stats.ci.cohenKappa)} />
             {stats.weightedKappaLinear !== null && <Stat k="Weighted κ (linear)" v={fmtStat(stats.weightedKappaLinear)} sub={ciText(stats.ci.weightedKappaLinear)} />}
             {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={fmtStat(stats.weightedKappa)} sub={ciText(stats.ci.weightedKappa)} />}
-            <Stat k={`Krippendorff's α (${level})`} v={fmtStat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
+            <Stat k={`Krippendorff's α (${stats.level})`} v={fmtStat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
             <Stat k="Gwet's AC1" v={fmtStat(stats.gwetAC1)} sub={ciText(stats.ci.gwetAC1)} />
             {stats.gwetAC2Linear !== null && <Stat k="Gwet's AC2 (linear)" v={fmtStat(stats.gwetAC2Linear)} sub={ciText(stats.ci.gwetAC2Linear)} />}
             {stats.spearman !== null && <Stat k="Spearman ρ" v={fmtStat(stats.spearman)} />}
@@ -568,7 +596,7 @@ function Glance({ stats }: { stats: Agreement }) {
 }
 
 /** "95% CI 0.71–0.86" (percentages for percent agreement); empty when there are too few texts. */
-function ciText(ci: [number, number] | null | undefined, pct = false): string {
+function formatCi(ci: [number, number] | null | undefined, pct = false): string {
   if (!ci) return '';
   const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : x.toFixed(2));
   return `95% CI ${f(ci[0])}–${f(ci[1])}`;

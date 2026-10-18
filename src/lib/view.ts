@@ -1,6 +1,6 @@
 // Derived views over results: which result(s) to show per text, and aggregated values.
 import { aggregate, type Aggregation } from './metrics';
-import { outputFields } from './prompt';
+import { flattenJsonResponse, outputFields, TEXT_RESPONSE_KEY } from './prompt';
 import type { Doc, PromptSpec, Result, Run } from './types';
 
 export type RunFilter = 'latest' | string; // 'latest' or a run id
@@ -42,10 +42,11 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
     const consistency: Record<string, number> = {};
     if (chosenRun) {
       const ok = reps.filter((r) => r.status === 'ok');
+      const combined = ok.length > 1 && chosenRun.snapshot.prompt.outputMode === 'text' ? combineJsonAnswers(ok) : null;
       for (const f of outputFields(chosenRun.snapshot.prompt)) {
         const vals = ok.map((r) => r.values[f] ?? '');
-        values[f] = aggregate(vals, aggregationFor(chosenRun.snapshot.prompt, f));
-        if (vals.length > 1) consistency[f] = vals.filter((v) => v === values[f]).length / vals.length;
+        values[f] = combined ?? aggregate(vals, aggregationFor(chosenRun.snapshot.prompt, f));
+        if (vals.length > 1 && !combined) consistency[f] = vals.filter((v) => v === values[f]).length / vals.length;
       }
     }
     const nErr = reps.filter((r) => r.status === 'error').length;
@@ -59,6 +60,26 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
   }
   return out;
 }
+
+/**
+ * Plain-text runs whose answers are JSON, annotated more than once: combine value by value (the median of
+ * numbers, the majority otherwise) into one JSON answer, so the score columns and agreement work as with
+ * a single answer. (The answers as a whole always differ, e.g. in their explanations.) Null if any isn't JSON.
+ */
+function combineJsonAnswers(ok: Result[]): string | null {
+  const flat = ok.map((r) => flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]));
+  if (flat.some((x) => !x)) return null;
+  const keys = [...new Set(flat.flatMap((x) => Object.keys(x!)))];
+  const out: Record<string, string | number> = {};
+  for (const k of keys) {
+    const vals = flat.map((x) => x![k] ?? '');
+    const v = aggregate(vals, 'median');
+    out[k] = v !== '' && vals.every((x) => x === '' || isNum(x)) ? Number(v) : v;
+  }
+  return JSON.stringify(out);
+}
+
+const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
 export function runTokens(results: Result[], runId: string) {
   let input = 0;

@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import type { BatchLine, BatchStatus, CallOutcome, ModelInfo, ProviderAdapter, RequestInputs } from './types';
+import { BatchFailedError, type BatchLine, type BatchStatus, type CallOutcome, type ModelInfo, type ProviderAdapter, type RequestInputs } from './types';
 
 function client(apiKey: string) {
   // Calls go straight from the browser to OpenAI; the key never touches another server.
@@ -215,7 +215,7 @@ export const openaiAdapter: ProviderAdapter = {
       }
     }
     if (b.errors?.data?.length && !lines.length) {
-      throw new Error(b.errors.data.map((e) => e.message).join('; '));
+      throw new BatchFailedError(b.errors.data.map((e) => e.message).join('; '));
     }
     return lines;
   },

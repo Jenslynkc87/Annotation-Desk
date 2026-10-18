@@ -245,10 +245,12 @@ def as_text(v):
 
 
 def parse_output(text):
-    cleaned = re.sub(r"^\`\`\`(?:json)?\\s*|\\s*\`\`\`$", "", text.strip())
+    # As in Annotation Desk: a whole answer in a \`\`\`json fence is read without the fence.
+    fenced = re.match(r"^\`\`\`(?:json)?\\s*([\\s\\S]*?)\\s*\`\`\`$", text.strip())
+    cleaned = fenced.group(1) if fenced else text.strip()
     if OUTPUT_SCHEMA is None:
-        # As in Annotation Desk: an answer containing JSON that can't be read counts as failed.
-        if "{" in text:
+        # As in Annotation Desk: an answer containing JSON ({"...) that can't be read counts as failed.
+        if re.search(r'\\{\\s*"', text):
             try:
                 readable = isinstance(json.loads(cleaned), dict)
             except json.JSONDecodeError:
@@ -290,6 +292,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print the first request and exit")
     args = ap.parse_args()
 
+    # Long articles: Python's csv module refuses fields over 131,072 characters by default.
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
     with open(args.corpus, newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
     if args.limit:
@@ -324,10 +328,11 @@ def main():
                     values, parse_error = parse_output(text)
                     record.update(values)
                     record.update(usage)
-                    # As in Annotation Desk: an empty or unreadable answer counts as failed.
-                    empty = not text and stop not in ("", "end_turn", "completed")
-                    record.update(status="error" if empty or parse_error else "ok", parse_error=parse_error,
-                                  error=f"Empty response (stop reason: {stop})" if empty else "",
+                    # As in Annotation Desk: a cut-off, refused, empty or unreadable answer counts as failed.
+                    incomplete = stop not in ("", "end_turn", "stop_sequence", "completed")
+                    problem = ("Incomplete answer" if text else "Empty response") + f" (stop reason: {stop})"
+                    record.update(status="error" if incomplete or parse_error else "ok", parse_error=parse_error,
+                                  error=problem if incomplete else "",
                                   model_reported=model, stop_reason=stop)
                     log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "request": body, "response": raw,
                                           "reasoning_summary": summary}, ensure_ascii=False, default=str) + "\\n")

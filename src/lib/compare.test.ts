@@ -77,6 +77,9 @@ describe('comparison report', () => {
     expect(rnd.every((x) => x >= 0 && x < 1)).toBe(true);
     expect(new Set(rnd).size).toBe(rnd.length);
     expect(String(rows('Draft text')[0].draft_text)).toContain('in direction for 8.3%');
+    // Confusion table: row labels first, then the scale in order (not "0", "1", … before "-3").
+    const head = (wb.getWorksheet('Table score')!.getRow(1).values as unknown[]).slice(1);
+    expect(head).toEqual(['first \\ second', '-3', '-2', '-1', '0', '1', '2', '3']);
   });
 });
 

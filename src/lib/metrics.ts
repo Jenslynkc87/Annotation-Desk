@@ -15,6 +15,8 @@ export interface Gaps {
 
 export interface Agreement {
   n: number;
+  /** The level the statistics were computed at: the one asked for, or nominal when the values aren't numbers. */
+  level: Level;
   percentAgreement: number | null;
   cohenKappa: number | null;
   weightedKappa: number | null; // quadratic weights, ordinal/interval only
@@ -63,6 +65,23 @@ export type CiStat =
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
+/** The distinct values: `first` (e.g. the codebook scale), then those of the pairs, in order of appearance. */
+function distinct(pairs: [string, string][], first: string[] = []): string[] {
+  const set = new Set(first);
+  for (const [a, b] of pairs) set.add(a).add(b);
+  return [...set];
+}
+
+/** How often each value occurs, counting both sides of every pair. */
+function valueCounts(pairs: [string, string][]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const [a, b] of pairs) {
+    counts.set(a, (counts.get(a) ?? 0) + 1);
+    counts.set(b, (counts.get(b) ?? 0) + 1);
+  }
+  return counts;
+}
+
 function sortCats(cats: string[]): string[] {
   return cats.every(isNum) ? cats.sort((a, b) => Number(a) - Number(b)) : cats.sort();
 }
@@ -79,7 +98,7 @@ export function percentAgreement(pairs: [string, string][]): number | null {
 export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear' | 'quadratic' = 'none', scale: string[] = []): number | null {
   const n = pairs.length;
   if (!n) return null;
-  const cats = sortCats([...new Set([...scale, ...pairs.flat()])]);
+  const cats = sortCats(distinct(pairs, scale));
   if (cats.length < 2) return null;
   const k = cats.length;
   const idx = new Map(cats.map((c, i) => [c, i]));
@@ -109,7 +128,7 @@ export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear'
 export function krippendorffAlpha(pairs: [string, string][], level: Level): number | null {
   if (pairs.length < 2) return null;
   if (level !== 'nominal' && !pairs.every(([a, b]) => isNum(a) && isNum(b))) level = 'nominal';
-  const values = sortCats([...new Set(pairs.flat())]);
+  const values = sortCats(distinct(pairs));
   if (values.length < 2) return null;
   const idx = new Map(values.map((v, i) => [v, i]));
   const k = values.length;
@@ -147,13 +166,14 @@ export function krippendorffAlpha(pairs: [string, string][], level: Level): numb
 export function gwetAC1(pairs: [string, string][], allowed: string[] = []): number | null {
   const n = pairs.length;
   if (!n) return null;
-  const cats = [...new Set([...allowed, ...pairs.flat()])];
+  const cats = distinct(pairs, allowed);
   const q = cats.length;
   if (q < 2) return null;
   const pa = pairs.filter(([a, b]) => a === b).length / n;
+  const counts = valueCounts(pairs);
   let pe = 0;
   for (const c of cats) {
-    const pi = (pairs.filter(([a]) => a === c).length + pairs.filter(([, b]) => b === c).length) / (2 * n);
+    const pi = (counts.get(c) ?? 0) / (2 * n);
     pe += pi * (1 - pi);
   }
   pe /= q - 1;
@@ -168,7 +188,7 @@ export function gwetAC1(pairs: [string, string][], allowed: string[] = []): numb
 export function gwetAC2Linear(pairs: [string, string][], scale: string[] = []): number | null {
   const n = pairs.length;
   if (!n) return null;
-  const cats = sortCats([...new Set([...scale, ...pairs.flat()])]);
+  const cats = sortCats(distinct(pairs, scale));
   const q = cats.length;
   if (q < 2 || !cats.every(isNum)) return null;
   const vals = cats.map(Number);
@@ -177,9 +197,10 @@ export function gwetAC2Linear(pairs: [string, string][], scale: string[] = []): 
   const pa = pairs.reduce((s, [a, b]) => s + w(Number(a), Number(b)), 0) / n;
   let tw = 0;
   for (const a of vals) for (const b of vals) tw += w(a, b);
+  const counts = valueCounts(pairs);
   let sum = 0;
   for (const c of cats) {
-    const pi = pairs.reduce((s, [a, b]) => s + (a === c ? 1 : 0) + (b === c ? 1 : 0), 0) / (2 * n);
+    const pi = (counts.get(c) ?? 0) / (2 * n);
     sum += pi * (1 - pi);
   }
   const pe = (tw / (q * (q - 1))) * sum;
@@ -283,12 +304,18 @@ function scaleMidpoint(scale: number[], observed: number[]): number | null {
   return observed.some((x) => x < 0) && observed.some((x) => x > 0) ? 0 : null;
 }
 
-/** `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`. */
-export function agreement(a: string[], b: string[], level: Level, allowed: string[] = [], tolerance = 1): Agreement {
-  const pairs: [string, string][] = [];
+/**
+ * `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`.
+ * `withIntervals` false: leave out the bootstrap intervals (the slow part), e.g. to show the figures first.
+ */
+export function agreement(a: string[], b: string[], level: Level, allowed: string[] = [], tolerance = 1, withIntervals = true): Agreement {
+  let pairs: [string, string][] = [];
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
     if (a[i] !== '' && b[i] !== '' && a[i] !== undefined && b[i] !== undefined) pairs.push([a[i], b[i]]);
   }
+  // On a scale, a value that isn't a number (e.g. "NA" in a coder's column) is missing, not a category of its
+  // own: one such cell would otherwise turn every statistic nominal. (No numbers at all: treated as nominal.)
+  if (level !== 'nominal' && pairs.some(([x, y]) => isNum(x) && isNum(y))) pairs = pairs.filter(([x, y]) => isNum(x) && isNum(y));
   const numeric = level !== 'nominal' && pairs.length > 0 && pairs.every(([x, y]) => isNum(x) && isNum(y));
   const xs = numeric ? pairs.map(([x]) => Number(x)) : [];
   const ys = numeric ? pairs.map(([, y]) => Number(y)) : [];
@@ -323,6 +350,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
   };
   return {
     n: pairs.length,
+    level: alphaLevel,
     percentAgreement: percentAgreement(pairs),
     cohenKappa: cohenKappa(pairs),
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
@@ -330,7 +358,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
     gwetAC1: gwetAC1(pairs, allowed),
     gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
-    ci: bootstrapCI(pairs, stats),
+    ci: withIntervals ? bootstrapCI(pairs, stats) : {},
     spearman: numeric ? spearman(xs, ys) : null,
     pearson: numeric ? pearson(xs, ys) : null,
     mae: numeric ? meanAbsoluteError(pairs) : null,

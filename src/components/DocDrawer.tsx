@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getLog } from '../lib/db';
 import { fieldLabel, outputFields } from '../lib/prompt';
-import { startRun, useStore } from '../lib/store';
+import { isBusy, startRun, useStore } from '../lib/store';
 import type { Result, ResultLog, Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
@@ -24,7 +24,7 @@ export function DocDrawer({
   const doc = useStore((s) => s.docs.find((d) => d.id === docId));
   const runs = useStore((s) => s.runs);
   const allResults = useStore((s) => s.results);
-  const job = useStore((s) => s.job);
+  const busy = useStore((s) => isBusy(s));
   const docResults = useMemo(() => allResults.filter((r) => r.docId === docId), [allResults, docId]);
   const view = useMemo(() => (doc ? buildDocViews([doc], runs, docResults, runFilter).get(doc.id) : undefined), [doc, runs, docResults, runFilter]);
   // The run picked in the drawer; reset when moving to another text. Defaults to the run shown in the table.
@@ -35,7 +35,7 @@ export function DocDrawer({
   const idx = docOrder.indexOf(docId);
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
       if (e.key === 'ArrowDown' || e.key === 'j') idx < docOrder.length - 1 && onNavigate(docOrder[idx + 1]);
       if (e.key === 'ArrowUp' || e.key === 'k') idx > 0 && onNavigate(docOrder[idx - 1]);
     };
@@ -63,7 +63,7 @@ export function DocDrawer({
       onClose={onClose}
       actions={
         <>
-          <button className="btn small" disabled={!!job} onClick={() => startRun({ docIds: [doc.id], scope: `Test: ${doc.docId}`, forceSync: true })} title="Annotate this text now with the current setup">
+          <button className="btn small" disabled={busy} onClick={() => startRun({ docIds: [doc.id], scope: `Test: ${doc.docId}`, forceSync: true })} title="Annotate this text now with the current setup">
             <Icon name="flask" size={14} /> Test this text
           </button>
           <button className="btn small" disabled={idx <= 0} onClick={() => onNavigate(docOrder[idx - 1])} title="Previous (↑)">

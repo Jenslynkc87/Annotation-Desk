@@ -15,9 +15,14 @@ export function KeysDialog({ onClose }: { onClose: () => void }) {
     setKey(p, draft[p]);
     if (draft[p].trim()) await loadModels(p);
   };
+  // A key typed but not yet saved is kept on closing (it is checked in the background), not silently dropped.
+  const close = () => {
+    for (const p of Object.keys(PROVIDERS) as ProviderId[]) if (draft[p].trim() !== keys[p]) void save(p);
+    onClose();
+  };
 
   return (
-    <Modal title="API keys" onClose={onClose} footer={<button className="btn primary" onClick={onClose}>Done</button>}>
+    <Modal title="API keys" onClose={close} footer={<button className="btn primary" onClick={close}>Done</button>}>
       {(Object.keys(PROVIDERS) as ProviderId[]).map((p) => {
         const a = PROVIDERS[p];
         return (

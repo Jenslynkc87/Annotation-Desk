@@ -115,8 +115,13 @@ export async function parseFile(file: File): Promise<ParsedFile> {
       case '.xls':
       case '.ods': {
         const XLSX = await import('xlsx');
-        const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+        const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellNF: true });
         const sheet = wb.Sheets[wb.SheetNames[0]];
+        // Cells shown as typed (dates, percentages), except plain numbers: Excel's "General" display would turn
+        // 9783161484100 into "9.78316E+12" and cut decimals, so those keep every digit.
+        for (const [ref, cell] of Object.entries(sheet)) {
+          if (!ref.startsWith('!') && cell?.t === 'n' && cell.z === 'General' && Number.isFinite(cell.v)) cell.w = String(cell.v);
+        }
         const objs = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
         return { kind: 'table', table: tableFromObjects(file.name, objs) };
       }

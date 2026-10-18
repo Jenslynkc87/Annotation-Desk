@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import * as dbApi from './db';
 import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
-import { describeApiError, provider } from './providers';
+import { describeApiError, isPermanentError, provider } from './providers';
 import { rejectsTemperature } from './providers/anthropic';
 import type { BatchLine, CallOutcome, ModelInfo } from './providers/types';
 import { ZERO_USAGE } from './providers/types';
@@ -47,6 +47,8 @@ export interface State {
   modelsStatus: Record<ProviderId, 'idle' | 'loading' | 'ok' | 'error'>;
   modelsError: Record<ProviderId, string>;
   job: Job | null;
+  /** Set while a run is being prepared or a batch uploaded (before `job` exists): nothing else may start. */
+  submitting: string;
   toasts: Toast[];
   saving: boolean;
 }
@@ -79,6 +81,7 @@ let state: State = {
   modelsStatus: { anthropic: 'idle', openai: 'idle' },
   modelsError: { anthropic: '', openai: '' },
   job: null,
+  submitting: '',
   toasts: [],
   saving: false,
 };
@@ -97,6 +100,11 @@ function subscribe(l: () => void) {
 }
 export function useStore<T>(selector: (s: State) => T): T {
   return useSyncExternalStore(subscribe, () => selector(state));
+}
+
+/** A run is being sent, or being prepared or uploaded. */
+export function isBusy(s: State = state): boolean {
+  return !!s.job || !!s.submitting;
 }
 
 export function currentStudy(s: State = state): Study | null {
@@ -154,13 +162,20 @@ export async function refreshStudies() {
 }
 
 export async function selectStudy(id: string) {
-  if (state.job) {
+  if (isBusy()) {
     toast('Finish or cancel the running job before switching studies.', 'error');
     return;
   }
   const data = await dbApi.loadStudyData(id);
-  // Older versions stored unreadable answers as "ok"; count them as failed like new ones.
-  for (const r of data.results) if (r.status === 'ok' && r.parseError) r.status = 'error';
+  // Older versions stored unreadable, cut-off or refused answers as "ok"; count them as failed like new ones.
+  for (const r of data.results) {
+    if (r.status !== 'ok') continue;
+    if (r.parseError) r.status = 'error';
+    else if (incompleteAnswer(r.stopReason)) {
+      r.status = 'error';
+      r.error ??= incompleteMessage(r.rawText, r.stopReason);
+    }
+  }
   // Runs left "running" by a closed tab can't continue: mark them interrupted.
   for (const r of data.runs) {
     if (r.status === 'running') {
@@ -226,6 +241,9 @@ export async function duplicateStudy(withCorpus: boolean) {
 }
 
 export async function removeStudy(id: string) {
+  if (isBusy()) return toast('Finish or cancel the running job first.', 'error');
+  // Batches still processing would keep running (and be charged) with nowhere to deliver their results.
+  for (const r of id === state.currentId ? state.runs : []) if (r.status === 'submitted') await cancelBatch(r.id);
   await dbApi.deleteStudy(id);
   const studies = state.studies.filter((s) => s.id !== id);
   set({ studies });
@@ -260,6 +278,8 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
   await dbApi.putDocs(docs);
   set((s) => ({ docs: [...s.docs, ...docs] }));
   toast(`Added ${docs.length} text${docs.length === 1 ? '' : 's'}.`, 'success');
+  // Ask the browser not to clear this site's data when disk space runs low (some browsers ask the user once).
+  void navigator.storage?.persist?.().catch(() => undefined);
   if (renamed.length) {
     toast(`${renamed.length} ID${renamed.length === 1 ? ' was' : 's were'} already in use and got a suffix: ${renamed.slice(0, 3).join(', ')}${renamed.length > 3 ? ', …' : ''}`, 'error');
   }
@@ -279,7 +299,7 @@ export async function addLabels(updates: Map<string, Record<string, string>>) {
  * Mark a drawn sample: `column` = `value` on these texts, removed from texts marked by an earlier draw.
  * `note` (the rule and seed) is added to the study description, which is exported with the study.
  */
-export async function markSample(column: string, value: string, ids: string[], note: string) {
+export async function markSample(column: string, value: string, ids: string[], note: string, seed: number) {
   const chosen = new Set(ids);
   const changed: Doc[] = [];
   for (const d of state.docs) {
@@ -294,10 +314,13 @@ export async function markSample(column: string, value: string, ids: string[], n
   const byId = new Map(changed.map((d) => [d.id, d]));
   set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
   updateStudy((s) => void (s.description = `${s.description.trim() ? s.description.trim() + '\n' : ''}${note}`));
-  toast(`Marked ${ids.length} text${ids.length === 1 ? '' : 's'} as ${column} = ${value}.`, 'success');
+  toast(`Marked ${ids.length} text${ids.length === 1 ? '' : 's'} as ${column} = ${value} (seed ${seed}). The rule and seed are in the Excel Settings sheet and the supplementary metadata.`, 'success');
 }
 
 export async function removeDocs(ids: string[]) {
+  // Only texts of the open study (a selection must never reach into another study).
+  const own = new Set(state.docs.map((d) => d.id));
+  ids = ids.filter((id) => own.has(id));
   await dbApi.deleteDocs(ids);
   const drop = new Set(ids);
   set((s) => ({ docs: s.docs.filter((d) => !drop.has(d.id)) }));
@@ -386,11 +409,18 @@ export async function buildSnapshot(st: Study, batch = false): Promise<RunSnapsh
   };
 }
 
+/** Stop reasons of a complete answer. Anything else (cut off at the token limit, refused, …) is not one. */
+const COMPLETE_STOPS = new Set(['', 'end_turn', 'stop_sequence', 'completed']);
+export function incompleteAnswer(stopReason: string): boolean {
+  return !COMPLETE_STOPS.has(stopReason);
+}
+
 function makeResult(run: Run, doc: Doc, replicate: number, requestedAt: string, outcome: CallOutcome | null, error: string | null, latencyMs: number | null): Result {
   const parsed = outcome ? parseModelOutput(outcome.rawText, run.snapshot.prompt) : { values: {}, rationale: '', parseError: null };
-  const empty = outcome?.rawText === '' && !!outcome.stopReason && outcome.stopReason !== 'end_turn' && outcome.stopReason !== 'completed';
-  // An answer that can't be read (e.g. cut off at the token limit) has no usable labels: it counts as failed.
-  const failed = !!error || empty || !!parsed.parseError;
+  // An answer that was cut off or refused, or can't be read, has no usable labels: it counts as failed.
+  // (Plain prose cut off at the token limit would otherwise pass as a complete answer.)
+  const incomplete = !!outcome && incompleteAnswer(outcome.stopReason);
+  const failed = !!error || incomplete || !!parsed.parseError;
   return {
     id: `${run.id}:${doc.id}:${replicate}`,
     runId: run.id,
@@ -403,7 +433,7 @@ function makeResult(run: Run, doc: Doc, replicate: number, requestedAt: string, 
     reasoningSummary: outcome?.reasoningSummary ?? '',
     rawText: outcome?.rawText ?? '',
     parseError: parsed.parseError,
-    error: error ?? (empty ? `Empty response (stop reason: ${outcome?.stopReason})` : null),
+    error: error ?? (incomplete ? incompleteMessage(outcome!.rawText, outcome!.stopReason) : null),
     usage: outcome?.usage ?? { ...ZERO_USAGE },
     latencyMs,
     requestedAt,
@@ -414,8 +444,14 @@ function makeResult(run: Run, doc: Doc, replicate: number, requestedAt: string, 
   };
 }
 
+function incompleteMessage(rawText: string, stopReason: string): string {
+  return `${rawText ? 'Incomplete answer' : 'Empty response'} (stop reason: ${stopReason})`;
+}
+
 async function saveRun(run: Run) {
   await dbApi.putRun(run);
+  // The study may have been switched while a batch was being collected: only the open study's runs are in view.
+  if (state.currentId !== run.studyId) return;
   set((s) => ({ runs: s.runs.some((r) => r.id === run.id) ? s.runs.map((r) => (r.id === run.id ? run : r)) : [...s.runs, run] }));
 }
 
@@ -444,7 +480,7 @@ export interface RunRequest {
 export async function startRun(req: RunRequest): Promise<void> {
   const st = currentStudy();
   if (!st) return;
-  if (state.job) return toast('A run is already in progress.', 'error');
+  if (isBusy()) return toast('A run is already in progress.', 'error');
   const key = state.keys[st.model.provider];
   if (!key) return toast(`Add your ${provider(st.model.provider).label} API key first (API keys, top right).`, 'error');
   if (!st.model.model) return toast('Choose a model first.', 'error');
@@ -453,6 +489,20 @@ export async function startRun(req: RunRequest): Promise<void> {
     return toast('Add at least one output field, or switch the output to plain text.', 'error');
   }
 
+  // Marked busy right away (before any waiting), so a second click can't start the same run twice.
+  set({ submitting: 'Preparing…' });
+  let started: { run: Run; tasks: Task[] } | null = null;
+  try {
+    started = await prepareRun(st, req, key);
+  } finally {
+    set({ submitting: '' });
+  }
+  // Nothing is awaited between clearing `submitting` and sendTasks setting `job`.
+  if (started) await sendTasks(started.run, started.tasks, key, `Run #${started.run.number} finished`);
+}
+
+/** Creates the run. A batch is submitted here (returns null); an immediate run returns the requests to send. */
+async function prepareRun(st: Study, req: RunRequest, key: string): Promise<{ run: Run; tasks: Task[] } | null> {
   const batch = st.options.batch && !req.forceSync;
   const snapshot = await buildSnapshot(st, batch);
   const run: Run = {
@@ -480,8 +530,13 @@ export async function startRun(req: RunRequest): Promise<void> {
       map[customId] = [t.doc.id, t.replicate];
       return { customId, part: t.part };
     });
+    const tooBig = batchTooBig(snapshot.model.provider, snapshot.requestBase, items);
+    if (tooBig) {
+      toast(tooBig, 'error');
+      return null;
+    }
     try {
-      toast(`Submitting batch of ${items.length} request${items.length === 1 ? '' : 's'}…`);
+      set({ submitting: `Uploading a batch of ${items.length.toLocaleString()} request${items.length === 1 ? '' : 's'} to ${adapter.label}…` });
       const handle = await adapter.submitBatch(key, snapshot.requestBase, items);
       run.batch = { provider: snapshot.model.provider, batchId: handle.batchId, inputFileId: handle.inputFileId, map, lastStatus: 'submitted', lastCheckedAt: nowIso() };
       await saveRun(run);
@@ -489,11 +544,31 @@ export async function startRun(req: RunRequest): Promise<void> {
     } catch (e) {
       toast(`Batch submission failed: ${describeApiError(e)}`, 'error');
     }
-    return;
+    return null;
   }
 
   await saveRun(run);
-  await sendTasks(run, tasks, key, `Run #${run.number} finished`);
+  return { run, tasks };
+}
+
+/** Size limits of the providers' batch APIs (checked October 2026). */
+const BATCH_LIMITS: Record<ProviderId, { mb: number; requests: number }> = {
+  anthropic: { mb: 256, requests: 100_000 },
+  openai: { mb: 200, requests: 50_000 },
+};
+
+/** A message if the batch is over the provider's limit (the upload would fail after a long wait); otherwise null. */
+function batchTooBig(p: ProviderId, base: Record<string, unknown>, items: { customId: string; part: Record<string, unknown> }[]): string | null {
+  const limit = BATCH_LIMITS[p];
+  const enc = new TextEncoder();
+  let bytes = 0;
+  for (const it of items) bytes += enc.encode(JSON.stringify({ custom_id: it.customId, params: { ...base, ...it.part } })).length;
+  const mb = bytes / 1024 / 1024;
+  if (mb <= limit.mb && items.length <= limit.requests) return null;
+  return (
+    `This batch would be about ${Math.round(mb)} MB with ${items.length.toLocaleString()} requests; ${provider(p).label} accepts at most ${limit.mb} MB ` +
+    `and ${limit.requests.toLocaleString()} requests per batch. Submit it in parts: select part of the texts and run "Selected", then "Remaining" for the rest.`
+  );
 }
 
 type Task = { doc: Doc; replicate: number; part: Record<string, unknown> };
@@ -513,8 +588,11 @@ function buildTasks(run: Run, include: (docId: string, replicate: number) => boo
   return tasks;
 }
 
-/** Send requests one by one (several in parallel), storing each result in the run as it arrives. */
-async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: string) {
+/**
+ * Send requests one by one (several in parallel), storing each result in the run as it arrives.
+ * `retryOf`: the run's status and error before a retry; a retry that is stopped early leaves the run as it was.
+ */
+async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: string, retryOf?: Pick<Run, 'status' | 'error'>) {
   const { snapshot } = run;
   const adapter = provider(snapshot.model.provider);
   const job: Job = { runId: run.id, total: tasks.length, done: 0, failed: 0, abort: new AbortController() };
@@ -536,7 +614,14 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
       }
       const result = makeResult(run, t.doc, t.replicate, requestedAt, outcome, error, Math.round(performance.now() - started));
       const log: ResultLog = { id: result.id, runId: run.id, studyId: run.studyId, requestPart: t.part, response: outcome?.response ?? { error } };
-      await dbApi.putResult(result, log);
+      try {
+        await dbApi.putResult(result, log);
+      } catch (e) {
+        // Without a saved result, sending more would only pay for answers that are lost.
+        if (!signal.aborted) run.error = `Stopped: a result could not be saved in this browser (${errorMessage(e)}). Is the disk or the browser's storage full?`;
+        job.abort.abort();
+        return;
+      }
       queueResult(result);
       const failed = result.status === 'error';
       set((s) => (s.job ? { job: { ...s.job, done: s.job.done + 1, failed: s.job.failed + (failed ? 1 : 0) } } : {}));
@@ -544,24 +629,39 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
       const j = getState().job;
       if (j && j.done >= 3 && j.failed === j.done) {
         job.abort.abort();
-        run.error = `Stopped after ${j.done} consecutive errors: ${result.error}`;
+        run.error = `${retryOf ? 'Retry stopped' : 'Stopped'} after ${j.done} consecutive errors: ${result.error}`;
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(snapshot.options.concurrency, tasks.length)) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(snapshot.options.concurrency, tasks.length)) }, worker));
+  } finally {
+    await finishTasks(run, job, doneMessage, retryOf);
+  }
+}
+
+async function finishTasks(run: Run, job: Job, doneMessage: string, retryOf?: Pick<Run, 'status' | 'error'>) {
+  const signal = job.abort.signal;
   flushResults();
   const final = getState().job;
-  run.status = signal.aborted ? (run.error ? 'failed' : 'cancelled') : 'completed';
+  const stoppedByErrors = signal.aborted && !!run.error;
+  run.status = !signal.aborted ? 'completed' : retryOf && retryOf.status !== 'running' ? retryOf.status : stoppedByErrors ? 'failed' : 'cancelled';
+  if (retryOf && signal.aborted && !stoppedByErrors) run.error = retryOf.error;
   run.finishedAt = nowIso();
-  await saveRun(run);
-  set({ job: null });
-  if (run.status === 'completed') {
+  try {
+    await saveRun(run);
+  } catch (e) {
+    toast(`Could not save run #${run.number}: ${errorMessage(e)}`, 'error');
+  } finally {
+    set({ job: null });
+  }
+  if (!signal.aborted) {
     const f = final?.failed ?? 0;
     toast(`${doneMessage}: ${(final?.done ?? 0) - f} ok${f ? `, ${f} failed. Retry them in the same run under Runs & agreement` : ''}.`, f ? 'error' : 'success');
-  } else if (run.status === 'failed') {
+  } else if (stoppedByErrors) {
     toast(run.error ?? 'Run failed', 'error');
   } else {
-    toast(`Run #${run.number} cancelled. Completed results were kept.`);
+    toast(`${retryOf ? `Retry in run #${run.number}` : `Run #${run.number}`} cancelled. Completed results were kept.`);
   }
 }
 
@@ -585,7 +685,7 @@ export function retryableCount(run: Run, results: Result[], docs: Doc[]): number
 export async function retryFailed(runId: string) {
   const original = state.runs.find((r) => r.id === runId);
   if (!original) return;
-  if (state.job) return toast('A run is already in progress.', 'error');
+  if (isBusy()) return toast('A run is already in progress.', 'error');
   const key = state.keys[original.snapshot.model.provider];
   if (!key) return toast(`Add your ${provider(original.snapshot.model.provider).label} API key first (API keys, top right).`, 'error');
   const ok = new Set(state.results.filter((r) => r.runId === runId && r.status === 'ok').map((r) => r.id));
@@ -595,8 +695,13 @@ export async function retryFailed(runId: string) {
   run.retries = [...(run.retries ?? []), { at: nowIso(), requests: tasks.length }];
   run.status = 'running';
   run.error = null;
-  await saveRun(run);
-  await sendTasks(run, tasks, key, `Retry in run #${run.number} finished`);
+  set({ submitting: 'Preparing…' });
+  try {
+    await saveRun(run);
+  } finally {
+    set({ submitting: '' });
+  }
+  await sendTasks(run, tasks, key, `Retry in run #${run.number} finished`, original);
 }
 
 export function cancelJob() {
@@ -632,12 +737,24 @@ export async function checkBatch(runId: string, quiet = false) {
     const st = await adapter.checkBatch(key, run.batch.batchId);
     const updated: Run = { ...run, batch: { ...run.batch, lastStatus: `${st.status} · ${st.completed + st.failed}/${st.total}`, lastCheckedAt: nowIso() } };
     if (st.done) {
-      const lines = await adapter.fetchBatchResults(key, run.batch.batchId);
+      let lines: BatchLine[];
+      try {
+        lines = await adapter.fetchBatchResults(key, run.batch.batchId);
+      } catch (e) {
+        // A network hiccup is tried again at the next check; a batch the provider failed (or whose results
+        // are gone) would otherwise stay "processing" forever.
+        if (!isPermanentError(e)) throw e;
+        lines = [];
+        updated.error = `Batch ended with status "${st.status}" and its results could not be collected: ${describeApiError(e)}`;
+      }
       const counts = await storeBatchResults(updated, lines);
-      updated.status = 'completed';
+      updated.status = lines.length ? 'completed' : 'failed';
       updated.finishedAt = nowIso();
-      if (!lines.length) updated.error = `Batch ended with status "${st.status}" and returned no results.`;
-      toast(`Batch run #${run.number} finished: ${counts.ok} ok, ${counts.failed} failed.`, counts.failed || !lines.length ? 'error' : 'success');
+      if (!lines.length) updated.error ??= `Batch ended with status "${st.status}" and returned no results.`;
+      toast(
+        lines.length ? `Batch run #${run.number} finished: ${counts.ok} ok, ${counts.failed} failed.` : `Batch run #${run.number}: ${updated.error}`,
+        counts.failed || !lines.length ? 'error' : 'success',
+      );
     } else if (!quiet) {
       toast(`Batch run #${run.number}: ${st.status}, ${st.completed + st.failed} of ${st.total} done.`);
     }
@@ -650,9 +767,11 @@ export async function checkBatch(runId: string, quiet = false) {
 }
 
 async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: number; failed: number }> {
-  const docsById = new Map(state.docs.map((d) => [d.id, d]));
+  // Read the run's own texts (not the open study's): the user may switch studies while results are collected.
+  const docsById = new Map((await dbApi.getDocsForStudy(run.studyId)).map((d) => [d.id, d]));
   const adapter = provider(run.snapshot.model.provider);
   const counts = { ok: 0, failed: 0 };
+  const stored: Result[] = [];
   for (const line of lines) {
     const ref = run.batch!.map[line.customId];
     if (!ref) continue;
@@ -668,10 +787,13 @@ async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: nu
       response: line.ok ? line.outcome.response : line.response ?? { error: line.error },
     };
     await dbApi.putResult(result, log);
-    queueResult(result);
+    stored.push(result);
     counts[result.status === 'ok' ? 'ok' : 'failed']++;
   }
-  flushResults();
+  if (state.currentId === run.studyId) {
+    for (const r of stored) queueResult(r);
+    flushResults();
+  }
   return counts;
 }
 

@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type InputHTMLAttributes, type ReactNode } from 'react';
 
 export function Modal({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   useEscape(onClose);
+  // Dialogs with a footer hold something being entered (pasted text, choices): a stray click beside them doesn't discard it.
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="overlay" onMouseDown={(e) => !footer && e.target === e.currentTarget && onClose()}>
       <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true">
         <div className="modal-head">
           <h3>{title}</h3>
@@ -13,6 +14,49 @@ export function Modal({ title, onClose, children, footer, wide }: { title: React
         {footer && <div className="modal-foot">{footer}</div>}
       </div>
     </div>
+  );
+}
+
+/**
+ * A number box you can type in freely (clear it, then type 3): the limits are applied when you leave it.
+ * A box that corrects every keystroke turns a typed 3 into 10 or 8000 into 16000.
+ */
+export function NumberField({
+  value,
+  onChange,
+  min,
+  max,
+  integer = true,
+  ...rest
+}: { value: number; onChange: (n: number) => void; min?: number; max?: number; integer?: boolean } & Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  'value' | 'onChange' | 'type' | 'min' | 'max'
+>) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const clamp = (n: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, integer ? Math.round(n) : n));
+  const isNumber = (t: string) => t.trim() !== '' && Number.isFinite(Number(t));
+  return (
+    <input
+      {...rest}
+      type="number"
+      min={min}
+      max={max}
+      value={draft ?? String(value)}
+      onChange={(e) => {
+        const t = e.target.value;
+        setDraft(t);
+        if (isNumber(t) && clamp(Number(t)) === Number(t)) onChange(Number(t));
+      }}
+      onBlur={(e) => {
+        if (draft !== null && isNumber(draft)) onChange(clamp(Number(draft)));
+        setDraft(null);
+        rest.onBlur?.(e);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        rest.onKeyDown?.(e);
+      }}
+    />
   );
 }
 

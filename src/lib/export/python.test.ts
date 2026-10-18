@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { anthropicAdapter } from '../providers/anthropic';
 import { openaiAdapter } from '../providers/openai';
-import { buildOutputSchema, renderMessageParts } from '../prompt';
+import { buildOutputSchema, parseModelOutput, renderMessageParts } from '../prompt';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_RUN_OPTIONS, type PromptSpec, type ProviderId, type Run, type Study } from '../types';
 import { fillScript, pyStr, SCRIPT_TEMPLATE, scriptValues } from './python';
 
@@ -104,6 +104,31 @@ describe('exported script', () => {
       if (caching) expect(out.input[0].content.filter((c: Record<string, unknown>) => c.prompt_cache_breakpoint).length).toBe(1);
       else expect(typeof out.input).toBe('string');
     });
+
+  it('reads texts longer than the csv module allows by default (dry run)', () => {
+    if (!hasPython()) return;
+    const { study, run } = makeRun('anthropic', promptPlain);
+    const dir = mkdtempSync(join(tmpdir(), 'annot-'));
+    writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
+    const long = 'word '.repeat(40_000); // 200,000 characters
+    writeFileSync(join(dir, 'corpus.csv'), `doc_id,text\nd1,${long}\n`);
+    const out = JSON.parse(execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run'], { maxBuffer: 1 << 26 }).toString());
+    expect(JSON.stringify(out)).toContain(long.trim());
+  });
+
+  it('judges plain-text answers with JSON as the app does', () => {
+    if (!hasPython()) return;
+    const { study, run } = makeRun('anthropic', { ...promptPlain, outputMode: 'text' });
+    const dir = mkdtempSync(join(tmpdir(), 'annot-'));
+    writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
+    const answers = ['{"a": 1}', 'Here it is:\n```json\n{"a": 1}\n```', 'Answer: {"a": 1} done', '{"a": 1', 'Plain prose with {braces}', 'No JSON at all', '```json\n{"a": 1}\n```', '```json\n{"a": 1}'];
+    const code = `import sys, json, runpy\nns = runpy.run_path(sys.argv[1], run_name="x")\nprint(json.dumps([ns["parse_output"](t)[1] for t in json.loads(sys.argv[2])]))`;
+    const errors = JSON.parse(execFileSync('python3', ['-I', '-c', code, join(dir, 'annotate.py'), JSON.stringify(answers)]).toString());
+    const p = run.snapshot.prompt;
+    expect(errors).toEqual(answers.map((t) => parseModelOutput(t, p).parseError ?? ''));
+    const unreadable = 'Answer contains JSON that could not be read';
+    expect(errors).toEqual(['', unreadable, unreadable, unreadable, '', '', '', unreadable]);
+  });
 
   it('template keeps placeholders; filled script has none left', () => {
     const { study, run } = makeRun('anthropic', promptWithMarkers);
