@@ -377,6 +377,7 @@ export function fmtTokens(n: number): string {
 }
 
 export function fmtUsd(x: number): string {
+  if (x === 0) return '$0';
   if (x < 0.01) return '<$0.01';
   if (x < 10) return `$${x.toFixed(2)}`;
   return `$${Math.round(x).toLocaleString('en-US')}`;
