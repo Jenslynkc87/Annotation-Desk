@@ -265,7 +265,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     study: d.study.name,
     // Notes kept with the study, e.g. how a validation sample was drawn (rule and seed).
     study_notes: d.study.description.trim() || null,
-    run: { number: run.number, label: run.label, mode: run.mode === 'batch' ? 'batch API' : 'immediate requests', batch_id: run.batch?.batchId ?? null, started_at: run.createdAt, finished_at: run.finishedAt },
+    run: { number: run.number, label: run.label, mode: run.mode === 'batch' ? 'batch API' : 'immediate requests', batch_id: run.batch ? (run.batch.parts ?? [run.batch]).map((p) => p.batchId).join('; ') : null, started_at: run.createdAt, finished_at: run.finishedAt },
     model: {
       provider: m.provider,
       requested: m.model,
@@ -306,6 +306,7 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   const m = run.snapshot.model;
   const { total, failed } = meta.requests;
   const retried = (run.retries ?? []).reduce((s, x) => s + x.requests, 0);
+  const retriedAs = run.mode !== 'batch' ? '' : (run.retries ?? []).every((x) => x.asBatch) ? ' in a new batch' : (run.retries ?? []).every((x) => !x.asBatch) ? ' as individual requests' : '';
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
   const reps = run.snapshot.options.replicates;
   const dates = [meta.requests.first_requested_at, meta.requests.last_completed_at].filter(Boolean).map((x) => x!.slice(0, 10));
@@ -331,7 +332,7 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
       ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} texts without a label` : ''}.`
       : '',
     retried
-      ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer ${retried === 1 ? 'was' : 'were'} re-sent with identical settings${run.mode === 'batch' ? ' as individual requests' : ''}.`
+      ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer ${retried === 1 ? 'was' : 'were'} re-sent with identical settings${retriedAs}.`
       : '',
     `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${cached ? ' with prompt caching' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
   ]

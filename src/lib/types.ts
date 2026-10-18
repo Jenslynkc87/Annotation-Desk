@@ -117,16 +117,29 @@ export interface Run {
   snapshot: RunSnapshot;
   batch: null | {
     provider: ProviderId;
+    /** The first batch (the only one in runs made before runs could hold several). */
     batchId: string;
     inputFileId?: string;
-    /** custom_id -> [docInternalId, replicate] */
+    /** custom_id -> [docInternalId, replicate], for every batch of the run */
     map: Record<string, [string, number]>;
     lastStatus: string;
     lastCheckedAt: string | null;
+    /** Every batch of the run: a run too large for one batch is sent as several, and failed requests of a
+     *  batch run are re-sent as further batches. Missing in older runs (see `batchParts`). */
+    parts?: BatchPart[];
   };
   error: string | null;
-  /** Failed requests re-sent within this run (same frozen settings, always as immediate requests). */
-  retries?: { at: string; requests: number }[];
+  /** Failed requests re-sent within this run (same frozen settings). `asBatch`: re-sent as a new batch
+   *  (batch runs from October 2026 on; earlier retries were always individual requests). */
+  retries?: { at: string; requests: number; asBatch?: boolean }[];
+}
+
+export interface BatchPart {
+  batchId: string;
+  inputFileId?: string;
+  status: 'submitted' | 'collected' | 'failed';
+  lastStatus: string;
+  error?: string;
 }
 
 export interface Usage {

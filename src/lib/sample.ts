@@ -25,10 +25,19 @@ export interface SampleResult {
 
 const norm = (s: string | undefined) => (s ?? '').trim().toLowerCase();
 
+/** Character by character: the same order in every browser. (Sorting by the browser's language puts e.g.
+ *  "Aa…", "Æ…" or capitals differently in a Danish and an English browser, and then the same seed would
+ *  draw a different sample.) */
+const byCode = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Recorded with each draw, so a later reader knows which rules made the sample from the seed. */
+export const SAMPLING_METHOD = 'Annotation Desk sampling method 2';
+
 /**
  * Proportional allocation (largest remainder), at least one text per stratum when the sample is large
  * enough; within each stratum a seeded shuffle of the texts in file-name order, so the same seed and
- * corpus always give the same sample, whatever the import order.
+ * corpus always give the same sample, whatever the import order and in any browser (method 2; method 1,
+ * before October 2026, sorted by the browser's language and ranked remainders before the minimum of one).
  */
 export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResult {
   const eligible = docs.filter((d) => !o.exclude || norm(d.meta[o.exclude.column]) !== norm(o.exclude.value));
@@ -37,20 +46,22 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
     const key = o.strata.map((c) => d.meta[c]?.trim() || '(none)').join(' · ') || 'all';
     groups.set(key, [...(groups.get(key) ?? []), d]);
   }
-  const keys = [...groups.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const keys = [...groups.keys()].sort(byCode);
   const size = Math.min(Math.max(0, Math.round(o.size)), eligible.length);
   const n = (k: string) => groups.get(k)!.length;
   const quota = new Map(keys.map((k) => [k, (size * n(k)) / Math.max(1, eligible.length)]));
   const take = new Map(keys.map((k) => [k, Math.floor(quota.get(k)!)]));
   if (size >= keys.length) for (const k of keys) if (take.get(k)! === 0) take.set(k, 1);
   const total = () => [...take.values()].reduce((s, x) => s + x, 0);
-  // Too few: add to the strata with the largest remainders. Too many (from the minimum of one): take from the largest.
-  const byRemainder = [...keys].sort((a, b) => quota.get(b)! - Math.floor(quota.get(b)!) - (quota.get(a)! - Math.floor(quota.get(a)!)) || a.localeCompare(b));
+  // Too few: add to the strata furthest below their share (a stratum raised to one is not). Too many (from the
+  // minimum of one): take from the largest.
+  const short = (k: string) => quota.get(k)! - take.get(k)!;
+  const byRemainder = [...keys].sort((a, b) => short(b) - short(a) || byCode(a, b));
   for (let i = 0; total() < size && i < 10 * keys.length; i++) {
     const k = byRemainder[i % byRemainder.length];
     if (take.get(k)! < n(k)) take.set(k, take.get(k)! + 1);
   }
-  const bySize = [...keys].sort((a, b) => take.get(b)! - take.get(a)! || a.localeCompare(b));
+  const bySize = [...keys].sort((a, b) => take.get(b)! - take.get(a)! || byCode(a, b));
   for (let i = 0; total() > size && i < 10 * keys.length; i++) {
     const k = bySize[i % bySize.length];
     if (take.get(k)! > 1) take.set(k, take.get(k)! - 1);
@@ -58,7 +69,7 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
   const rnd = seeded(o.seed);
   const ids: string[] = [];
   for (const k of keys) {
-    const items = [...groups.get(k)!].sort((a, b) => (a.meta.file ?? a.docId).localeCompare(b.meta.file ?? b.docId));
+    const items = [...groups.get(k)!].sort((a, b) => byCode(a.meta.file ?? a.docId, b.meta.file ?? b.docId));
     for (let i = items.length - 1; i > 0; i--) {
       const j = Math.floor(rnd() * (i + 1));
       [items[i], items[j]] = [items[j], items[i]];

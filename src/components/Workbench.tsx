@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/prompt';
-import { cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
+import { batchPlan, cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
@@ -136,9 +136,15 @@ function TextsAndResults() {
           .map((d) => d.docId)
           .join(', ')}. Those requests will most likely fail.`
       : '';
+    // Over the provider's batch limit: say so before anything is sent (it goes out as several batches).
+    const plan = batch && n > 50 ? batchPlan(study, ds) : null;
+    const split =
+      plan && plan.batches > 1
+        ? `\n\nThis is about ${Math.round(plan.mb)} MB, more than the ${plan.limitMb} MB ${plan.provider} accepts in one batch, so it will be sent as ${plan.batches} batches in the same run (all at batch price; the results are collected together).`
+        : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
     );
   };
 

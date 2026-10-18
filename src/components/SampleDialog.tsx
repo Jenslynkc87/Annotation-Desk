@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { drawStratifiedSample } from '../lib/sample';
+import { drawStratifiedSample, SAMPLING_METHOD } from '../lib/sample';
 import { markSample, useStore } from '../lib/store';
 import { Modal, NumberField } from './ui';
 
@@ -41,7 +41,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       `Sample ${column} = ${value} (${date}): ${r.ids.length} of ${r.eligible} texts drawn at random` +
       (strata.length ? ` within ${strata.join(' × ')} strata (proportional allocation, at least one per stratum)` : '') +
       (exclude ? `, excluding ${exclude.column} = ${exclude.value}` : '') +
-      `; seed ${seed}.`;
+      `; seed ${seed} (${SAMPLING_METHOD}).`;
     await markSample(column.trim(), value.trim(), r.ids, note, seed);
     onClose();
   };

@@ -9,6 +9,7 @@ import {
   DEFAULT_MODEL_SETTINGS,
   DEFAULT_PROMPT,
   DEFAULT_RUN_OPTIONS,
+  type BatchPart,
   type Doc,
   type ProviderId,
   type Result,
@@ -520,7 +521,6 @@ async function prepareRun(st: Study, req: RunRequest, key: string): Promise<{ ru
     batch: null,
     error: null,
   };
-  const adapter = provider(snapshot.model.provider);
   const tasks = buildTasks(run, () => true);
 
   if (batch) {
@@ -530,20 +530,7 @@ async function prepareRun(st: Study, req: RunRequest, key: string): Promise<{ ru
       map[customId] = [t.doc.id, t.replicate];
       return { customId, part: t.part };
     });
-    const tooBig = batchTooBig(snapshot.model.provider, snapshot.requestBase, items);
-    if (tooBig) {
-      toast(tooBig, 'error');
-      return null;
-    }
-    try {
-      set({ submitting: `Uploading a batch of ${items.length.toLocaleString()} request${items.length === 1 ? '' : 's'} to ${adapter.label}…` });
-      const handle = await adapter.submitBatch(key, snapshot.requestBase, items);
-      run.batch = { provider: snapshot.model.provider, batchId: handle.batchId, inputFileId: handle.inputFileId, map, lastStatus: 'submitted', lastCheckedAt: nowIso() };
-      await saveRun(run);
-      toast(`Batch submitted (run #${run.number}). Results usually arrive within an hour; this page checks every minute while open.`, 'success');
-    } catch (e) {
-      toast(`Batch submission failed: ${describeApiError(e)}`, 'error');
-    }
+    await submitBatches(run, key, items, map, []);
     return null;
   }
 
@@ -557,19 +544,84 @@ const BATCH_LIMITS: Record<ProviderId, { mb: number; requests: number }> = {
   openai: { mb: 200, requests: 50_000 },
 };
 
-/** A message if the batch is over the provider's limit (the upload would fail after a long wait); otherwise null. */
-function batchTooBig(p: ProviderId, base: Record<string, unknown>, items: { customId: string; part: Record<string, unknown> }[]): string | null {
-  const limit = BATCH_LIMITS[p];
+type BatchItem = { customId: string; part: Record<string, unknown> };
+
+/** The size of each request as uploaded, in bytes. */
+function requestBytes(base: Record<string, unknown>, items: BatchItem[]): number[] {
   const enc = new TextEncoder();
+  return items.map((it) => enc.encode(JSON.stringify({ custom_id: it.customId, params: { ...base, ...it.part } })).length);
+}
+
+/** Requests (by position) grouped into batches within the provider's limits, keeping their order. A small margin
+ *  is kept, as the upload adds some wrapping and a refusal comes only after a long upload. */
+export function groupForBatches(p: ProviderId, sizes: number[]): number[][] {
+  const limit = BATCH_LIMITS[p];
+  const maxBytes = 0.95 * limit.mb * 1e6;
+  const groups: number[][] = [[]];
   let bytes = 0;
-  for (const it of items) bytes += enc.encode(JSON.stringify({ custom_id: it.customId, params: { ...base, ...it.part } })).length;
-  const mb = bytes / 1e6;
-  // A small margin: the upload adds some wrapping, and being refused after a long upload is worse.
-  if (mb <= 0.95 * limit.mb && items.length <= limit.requests) return null;
-  return (
-    `This batch would be about ${Math.round(mb)} MB with ${items.length.toLocaleString()} requests; ${provider(p).label} accepts at most ${limit.mb} MB ` +
-    `and ${limit.requests.toLocaleString()} requests per batch. Submit it in parts: select part of the texts and run "Selected", then "Remaining" for the rest.`
-  );
+  sizes.forEach((size, i) => {
+    const g = groups[groups.length - 1];
+    if (g.length && (bytes + size > maxBytes || g.length >= limit.requests)) {
+      groups.push([i]);
+      bytes = size;
+    } else {
+      g.push(i);
+      bytes += size;
+    }
+  });
+  return groups;
+}
+
+/** For the confirmation before a batch run: its size, and how many batches it is sent as. */
+export function batchPlan(st: Study, docs: Doc[]): { mb: number; batches: number; limitMb: number; provider: string } {
+  const adapter = provider(st.model.provider);
+  const options = { ...st.options, cacheTtl: '1h' as const };
+  const base = adapter.buildRequestBase({ model: st.model, options, system: st.prompt.system, outputSchema: buildOutputSchema(st.prompt), promptHash: '' });
+  const items: BatchItem[] = [];
+  for (const d of docs) {
+    const part = adapter.buildRequestPart(renderMessageParts(st.prompt.userTemplate, d), options, st.model.model);
+    for (let r = 1; r <= st.options.replicates; r++) items.push({ customId: `r${items.length}`, part });
+  }
+  const sizes = requestBytes(base, items);
+  return { mb: sizes.reduce((s, x) => s + x, 0) / 1e6, batches: groupForBatches(st.model.provider, sizes).length, limitMb: BATCH_LIMITS[st.model.provider].mb, provider: adapter.label };
+}
+
+/** The batches of a batch run (older runs have one, recorded only as `batchId`). */
+export function batchParts(run: Run): BatchPart[] {
+  if (!run.batch) return [];
+  return run.batch.parts ?? [{ batchId: run.batch.batchId, inputFileId: run.batch.inputFileId, status: run.status === 'submitted' ? 'submitted' : 'collected', lastStatus: run.batch.lastStatus }];
+}
+
+/**
+ * Upload requests as one batch, or several when they are over the provider's limit, adding them to the run's
+ * earlier batches (for a retry). The run is saved after each upload, so a batch that went up is never lost.
+ */
+async function submitBatches(run: Run, key: string, items: BatchItem[], map: Record<string, [string, number]>, earlier: BatchPart[]) {
+  const { snapshot } = run;
+  const adapter = provider(snapshot.model.provider);
+  const groups = groupForBatches(snapshot.model.provider, requestBytes(snapshot.requestBase, items)).map((g) => g.map((i) => items[i]));
+  const parts = [...earlier];
+  let sent = 0;
+  for (const [g, group] of groups.entries()) {
+    const which = groups.length > 1 ? `batch ${g + 1} of ${groups.length}` : 'a batch';
+    set({ submitting: `Uploading ${which} (${group.length.toLocaleString()} request${group.length === 1 ? '' : 's'}) to ${adapter.label}…` });
+    try {
+      const h = await adapter.submitBatch(key, snapshot.requestBase, group);
+      parts.push({ batchId: h.batchId, inputFileId: h.inputFileId, status: 'submitted', lastStatus: 'submitted' });
+    } catch (e) {
+      const rest = sent ? ` The ${sent} already submitted continue; send the rest with Retry failed when ${sent === 1 ? 'it has' : 'they have'} finished.` : '';
+      toast(`Submitting ${which} failed: ${describeApiError(e)}.${rest}`, 'error');
+      break;
+    }
+    sent++;
+    run.batch = { provider: snapshot.model.provider, batchId: parts[0].batchId, inputFileId: parts[0].inputFileId, map, lastStatus: 'submitted', lastCheckedAt: nowIso(), parts };
+    run.status = 'submitted';
+    run.finishedAt = null;
+    await saveRun(run);
+  }
+  if (sent && sent === groups.length) {
+    toast(`${sent > 1 ? `${sent} batches` : 'Batch'} submitted (run #${run.number}). Results usually arrive within an hour; this page checks every minute while open.`, 'success');
+  }
 }
 
 type Task = { doc: Doc; replicate: number; part: Record<string, unknown> };
@@ -702,9 +754,26 @@ export async function retryFailed(runId: string) {
   const run: Run = structuredClone(original);
   const tasks = buildTasks(run, (docId, rep) => !ok.has(`${run.id}:${docId}:${rep}`));
   if (!tasks.length) return toast(`Run #${run.number} has no failed requests.`);
-  run.retries = [...(run.retries ?? []), { at: nowIso(), requests: tasks.length }];
-  run.status = 'running';
+  const asBatch = original.mode === 'batch' && !!original.batch;
+  run.retries = [...(run.retries ?? []), { at: nowIso(), requests: tasks.length, ...(asBatch ? { asBatch } : {}) }];
   run.error = null;
+  if (asBatch && original.batch) {
+    // A batch run's failed requests go out as a new batch (half price), collected into the same run.
+    const map = { ...original.batch.map };
+    const items = tasks.map((t, i) => {
+      const customId = `t${run.retries!.length}_${i}`;
+      map[customId] = [t.doc.id, t.replicate];
+      return { customId, part: t.part };
+    });
+    set({ submitting: 'Preparing…' });
+    try {
+      await submitBatches(run, key, items, map, batchParts(original));
+    } finally {
+      set({ submitting: '' });
+    }
+    return;
+  }
+  run.status = 'running';
   set({ submitting: 'Preparing…' });
   try {
     await saveRun(run);
@@ -744,29 +813,45 @@ export async function checkBatch(runId: string, quiet = false) {
   checking.add(runId);
   try {
     const adapter = provider(run.batch.provider);
-    const st = await adapter.checkBatch(key, run.batch.batchId);
-    const updated: Run = { ...run, batch: { ...run.batch, lastStatus: `${st.status} · ${st.completed + st.failed}/${st.total}`, lastCheckedAt: nowIso() } };
-    if (st.done) {
+    const parts = batchParts(run).map((p) => ({ ...p }));
+    const counts = { ok: 0, failed: 0 };
+    const errors: string[] = [];
+    for (const p of parts) {
+      if (p.status !== 'submitted') continue;
+      const st = await adapter.checkBatch(key, p.batchId);
+      p.lastStatus = `${st.status} · ${st.completed + st.failed}/${st.total}`;
+      if (!st.done) continue;
       let lines: BatchLine[];
       try {
-        lines = await adapter.fetchBatchResults(key, run.batch.batchId);
+        lines = await adapter.fetchBatchResults(key, p.batchId);
       } catch (e) {
         // A network hiccup is tried again at the next check; a batch the provider failed (or whose results
         // are gone) would otherwise stay "processing" forever.
         if (!isPermanentError(e)) throw e;
         lines = [];
-        updated.error = `Batch ended with status "${st.status}" and its results could not be collected: ${describeApiError(e)}`;
+        p.error = `A batch ended with status "${st.status}" and its results could not be collected: ${describeApiError(e)}`;
       }
-      const counts = await storeBatchResults(updated, lines);
-      updated.status = lines.length ? 'completed' : 'failed';
+      const c = await storeBatchResults(run, lines);
+      counts.ok += c.ok;
+      counts.failed += c.failed;
+      p.status = lines.length ? 'collected' : 'failed';
+      if (!lines.length) p.error ??= `A batch ended with status "${st.status}" and returned no results.`;
+      if (p.error) errors.push(p.error);
+    }
+    const waiting = parts.filter((p) => p.status === 'submitted');
+    const lastStatus = waiting.map((p) => p.lastStatus).join('; ') || 'ended';
+    const updated: Run = { ...run, batch: { ...run.batch, parts, lastStatus, lastCheckedAt: nowIso() } };
+    if (!waiting.length) {
+      // Every batch is in. The run failed only if no batch returned anything.
+      updated.status = parts.some((p) => p.status === 'collected') ? 'completed' : 'failed';
       updated.finishedAt = nowIso();
-      if (!lines.length) updated.error ??= `Batch ended with status "${st.status}" and returned no results.`;
-      toast(
-        lines.length ? `Batch run #${run.number} finished: ${counts.ok} ok, ${counts.failed} failed.` : `Batch run #${run.number}: ${updated.error}`,
-        counts.failed || !lines.length ? 'error' : 'success',
-      );
+      updated.error = errors.length ? errors.join(' ') : null;
+      const mine = state.currentId === run.studyId ? state.results.filter((r) => r.runId === run.id) : null;
+      const ok = mine ? mine.filter((r) => r.status === 'ok').length : counts.ok;
+      const failed = mine ? mine.length - ok : counts.failed;
+      toast(updated.status === 'failed' ? `Batch run #${run.number}: ${updated.error}` : `Batch run #${run.number} finished: ${ok} ok, ${failed} failed.`, failed || errors.length ? 'error' : 'success');
     } else if (!quiet) {
-      toast(`Batch run #${run.number}: ${st.status}, ${st.completed + st.failed} of ${st.total} done.`);
+      toast(`Batch run #${run.number}: ${lastStatus}.`);
     }
     await saveRun(updated);
   } catch (e) {
@@ -811,7 +896,7 @@ export async function cancelBatch(runId: string) {
   const run = state.runs.find((r) => r.id === runId);
   if (!run?.batch) return;
   try {
-    await provider(run.batch.provider).cancelBatch(state.keys[run.batch.provider], run.batch.batchId);
+    for (const p of batchParts(run)) if (p.status === 'submitted') await provider(run.batch.provider).cancelBatch(state.keys[run.batch.provider], p.batchId);
     toast('Cancellation requested. Results finished before cancelling will still be collected.');
   } catch (e) {
     toast(`Could not cancel: ${errorMessage(e)}`, 'error');

@@ -284,7 +284,7 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       finished_at: r.finishedAt,
       status: r.status,
       mode: r.mode,
-      batch_id: r.batch?.batchId ?? '',
+      batch_id: (r.batch?.parts ?? (r.batch ? [r.batch] : [])).map((p) => p.batchId).join('; '),
       scope: r.scope,
       n_texts: r.docIds.length,
       replicates: r.snapshot.options.replicates,

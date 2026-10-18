@@ -5,7 +5,7 @@ import { computeIntervals } from '../lib/intervals';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
 import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
-import { cancelBatch, checkBatch, currentStudy, deleteRunById, getState, isBusy, renameRun, retryableCount, retryFailed, toast, useStore } from '../lib/store';
+import { batchParts, cancelBatch, checkBatch, currentStudy, deleteRunById, getState, isBusy, renameRun, retryableCount, retryFailed, toast, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, runTitle, runTokens } from '../lib/view';
@@ -111,8 +111,11 @@ export function RunsView() {
                               disabled={busy}
                               title="Re-send the failed (or never sent) requests in this run, with the same frozen settings; new answers replace the failed ones"
                               onClick={() => {
-                                // Retries are sent as immediate requests (full price), also for batch runs.
-                                if (retry > 50 && !confirm(`Re-send ${retry.toLocaleString()} requests in run #${r.number} now, as immediate requests (full price, not batch)?`)) return;
+                                // Batch runs retry as a new batch (half price, results later); others right away (full price).
+                                const asBatch = r.mode === 'batch';
+                                const what = `${retry.toLocaleString()} request${retry === 1 ? '' : 's'} in run #${r.number}`;
+                                if (asBatch && !confirm(`Re-send ${what} as a new batch (half price; results usually within an hour, collected into the same run)?`)) return;
+                                if (!asBatch && retry > 50 && !confirm(`Re-send ${what} now (immediate requests, full price)?`)) return;
                                 void retryFailed(r.id);
                               }}
                             >
@@ -166,7 +169,7 @@ export function RunsView() {
               v{inspect.snapshot.promptVersion} <span className="mono hint">({inspect.snapshot.promptHash})</span>
             </dd>
             <dt>Mode</dt>
-            <dd>{inspect.mode === 'batch' ? `Batch (${inspect.batch?.batchId ?? ''})` : 'Immediate'}</dd>
+            <dd>{inspect.mode === 'batch' ? `Batch (${batchParts(inspect).map((p) => p.batchId).join(', ')})` : 'Immediate'}</dd>
             <dt>Caching</dt>
             <dd>{cachingLabel(inspect)}</dd>
             <dt>Runs per text</dt>

@@ -23,6 +23,19 @@ describe('stratified sample', () => {
     expect(new Set(drawStratifiedSample(shuffled, opts).ids)).toEqual(new Set(r.ids));
     expect(drawStratifiedSample(docs, { ...opts, seed: 1 }).ids).not.toEqual(r.ids);
   });
+  it('gives the extra texts to the groups furthest below their share (not to one raised to one text)', () => {
+    const sizes = { A: 35, B: 35, C: 21, D: 9 };
+    const ds = Object.entries(sizes).flatMap(([g, n]) => Array.from({ length: n }, (_, i) => ({ ...docs[0], id: `${g}${i}`, meta: { file: `${g}${i}.md`, g } })));
+    const s = drawStratifiedSample(ds, { size: 10, strata: ['g'], exclude: null, seed: 1 });
+    expect(s.strata.map((x) => [x.key, x.drawn])).toEqual([['A', 4], ['B', 3], ['C', 2], ['D', 1]]);
+  });
+  it('draws the same with capitals, Aa and Ø in file names, whatever the import order', () => {
+    // Names are ordered character by character (a Danish-language browser would sort "Aagaard" after "Zahle").
+    const ds = ['Zahle.md', 'aagaard.md', 'Aagaard.md', 'Ørsted.md', 'abel.md'].map((file, i) => ({ ...docs[0], id: `x${i}`, meta: { file } }));
+    const draw = drawStratifiedSample(ds, { size: 5, strata: [], exclude: null, seed: 7 }).ids;
+    const reordered = drawStratifiedSample([...ds].reverse(), { size: 5, strata: [], exclude: null, seed: 7 }).ids;
+    expect(reordered).toEqual(draw);
+  });
   it('gives every stratum at least one text when the sample is large enough', () => {
     const small = [...docs.slice(0, 300), { ...docs[0], id: 'rare', meta: { file: 'rare.md', era: '1950s', journal: 'J9' } }];
     const s = drawStratifiedSample(small, { ...opts, size: 20, exclude: null });

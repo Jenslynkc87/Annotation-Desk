@@ -4,7 +4,7 @@ import { comparableFields } from './compare';
 import { goldColumnsFor, resultsWide } from './export/tables';
 import { agreement } from './metrics';
 import { buildOutputSchema, normalizeLabel, toNumber } from './prompt';
-import { incompleteAnswer } from './store';
+import { groupForBatches, incompleteAnswer } from './store';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type Run } from './types';
 import { buildDocViews } from './view';
 
@@ -104,5 +104,14 @@ describe('finding human label columns', () => {
   it('skips coders’ notes', () => {
     const docs = [doc({ race_gold: '1', race_explanation: 'note', human_race: '2', file: 'a1.txt' })];
     expect(goldColumnsFor('race', docs)).toEqual(['race_gold', 'human_race']);
+  });
+});
+
+describe('batches over the provider’s limit', () => {
+  it('are split in order, keeping a margin below the limit', () => {
+    expect(groupForBatches('anthropic', [100e6, 100e6, 100e6])).toEqual([[0, 1], [2]]);
+    expect(groupForBatches('anthropic', [1e6, 2e6])).toEqual([[0, 1]]);
+    // OpenAI: 200 MB per batch, so 2 × 100 MB no longer fit together with the margin.
+    expect(groupForBatches('openai', [100e6, 100e6])).toEqual([[0], [1]]);
   });
 });
