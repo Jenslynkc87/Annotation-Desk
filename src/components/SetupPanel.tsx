@@ -8,6 +8,7 @@ import { samePrompt, upsertSavedPrompt } from '../lib/savedPrompts';
 import type { ProviderId, SavedPrompt, Variable, VariableType } from '../lib/types';
 import { builtInPrice, PRICES_AS_OF, setPriceOverride, usePriceOverrides } from '../lib/pricing';
 import { nowIso, uid } from '../lib/util';
+import { isEntries, words } from '../lib/subject';
 import { RequestView } from './RequestView';
 import { Icon, Menu, Modal, NumberField } from './ui';
 
@@ -67,6 +68,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const m = study.model;
   const o = study.options;
   const p = study.prompt;
+  const w = words(p);
   const adapter = provider(m.provider);
   const hasKey = !!keys[m.provider];
 
@@ -120,7 +122,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     const st = currentStudy(getState())!;
     const snap = await buildSnapshot(st, st.options.batch);
     const doc = getState().docs[0] ?? { docId: 'example', text: '(your text appears here)', meta: {} };
-    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc), snap.options, st.model.model);
+    const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc, st.prompt.subject), snap.options, st.model.model);
     setPreview({ ...snap.requestBase, ...part });
   };
 
@@ -129,7 +131,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     .join(' · ');
   const outputSummary =
     p.outputMode === 'text' ? 'Plain text' : `${p.variables.length} field${p.variables.length === 1 ? '' : 's'}: ${p.variables.map((v) => v.name).join(', ')}`;
-  const runSummary = [`${o.replicates}× per text`, o.caching ? 'caching on' : 'caching off'].join(' · ');
+  const runSummary = [`${o.replicates}× per ${w.one}`, o.caching ? 'caching on' : 'caching off'].join(' · ');
 
   return (
     <div className="card setup-card">
@@ -312,17 +314,25 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             id="prompt"
             className="textarea prompt"
             value={p.userTemplate}
-            placeholder={'Your instructions, e.g.:\n\nClassify the sentiment of the review as positive, negative or neutral.\n- Mixed reviews are neutral.\n- Sarcasm counts as negative.'}
+            placeholder={
+              isEntries(p)
+                ? 'Your instructions, e.g.:\n\nFrom your own knowledge, rate how internationally known this person is (1–3). If you do not know who this is, answer "unknown".'
+                : 'Your instructions, e.g.:\n\nClassify the sentiment of the review as positive, negative or neutral.\n- Mixed reviews are neutral.\n- Sarcasm counts as negative.'
+            }
             onChange={(e) => updateStudy((s) => void (s.prompt.userTemplate = e.target.value))}
           />
-          <div className="hint">Paste your prompt here. Each text from your corpus is added after it automatically.</div>
+          <div className="hint">
+            {isEntries(p)
+              ? 'Paste your prompt here. Each entry’s details are added after it automatically, between <entry> tags.'
+              : 'Paste your prompt here. Each text from your corpus is added after it automatically.'}
+          </div>
           {unknownPlaceholders.length > 0 && <div className="hint warn">Unknown placeholder(s): {unknownPlaceholders.join(', ')} (sent as written).</div>}
         </div>
         <details className="more" open={!!p.system.trim()}>
           <summary>Advanced</summary>
           <div className="more-body">
             <p className="hint" style={{ marginTop: 0 }}>
-              The texts are added between <code>{'<text>'}</code> tags. To place a text inside your prompt instead (e.g. before a final instruction),
+              The {w.many} are added between <code>{isEntries(p) ? '<entry>' : '<text>'}</code> tags. To place {isEntries(p) ? 'an entry' : 'a text'} inside your prompt instead (e.g. before a final instruction),
               write <code>{'{{text}}'}</code> at that spot{metaColumns.length > 0 && (
                 <>
                   ; <code>{`{{meta.${metaColumns[0]}}}`}</code> inserts a metadata column
@@ -368,11 +378,11 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
       <Section id="run" title="Run options" summary={runSummary}>
         <div className="grid2">
           <div className="field">
-            <label htmlFor="reps">Annotations per text</label>
+            <label htmlFor="reps">Annotations per {w.one}</label>
             <NumberField id="reps" className="input" min={1} max={10} value={o.replicates} onChange={(n) => updateStudy((s) => void (s.options.replicates = n))} />
           </div>
         </div>
-        <div className="hint tight">{o.replicates > 1 ? `Each text is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}` : 'Use 2 or more to measure how consistent the model is.'}</div>
+        <div className="hint tight">{o.replicates > 1 ? `Each ${w.one} is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}` : 'Use 2 or more to measure how consistent the model is.'}</div>
 
         <label className="check" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={o.caching} onChange={(e) => updateStudy((s) => void (s.options.caching = e.target.checked))} />
@@ -399,9 +409,9 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
       </Section>
 
       {preview && (
-        <Modal title="Request preview (first text)" onClose={() => setPreview(null)} wide>
+        <Modal title={`Request preview (first ${w.one})`} onClose={() => setPreview(null)} wide>
           <p className="hint" style={{ marginTop: 0 }}>
-            This exact body is sent to {adapter.label} for each text. Your API key travels separately in a header and is never stored.
+            This exact body is sent to {adapter.label} for each {w.one}. Your API key travels separately in a header and is never stored.
           </p>
           <RequestView request={preview} />
         </Modal>
@@ -424,7 +434,8 @@ function SavedPrompts() {
   const load = (sp: SavedPrompt) => {
     const kept = saved.some((x) => samePrompt(x.prompt, study.prompt));
     if (!kept && !confirm(`Replace the current prompt and fields with “${sp.name}”? The current ones are not saved under a name.`)) return;
-    updateStudy((s) => void (s.prompt = structuredClone(sp.prompt)));
+    // The kind of study (texts or entries) stays as it is.
+    updateStudy((s) => void (s.prompt = { ...structuredClone(sp.prompt), subject: s.prompt.subject }));
   };
   const remove = (sp: SavedPrompt) => {
     if (confirm(`Delete the saved prompt “${sp.name}”? Runs already made with it are not affected.`)) updateStudy((s) => void (s.savedPrompts = (s.savedPrompts ?? []).filter((x) => x.id !== sp.id)));

@@ -186,12 +186,6 @@ export function guessTextColumn(t: ParsedTable): string {
   return best;
 }
 
-/** A table of short values only (names, years, places), not one with a column of texts: likely one entry per row. */
-export function looksLikeEntries(t: ParsedTable): boolean {
-  const sample = t.rows.slice(0, 50);
-  return t.columns.length > 1 && t.columns.every((c) => sample.reduce((s, r) => s + (r[c]?.length ?? 0), 0) / Math.max(1, sample.length) < 200);
-}
-
 /** A row as the model reads it when it describes an entry: "column: value" for the chosen columns, empty ones left out. */
 export function describeRow(row: Record<string, string>, columns: string[]): string {
   return columns

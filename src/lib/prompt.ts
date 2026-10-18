@@ -10,12 +10,14 @@ const ANY_BRACES = /\{\{([^{}]*)\}\}/gu;
 
 /** Appended to a prompt that doesn't say where the text goes. The tags mark where the text starts and ends. */
 export const TEXT_SUFFIX = '\n\n<text>\n{{text}}\n</text>';
+/** The same for an entry (model-knowledge studies): its describing columns, between <entry> tags. */
+export const ENTRY_SUFFIX = '\n\n<entry>\n{{text}}\n</entry>';
 
-/** The prompt as actually sent: if it has no {{text}} marker, each text is added at the end. */
-export function effectiveTemplate(prompt: string): string {
+/** The prompt as actually sent: if it has no {{text}} marker, each text (or entry) is added at the end. */
+export function effectiveTemplate(prompt: string, subject?: PromptSpec['subject']): string {
   if (templatePlaceholders(prompt).includes('text')) return prompt;
   const base = prompt.trimEnd();
-  return base ? base + TEXT_SUFFIX : '{{text}}';
+  return base ? base + (subject === 'entries' ? ENTRY_SUFFIX : TEXT_SUFFIX) : '{{text}}';
 }
 
 export interface MessageParts {
@@ -26,15 +28,15 @@ export interface MessageParts {
 }
 
 /** Split the prompt at its first placeholder and fill in the text. Mirrored exactly by the exported Python script. */
-export function renderMessageParts(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): MessageParts {
-  const t = effectiveTemplate(prompt);
+export function renderMessageParts(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>, subject?: PromptSpec['subject']): MessageParts {
+  const t = effectiveTemplate(prompt, subject);
   const m = new RegExp(PLACEHOLDER.source, 'u').exec(t);
   const idx = m ? m.index : t.length;
   return { prefix: t.slice(0, idx), rest: fillPlaceholders(t.slice(idx), doc) };
 }
 
-export function renderMessage(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>): string {
-  const { prefix, rest } = renderMessageParts(prompt, doc);
+export function renderMessage(prompt: string, doc: Pick<Doc, 'docId' | 'text' | 'meta'>, subject?: PromptSpec['subject']): string {
+  const { prefix, rest } = renderMessageParts(prompt, doc, subject);
   return prefix + rest;
 }
 

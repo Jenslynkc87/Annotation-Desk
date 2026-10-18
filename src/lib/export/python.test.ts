@@ -130,6 +130,19 @@ describe('exported script', () => {
     expect(errors).toEqual(['', unreadable, unreadable, unreadable, '', '', '', unreadable]);
   });
 
+  it('rebuilds the exact request for an entry (model-knowledge study)', () => {
+    if (!hasPython()) return;
+    const prompt = { ...promptPlain, subject: 'entries' as const };
+    const { study, run } = makeRun('anthropic', prompt);
+    const dir = mkdtempSync(join(tmpdir(), 'annot-'));
+    writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
+    writeFileSync(join(dir, 'corpus.csv'), 'doc_id,text\nNiels Bohr,"name: Niels Bohr\nborn: 1885"\n');
+    const out = JSON.parse(execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run']).toString());
+    const doc = { docId: 'Niels Bohr', text: 'name: Niels Bohr\nborn: 1885', meta: {} };
+    expect(out).toEqual({ ...run.snapshot.requestBase, ...anthropicAdapter.buildRequestPart(renderMessageParts(prompt.userTemplate, doc, 'entries'), run.snapshot.options, run.snapshot.model.model) });
+    expect(JSON.stringify(out)).toContain('<entry>');
+  });
+
   it('template keeps placeholders; filled script has none left', () => {
     const { study, run } = makeRun('anthropic', promptWithMarkers);
     expect(SCRIPT_TEMPLATE).toContain('{{PROMPT}}');

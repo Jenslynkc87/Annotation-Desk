@@ -5,24 +5,25 @@ import {
   describeRow,
   guessIdColumn,
   guessTextColumn,
-  looksLikeEntries,
   parseFile,
   parsePastedTable,
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
 import { guessKeyColumn, matchLabels } from '../lib/import/labels';
-import { addDocs, addLabels, toast, useStore } from '../lib/store';
+import { addDocs, addLabels, currentStudy, toast, useStore } from '../lib/store';
+import { isEntries } from '../lib/subject';
 import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
 
 type NewDoc = { docId: string; text: string; meta: Record<string, string>; source: string };
 
-/** The "text column" choice for tables that describe one entry per row (e.g. people or books) instead of holding texts. */
-const ENTRY = '\u0001entry';
+const TABLE_EXTENSIONS = '.csv,.tsv,.xlsx,.xls,.ods,.json,.jsonl';
 
 export function CorpusImport() {
   const nDocs = useStore((s) => s.docs.length);
+  // A model-knowledge study takes entries (rows of a table), not text files.
+  const entries = useStore((s) => isEntries(currentStudy(s)!.prompt));
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState('');
   const [paste, setPaste] = useState(false);
@@ -51,7 +52,9 @@ export function CorpusImport() {
     for (let i = 0; i < files.length; i++) {
       setBusy(`Reading ${i + 1} of ${files.length}: ${files[i].name}`);
       const r = await parseFile(files[i]);
-      if (r.kind === 'text') {
+      if (r.kind === 'text' && entries) {
+        errors.push(`${r.file.name}: this study takes entries as a table (one row each), not text files`);
+      } else if (r.kind === 'text') {
         if (r.file.text.trim()) texts.push({ docId: baseName(r.file.name), text: r.file.text, meta: { file: r.file.name }, source: r.file.name });
         else errors.push(`${r.file.name}: empty`);
       } else if (r.kind === 'table') newTables.push(r.table);
@@ -86,10 +89,19 @@ export function CorpusImport() {
       >
         <Icon name="upload" size={nDocs ? 18 : 22} />
         <div>
-          <strong>{busy || (nDocs ? 'Add more texts: drop files here or click to choose' : 'Drop files here or click to choose')}</strong>
+          <strong>
+            {busy ||
+              (entries
+                ? `${nDocs ? 'Add more entries' : 'Add entries'}: drop a spreadsheet here or click to choose`
+                : nDocs
+                  ? 'Add more texts: drop files here or click to choose'
+                  : 'Drop files here or click to choose')}
+          </strong>
           {!busy && (
             <div className="hint">
-              One text per file (TXT, MD, PDF, DOCX, HTML) or a whole corpus as a table (CSV, TSV, XLSX, JSON, JSONL).
+              {entries
+                ? 'One row per entry, with the column names in the first row (e.g. name, born, country): CSV, XLSX, JSON or JSONL. Or paste the rows below.'
+                : 'One text per file (TXT, MD, PDF, DOCX, HTML) or a whole corpus as a table (CSV, TSV, XLSX, JSON, JSONL).'}
             </div>
           )}
         </div>
@@ -99,19 +111,23 @@ export function CorpusImport() {
         type="file"
         multiple
         hidden
-        accept={ACCEPTED_EXTENSIONS.join(',')}
+        accept={entries ? TABLE_EXTENSIONS : ACCEPTED_EXTENSIONS.join(',')}
         onChange={(e) => {
           void handleFiles([...(e.target.files ?? [])]);
           e.target.value = '';
         }}
       />
       <div className="row" style={{ marginTop: 10 }}>
-        <button className="btn small" onClick={() => setPaste(true)}>
-          Paste text…
+        <button className={`btn small ${entries ? 'primary' : ''}`} onClick={() => setPaste(true)}>
+          {entries ? 'Paste entries…' : 'Paste text…'}
         </button>
         {nDocs > 0 && (
-          <button className="btn small" onClick={() => labelsRef.current?.click()} title="Add human labels (an answer key) or metadata (era, journal, …) to the texts already here, matched by file name or ID">
-            Add labels or metadata from a spreadsheet…
+          <button
+            className="btn small"
+            onClick={() => labelsRef.current?.click()}
+            title={`Add human labels (an answer key) or metadata to the ${entries ? 'entries' : 'texts'} already here, matched by ${entries ? 'name' : 'file name'} or ID`}
+          >
+            {entries ? 'Add your answers or more details from a spreadsheet…' : 'Add labels or metadata from a spreadsheet…'}
           </button>
         )}
       </div>
@@ -119,7 +135,7 @@ export function CorpusImport() {
         ref={labelsRef}
         type="file"
         hidden
-        accept=".csv,.tsv,.xlsx,.xls,.ods,.json,.jsonl"
+        accept={TABLE_EXTENSIONS}
         onChange={(e) => {
           void handleLabels(e.target.files?.[0]);
           e.target.value = '';
@@ -127,6 +143,7 @@ export function CorpusImport() {
       />
       {paste && (
         <PasteDialog
+          tableOnly={entries}
           onClose={() => setPaste(false)}
           onTable={(t) => {
             setPaste(false);
@@ -137,6 +154,7 @@ export function CorpusImport() {
       {labels && <LabelsDialog table={labels} onDone={() => setLabels(null)} />}
       {tables.length > 0 && (
         <TableDialog
+          entries={entries}
           table={tables[0]}
           onDone={() => setTables((t) => t.slice(1))}
           onUseAsLabels={() => {
@@ -149,9 +167,9 @@ export function CorpusImport() {
   );
 }
 
-function PasteDialog({ onClose, onTable }: { onClose: () => void; onTable: (t: ParsedTable) => void }) {
+function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onClose: () => void; onTable: (t: ParsedTable) => void }) {
   const [text, setText] = useState('');
-  const [mode, setMode] = useState<'none' | 'blank' | 'line' | 'table'>('none');
+  const [mode, setMode] = useState<'none' | 'blank' | 'line' | 'table'>(tableOnly ? 'table' : 'none');
   const [prefix, setPrefix] = useState('pasted');
   const asTable = mode === 'table';
   const table = useMemo(() => (asTable && text.trim() ? parsePastedTable(text) : null), [asTable, text]);
@@ -163,7 +181,7 @@ function PasteDialog({ onClose, onTable }: { onClose: () => void; onTable: (t: P
   };
   return (
     <Modal
-      title="Paste text"
+      title={tableOnly ? 'Paste entries' : 'Paste text'}
       onClose={onClose}
       footer={
         <>
@@ -188,14 +206,14 @@ function PasteDialog({ onClose, onTable }: { onClose: () => void; onTable: (t: P
         onChange={(e) => setText(e.target.value)}
         placeholder={asTable ? 'name\tborn\tcountry\nNiels Bohr\t1885\tDenmark\nKaren Blixen\t1885\tDenmark' : 'Paste one or more texts…'}
       />
+      {!tableOnly && (
       <div className="grid2" style={{ marginTop: 12 }}>
         <div className="field">
-          <span className="label">What you paste</span>
+          <span className="label">Split into separate texts</span>
           <select className="select" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
-            <option value="none">One text</option>
-            <option value="blank">Several texts, split at blank lines</option>
-            <option value="line">Several texts, one per line</option>
-            <option value="table">A table: one row each, column names in the first row</option>
+            <option value="none">No: one text</option>
+            <option value="blank">At blank lines (paragraphs)</option>
+            <option value="line">At every line</option>
           </select>
         </div>
         {!asTable && (
@@ -205,10 +223,11 @@ function PasteDialog({ onClose, onTable }: { onClose: () => void; onTable: (t: P
           </div>
         )}
       </div>
+      )}
       {asTable ? (
         <>
-          <div className="hint">
-            Copy the rows from Excel or a Word table (or type them, separated by commas), with the column names in the first row.
+          <div className="hint" style={{ marginTop: 8 }}>
+            One row per entry, with the column names in the first row. Copy the rows from Excel or a Word table, or type them separated by commas.
             {table && table.columns.length > 0 && (
               <>
                 {' '}
@@ -231,17 +250,17 @@ function PasteDialog({ onClose, onTable }: { onClose: () => void; onTable: (t: P
   );
 }
 
-function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onDone: () => void; onUseAsLabels: () => void }) {
+function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boolean; table: ParsedTable; onDone: () => void; onUseAsLabels: () => void }) {
   const docs = useStore((s) => s.docs);
   // A metadata or label sheet dropped here would otherwise become one junk "text" per row.
   const matched = useMemo(() => (docs.length ? matchLabels(docs, table, guessKeyColumn(docs, table)).updates.size : 0), [docs, table]);
-  // A table of short values (names, years, …) most likely describes one entry per row, rather than holding texts.
-  const [textCol, setTextCol] = useState(() => (looksLikeEntries(table) ? ENTRY : guessTextColumn(table)));
+  const [textCol, setTextCol] = useState(() => guessTextColumn(table));
   const [idCol, setIdCol] = useState(guessIdColumn(table));
   const [skipEmpty, setSkipEmpty] = useState(true);
   // Entries: the columns the model sees, in the table's order (not the coder's own answers).
   const [shown, setShown] = useState<string[]>([]);
-  const entry = textCol === ENTRY;
+  // In a model-knowledge study each row is an entry, described by the columns the model sees.
+  const entry = entries;
   const textOf = (r: Record<string, string>) => (entry ? describeRow(r, shown) : String(r[textCol] ?? ''));
   // (Entries with no column ticked yet: count every row, the button waits for a column.)
   const rows = skipEmpty && (!entry || shown.length) ? table.rows.filter((r) => textOf(r).trim()) : table.rows;
@@ -263,7 +282,7 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
   };
   return (
     <Modal
-      title={`Import table: ${table.name}`}
+      title={entry ? `Add entries: ${table.name}` : `Import table: ${table.name}`}
       onClose={onDone}
       footer={
         <>
@@ -276,8 +295,8 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
     >
       {matched > 0 && matched >= table.rows.length / 2 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
-          {matched.toLocaleString()} of {table.rows.length.toLocaleString()} rows match texts already in this study by file name or ID. If this file holds
-          labels or metadata for those texts, add it as columns instead of importing new texts.{' '}
+          {matched.toLocaleString()} of {table.rows.length.toLocaleString()} rows match {entry ? 'entries' : 'texts'} already in this study by name or ID. If this file holds
+          labels or metadata for those {entry ? 'entries' : 'texts'}, add it as columns instead of importing them again.{' '}
           <button className="btn small" onClick={onUseAsLabels}>
             Add as labels or metadata instead
           </button>
@@ -289,15 +308,16 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
         </div>
       ))}
       <div className="grid2">
-        <div className="field">
-          <label>Text column</label>
-          <select className="select" value={textCol} onChange={(e) => setTextCol(e.target.value)}>
-            <option value={ENTRY}>None: each row is an entry</option>
-            {table.columns.map((c) => (
-              <option key={c}>{c}</option>
-            ))}
-          </select>
-        </div>
+        {!entry && (
+          <div className="field">
+            <label>Text column</label>
+            <select className="select" value={textCol} onChange={(e) => setTextCol(e.target.value)}>
+              {table.columns.map((c) => (
+                <option key={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className="field">
           <label>ID column</label>
           <select className="select" value={idCol} onChange={(e) => setIdCol(e.target.value)}>
@@ -350,9 +370,9 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
           <thead>
             <tr>
               {table.columns.slice(0, 6).map((c) => (
-                <th key={c} className={c === textCol || c === idCol || (entry && shown.includes(c)) ? 'col-role' : ''}>
+                <th key={c} className={(!entry && c === textCol) || c === idCol || (entry && shown.includes(c)) ? 'col-role' : ''}>
                   {c}
-                  {c === textCol && <span className="badge" style={{ marginLeft: 6 }}>used as text</span>}
+                  {!entry && c === textCol && <span className="badge" style={{ marginLeft: 6 }}>used as text</span>}
                   {entry && shown.includes(c) && <span className="badge" style={{ marginLeft: 6 }}>model sees</span>}
                   {c === idCol && <span className="badge" style={{ marginLeft: 6 }}>used as ID</span>}
                 </th>
@@ -363,7 +383,7 @@ function TableDialog({ table, onDone, onUseAsLabels }: { table: ParsedTable; onD
             {table.rows.slice(0, 5).map((r, i) => (
               <tr key={i}>
                 {table.columns.slice(0, 6).map((c) => (
-                  <td key={c} className={c === textCol || c === idCol || (entry && shown.includes(c)) ? 'col-role' : ''}>
+                  <td key={c} className={(!entry && c === textCol) || c === idCol || (entry && shown.includes(c)) ? 'col-role' : ''}>
                     <div className="snippet">{r[c]}</div>
                   </td>
                 ))}

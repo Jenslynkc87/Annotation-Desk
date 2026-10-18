@@ -100,3 +100,11 @@ describe('field order: generation vs display', () => {
     expect(outputFields(p)).toEqual(['a', 'explanation', 'b_explanation']);
   });
 });
+
+describe('entries (model-knowledge studies)', () => {
+  it('are added between <entry> tags', () => {
+    const doc = { docId: 'Niels Bohr', text: 'name: Niels Bohr\nborn: 1885', meta: {} };
+    expect(renderMessage('Rate this person.', doc, 'entries')).toBe('Rate this person.\n\n<entry>\nname: Niels Bohr\nborn: 1885\n</entry>');
+    expect(renderMessage('Rate this person.', doc)).toContain('<text>');
+  });
+});

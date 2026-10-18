@@ -349,3 +349,9 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .glance-list { margin: 10px 0 0; padding-left: 18px; font-size: 14px; }
 .glance-list li { margin: 3px 0; }
 .glance-list .glance-title { list-style: none; margin-left: -18px; color: var(--muted); }
+
+/* ---------- new study: texts or entries ---------- */
+.kind-choice { display: grid; gap: 10px; }
+.kind-option { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); cursor: pointer; font: inherit; color: inherit; }
+.kind-option:hover { border-color: var(--navy); background: var(--navy-050); }
+.kind-option span { color: var(--muted); font-size: 13.5px; }

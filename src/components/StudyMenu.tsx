@@ -1,8 +1,8 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { importBackup } from '../lib/export/backup';
 import { createStudy, currentStudy, duplicateStudy, getState, isBusy, refreshStudies, removeStudy, selectStudy, toast, useStore } from '../lib/store';
 import { errorMessage, fmtDateTime } from '../lib/util';
-import { Icon, Menu } from './ui';
+import { Icon, Menu, Modal } from './ui';
 
 export function StudyMenu() {
   const studies = useStore((s) => s.studies);
@@ -10,6 +10,11 @@ export function StudyMenu() {
   // While a run is being sent or uploaded, the open study must stay open (and in place).
   const busy = useStore((s) => isBusy(s));
   const fileRef = useRef<HTMLInputElement>(null);
+  const [choosing, setChoosing] = useState(false);
+  const start = (subject?: 'entries') => {
+    setChoosing(false);
+    void createStudy(subject ? 'Untitled model-knowledge study' : 'Untitled study', subject);
+  };
 
   const onImport = async (f: File | undefined) => {
     if (!f) return;
@@ -56,10 +61,10 @@ export function StudyMenu() {
               disabled={busy}
               onClick={() => {
                 close();
-                void createStudy('Untitled study');
+                setChoosing(true);
               }}
             >
-              <Icon name="plus" size={14} /> New study
+              <Icon name="plus" size={14} /> New study…
             </button>
             <button className="menu-item" disabled={busy} onClick={() => (close(), void duplicateStudy(false))}>
               Duplicate settings & prompt
@@ -92,6 +97,26 @@ export function StudyMenu() {
           </>
         )}
       </Menu>
+      {choosing && (
+        <Modal title="New study" onClose={() => setChoosing(false)}>
+          <p className="hint" style={{ marginTop: 0 }}>
+            What will you annotate? This can't be changed later.
+          </p>
+          <div className="kind-choice">
+            <button className="kind-option" onClick={() => start()}>
+              <strong>Texts</strong>
+              <span>Texts you add: articles, documents, posts, interviews, … The model reads each text.</span>
+            </button>
+            <button className="kind-option" onClick={() => start('entries')}>
+              <strong>Entries, from the model’s own knowledge</strong>
+              <span>
+                People, organizations, works, places, events, … each described by a few details (e.g. name, year, country). The model answers from what it
+                knows; no texts are needed.
+              </span>
+            </button>
+          </div>
+        </Modal>
+      )}
       <input
         ref={fileRef}
         type="file"

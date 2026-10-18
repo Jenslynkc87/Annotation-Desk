@@ -7,6 +7,7 @@ import { agreement, type Agreement, type CiStat } from '../metrics';
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel } from '../prompt';
 import { buildDocViews } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
+import { isEntries, words } from '../subject';
 import type { Doc, Result, Run, Study } from '../types';
 import { dateStamp, nowIso, slug } from '../util';
 import { buildBackup } from './backup';
@@ -111,7 +112,7 @@ function settingsRows(study: Study, run: Run): Row[] {
     { setting: 'Prompt caching', value: cachingLabel(run) },
     { setting: 'Mode', value: run.mode === 'batch' ? 'Batch API' : 'immediate requests' },
     { setting: 'Prompt version', value: `v${run.snapshot.promptVersion} (${run.snapshot.promptHash})` },
-    { setting: 'Prompt (sent with each text)', value: effectiveTemplate(p.userTemplate) },
+    { setting: `Prompt (sent with each ${p.subject === 'entries' ? 'entry' : 'text'})`, value: effectiveTemplate(p.userTemplate, p.subject) },
     { setting: 'System prompt', value: p.system || '(none)' },
     { setting: 'Output', value: p.outputMode === 'structured' ? JSON.stringify(run.snapshot.outputSchema) : 'plain text' },
     { setting: 'Annotation Desk version', value: run.snapshot.appVersion },
@@ -154,7 +155,7 @@ function jsonlBlob(items: unknown[]): Blob {
 
 function promptFiles(zip: JSZip, run: Run) {
   const p = run.snapshot.prompt;
-  zip.file('prompt.txt', effectiveTemplate(p.userTemplate));
+  zip.file('prompt.txt', effectiveTemplate(p.userTemplate, p.subject));
   if (p.system.trim()) zip.file('system_prompt.txt', p.system);
   zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
   zip.file('codebook.md', codebookMarkdown(run));
@@ -317,19 +318,23 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
     m.temperature !== null ? `temperature ${m.temperature}` : null,
     `a maximum of ${m.maxOutputTokens.toLocaleString('en-US')} output tokens`,
   ].filter((x): x is string => !!x);
+  const w = words(run.snapshot.prompt);
   const settingsText = settings.length > 1 ? `${settings.slice(0, -1).join(', ')} and ${settings[settings.length - 1]}` : settings[0];
   return [
-    `Texts (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
+    `${w.Many} (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
+    isEntries(run.snapshot.prompt)
+      ? 'No source texts were supplied: the model answered from its own knowledge, given a few identifying details for each entry (see the prompt and the list of entries).'
+      : '',
     run.snapshot.prompt.outputMode === 'structured'
       ? `The model was required to return the fields listed in the codebook as JSON conforming to a schema (structured outputs)${run.snapshot.prompt.includeRationale ? ', preceded by a brief rationale' : ''}.`
       : 'The model returned free-text responses.',
     reps > 1
       ? run.snapshot.prompt.outputMode === 'structured'
-        ? `Each text was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.`
-        : `Each text was annotated ${reps} times; numbers in the answers were combined by the median, other values by majority vote.`
+        ? `Each ${w.one} was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.`
+        : `Each ${w.one} was annotated ${reps} times; numbers in the answers were combined by the median, other values by majority vote.`
       : '',
     failed
-      ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} texts without a label` : ''}.`
+      ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} ${w.many} without a label` : ''}.`
       : '',
     retried
       ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer ${retried === 1 ? 'was' : 'were'} re-sent with identical settings${retriedAs}.`

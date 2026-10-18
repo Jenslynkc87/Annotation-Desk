@@ -52,6 +52,9 @@ export interface PromptSpec {
   variables: Variable[];
   /** Add a free-text "rationale" field to structured output. */
   includeRationale: boolean;
+  /** What is annotated: texts (absent), or entries (people, works, …) from the model's own knowledge, each
+   *  described by a few columns. Chosen when the study is created; entries are added in <entry> tags. */
+  subject?: 'entries';
 }
 
 /** A named prompt (text, output mode and fields) kept in the study, to switch between several. */

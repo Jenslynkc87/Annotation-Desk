@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { agreement, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
 import { comparableFields, fieldValue } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
+import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
 import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
@@ -172,7 +173,7 @@ export function RunsView() {
             <dd>{inspect.mode === 'batch' ? `Batch (${batchParts(inspect).map((p) => p.batchId).join(', ')})` : 'Immediate'}</dd>
             <dt>Caching</dt>
             <dd>{cachingLabel(inspect)}</dd>
-            <dt>Runs per text</dt>
+            <dt>Annotations per {words(inspect.snapshot.prompt).one}</dt>
             <dd>{inspect.snapshot.options.replicates}</dd>
             {inspect.retries?.length ? (
               <>
@@ -184,7 +185,7 @@ export function RunsView() {
             <dd>{inspect.snapshot.appVersion}</dd>
           </dl>
           <p className="section-title" style={{ marginTop: 16 }}>Prompt (sent with each text)</p>
-          <pre className="textblock">{effectiveTemplate(inspect.snapshot.prompt.userTemplate)}</pre>
+          <pre className="textblock">{effectiveTemplate(inspect.snapshot.prompt.userTemplate, inspect.snapshot.prompt.subject)}</pre>
           {inspect.snapshot.prompt.system.trim() && (
             <>
               <p className="section-title" style={{ marginTop: 16 }}>System prompt</p>
@@ -213,6 +214,7 @@ function decode(v: string): Source | null {
 }
 
 function AgreementPanel() {
+  const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
   const runs = useStore((s) => s.runs);
   const docs = useStore((s) => s.docs);
   const results = useStore((s) => s.results);
@@ -462,15 +464,15 @@ function AgreementPanel() {
         <>
           {stats.leftOut.n > 0 && (
             <div className="notice warn" style={{ marginTop: 6 }}>
-              {fmtInt(stats.leftOut.n)} text{stats.leftOut.n === 1 ? ' was' : 's were'} left out because a label isn't a number:{' '}
+              {fmtInt(stats.leftOut.n)} {stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because a label isn't a number:{' '}
               {stats.leftOut.values.map((v) => `“${v}”`).join(', ')}
               {stats.leftOut.values.length === 5 ? ', …' : ''}.
             </div>
           )}
-          <Glance stats={stats} />
+          <Glance stats={stats} noun={w.one} />
           <p className="section-title" style={{ marginTop: 18 }}>Agreement statistics</p>
           <div className="stat-grid" style={{ marginTop: 6 }}>
-            <Stat k="Texts compared" v={fmtInt(stats.n)} sub={`of ${fmtInt(nLabelled)} with a value in the second source`} />
+            <Stat k={`${w.Many} compared`} v={fmtInt(stats.n)} sub={`of ${fmtInt(nLabelled)} with a value in the second source`} />
             <Stat k="Percent agreement" v={fmtPct(stats.percentAgreement)} sub={ciText(stats.ci.percentAgreement, true)} />
             {stats.withinTolerance !== null && stats.tolerance > 0 && (
               <Stat k={`Within ±${stats.tolerance} point${stats.tolerance === 1 ? '' : 's'}`} v={fmtPct(stats.withinTolerance)} sub={ciText(stats.ci.withinTolerance, true)} />
@@ -488,8 +490,8 @@ function AgreementPanel() {
             {stats.mae !== null && <Stat k="Mean absolute difference" v={fmtStat(stats.mae)} sub={ciText(stats.ci.mae)} />}
           </div>
           <p className="hint">
-            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). Texts missing from either source are left out. Intervals: 95% bootstrap (2,000 resamples of texts). When
-            you iterate on prompts, keep a held-out set of labelled texts for the final estimate so the reported agreement isn't inflated by prompt selection.
+            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95% bootstrap (2,000 resamples of {w.many}). When
+            you iterate on prompts, keep a held-out set of labelled {w.many} for the final estimate so the reported agreement isn't inflated by prompt selection.
           </p>
           {showMatrix && (
             <>
@@ -530,7 +532,7 @@ const plural = (n: number, word: string) => `${fmtInt(n)} ${word}${n === 1 ? '' 
 const share = (n: number, total: number) => `${Math.round((n / Math.max(1, total)) * 100)}%`;
 
 /** Plain-language summary: how many texts got the same answer, how far apart the others are, and the commonest mix-ups. */
-function Glance({ stats }: { stats: Agreement }) {
+function Glance({ stats, noun }: { stats: Agreement; noun: string }) {
   const n = stats.n;
   const g = stats.gaps;
   const same = g ? g.same : Math.round((stats.percentAgreement ?? 0) * n);
@@ -559,10 +561,10 @@ function Glance({ stats }: { stats: Agreement }) {
     <div className="glance">
       <p className="section-title" style={{ marginTop: 6 }}>At a glance</p>
       <p className="glance-head">
-        <strong>{plural(same, 'text')}</strong> ({share(same, n)}) got the same answer from both sides
+        <strong>{plural(same, noun)}</strong> ({share(same, n)}) got the same answer from both sides
         {diff > 0 ? (
           <>
-            ; <strong>{plural(diff, 'text')}</strong> ({share(diff, n)}) got different answers.
+            ; <strong>{plural(diff, noun)}</strong> ({share(diff, n)}) got different answers.
           </>
         ) : (
           '.'
@@ -583,8 +585,8 @@ function Glance({ stats }: { stats: Agreement }) {
       {g && diff > 0 && (
         <ul className="glance-list">
           <li>
-            When they differ, the “Compared with” side gives the <strong>higher</strong> value in {plural(higher, 'text')} and the <strong>lower</strong> value in{' '}
-            {plural(lower, 'text')}.
+            When they differ, the “Compared with” side gives the <strong>higher</strong> value in {plural(higher, noun)} and the <strong>lower</strong> value in{' '}
+            {plural(lower, noun)}.
           </li>
           {stats.oppositeDirection !== null && stats.midpoint !== null && (
             <li>

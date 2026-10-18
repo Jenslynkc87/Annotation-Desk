@@ -6,6 +6,7 @@ import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
+import { words, isEntries } from '../lib/subject';
 import { CorpusImport } from './CorpusImport';
 import { CostEstimate, EstimateLink } from './CostEstimate';
 import { DocDrawer } from './DocDrawer';
@@ -30,6 +31,8 @@ export function Workbench({ onOpenKeys }: { onOpenKeys: () => void }) {
 
 function TextsAndResults() {
   const study = useStore((s) => currentStudy(s))!;
+  const w = words(study.prompt);
+  const entries = isEntries(study.prompt);
   const docs = useStore((s) => s.docs);
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
@@ -131,7 +134,7 @@ function TextsAndResults() {
     const est = estimateFor(ds, batch);
     const n = est.requests;
     const long = est.tooLong.length
-      ? `\n\n${est.tooLong.length} text${est.tooLong.length === 1 ? ' is' : 's are'} probably too long for this model (about ${Math.round((est.window ?? 0) / 1000)}k tokens including the answer), e.g. ${est.tooLong
+      ? `\n\n${est.tooLong.length} ${est.tooLong.length === 1 ? `${w.one} is` : `${w.many} are`} probably too long for this model (about ${Math.round((est.window ?? 0) / 1000)}k tokens including the answer), e.g. ${est.tooLong
           .slice(0, 3)
           .map((d) => d.docId)
           .join(', ')}. Those requests will most likely fail.`
@@ -144,7 +147,7 @@ function TextsAndResults() {
         : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} texts × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} ${w.many} × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
     );
   };
 
@@ -165,8 +168,8 @@ function TextsAndResults() {
     const waiting = new Set(runs.filter((r) => r.status === 'submitted' && r.snapshot.promptHash === hash).flatMap((r) => r.docIds));
     const todo = docs.filter((d) => !doneIds.has(d.id) && !waiting.has(d.id));
     const inBatch = docs.filter((d) => !doneIds.has(d.id) && waiting.has(d.id)).length;
-    const batchNote = inBatch ? ` ${inBatch.toLocaleString()} text${inBatch === 1 ? ' is' : 's are'} still waiting in a batch and left out.` : '';
-    if (!todo.length) return alert(`Every text already has a result with the current prompt.${batchNote}`);
+    const batchNote = inBatch ? ` ${inBatch.toLocaleString()} ${inBatch === 1 ? `${w.one} is` : `${w.many} are`} still waiting in a batch and left out.` : '';
+    if (!todo.length) return alert(`Every ${w.one} already has a result with the current prompt.${batchNote}`);
     if (inBatch) toast(batchNote.trim());
     await runDocs(todo, `Not yet annotated with the current prompt (${todo.length})`, false);
   };
@@ -178,9 +181,9 @@ function TextsAndResults() {
     <>
       <div className="card-head">
         <span className="step">02</span>
-        <h2>Texts &amp; results</h2>
+        <h2>{w.Many} &amp; results</h2>
         <span className="right">
-          {docs.length.toLocaleString()} text{docs.length === 1 ? '' : 's'}
+          {docs.length.toLocaleString()} {docs.length === 1 ? w.one : w.many}
         </span>
       </div>
       <CorpusImport />
@@ -190,8 +193,8 @@ function TextsAndResults() {
           <div className="runbar">
             <div className="runbar-group">
               <span className="runbar-label">Try</span>
-              <button className="btn primary" disabled={busy || !testDoc} onClick={() => runDocs([testDoc], `Test: ${testDoc.docId}`, true)} title="Annotate one text right away: the first selected text, or else the first text">
-                <Icon name="flask" /> Test on 1 text
+              <button className="btn primary" disabled={busy || !testDoc} onClick={() => runDocs([testDoc], `Test: ${testDoc.docId}`, true)} title={`Annotate one ${w.one} right away: the first selected ${w.one}, or else the first ${w.one}`}>
+                <Icon name="flask" /> Test on 1 {w.one}
               </button>
               <span className="btn-group">
                 <button
@@ -220,18 +223,18 @@ function TextsAndResults() {
                   Selected ({selected.size})
                 </button>
               )}
-              <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All texts (${docs.length})`, false)} title={study.options.batch ? 'Submit every text as a batch' : 'Annotate every text now'}>
+              <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All ${w.many} (${docs.length})`, false)} title={study.options.batch ? `Submit every ${w.one} as a batch` : `Annotate every ${w.one} now`}>
                 All ({docs.length.toLocaleString()})
               </button>
-              <button className="btn" disabled={busy} onClick={remaining} title="Starts a new run with the texts that have no usable result for the current prompt. To complete a finished run instead, use Retry failed under Runs & agreement.">
+              <button className="btn" disabled={busy} onClick={remaining} title={`Starts a new run with the ${w.many} that have no usable result for the current prompt. To complete a finished run instead, use Retry failed under Runs & agreement.`}>
                 Remaining
               </button>
             </div>
           </div>
-          {reps > 1 && <div className="hint" style={{ marginTop: 6 }}>Each text is annotated {reps}× per run.</div>}
+          {reps > 1 && <div className="hint" style={{ marginTop: 6 }}>Each {w.one} is annotated {reps}× per run.</div>}
           {tooLongCount > 0 && (
             <div className="hint warn" style={{ marginTop: 6 }}>
-              {tooLongCount} text{tooLongCount === 1 ? ' is' : 's are'} probably too long for this model.
+              {tooLongCount} {tooLongCount === 1 ? `${w.one} is` : `${w.many} are`} probably too long for this model.
             </div>
           )}
           {showEstimate ? <CostEstimate selected={selected} onClose={() => setShowEstimate(false)} /> : <EstimateLink onClick={() => setShowEstimate(true)} />}
@@ -270,16 +273,16 @@ function TextsAndResults() {
           ))}
 
           <div className="toolbar">
-            <input className="input small" style={{ flex: '1 1 180px', maxWidth: 260 }} placeholder="Search texts and results…" value={query} onChange={(e) => (setQuery(e.target.value), setPage(0))} />
+            <input className="input small" style={{ flex: '1 1 180px', maxWidth: 260 }} placeholder={`Search ${w.many} and results…`} value={query} onChange={(e) => (setQuery(e.target.value), setPage(0))} />
             <select className="select small" style={{ width: 'auto' }} value={statusFilter} onChange={(e) => (setStatusFilter(e.target.value as typeof statusFilter), setPage(0))}>
-              <option value="all">All texts</option>
+              <option value="all">All {w.many}</option>
               <option value="done">With results</option>
               <option value="todo">Without results</option>
               <option value="error">With errors</option>
               {compareCol && <option value="mismatch">Disagree with {compareCol}</option>}
             </select>
             {filterOptions.length > 0 && (
-              <select className="select small" style={{ width: 'auto' }} value={metaFilter} onChange={(e) => (setMetaFilter(e.target.value), setPage(0))} title="Show only texts with this metadata value">
+              <select className="select small" style={{ width: 'auto' }} value={metaFilter} onChange={(e) => (setMetaFilter(e.target.value), setPage(0))} title={`Show only ${w.many} with this metadata value`}>
                 <option value="">Any metadata</option>
                 {filterOptions.map(({ c, values }) => (
                   <optgroup key={c} label={c}>
@@ -293,7 +296,7 @@ function TextsAndResults() {
               </select>
             )}
             <select className="select small" style={{ width: 'auto' }} value={runFilter} onChange={(e) => (setRunFilter(e.target.value), setPage(0))} title="Which run's results to show">
-              <option value="latest">Latest result per text</option>
+              <option value="latest">Latest result per {w.one}</option>
               {[...runs].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
                   Run {runTitle(r)} · prompt v{r.snapshot.promptVersion}
@@ -336,23 +339,23 @@ function TextsAndResults() {
                     disabled={!selected.size}
                     onClick={() => {
                       close();
-                      if (confirm(`Delete ${selected.size} selected text(s)? Their results stay in past runs but are hidden.`)) {
+                      if (confirm(`Delete ${selected.size} selected ${selected.size === 1 ? w.one : w.many}? Their results stay in past runs but are hidden.`)) {
                         void removeDocs([...selected]);
                         setSelected(new Set());
                       }
                     }}
                   >
-                    Delete selected texts
+                    Delete selected {w.many}
                   </button>
                   <button
                     className="menu-item"
                     style={{ color: 'var(--err)' }}
                     onClick={() => {
                       close();
-                      if (confirm(`Delete all ${docs.length} texts from this study? Runs are kept.`)) void removeDocs(docs.map((d) => d.id));
+                      if (confirm(`Delete all ${docs.length} ${w.many} from this study? Runs are kept.`)) void removeDocs(docs.map((d) => d.id));
                     }}
                   >
-                    Delete all texts
+                    Delete all {w.many}
                   </button>
                 </>
               )}
@@ -382,7 +385,7 @@ function TextsAndResults() {
                     />
                   </th>
                   <th>ID</th>
-                  <th>Text</th>
+                  <th>{entries ? 'Details sent to the model' : 'Text'}</th>
                   {fields.map((f) => (
                     <th key={f}>{fieldName(f)}</th>
                   ))}
@@ -401,7 +404,7 @@ function TextsAndResults() {
                       </td>
                       <td className="mono" style={{ whiteSpace: 'nowrap' }}>{d.docId}</td>
                       <td>
-                        <div className="snippet">{d.text.slice(0, 300)}</div>
+                        <div className="snippet">{entries ? d.text.split('\n').join(' · ') : d.text.slice(0, 300)}</div>
                       </td>
                       {fields.map((f, i) => {
                         const val = v.values[f] ?? '';
@@ -457,8 +460,8 @@ function TextsAndResults() {
       )}
       {!docs.length && (
         <div className="empty" style={{ paddingBottom: 10 }}>
-          <strong>No texts yet</strong>
-          Add files or paste text above, then test your prompt on a single text.
+          <strong>No {w.many} yet</strong>
+          {entries ? 'Add entries above, then test your prompt on a single entry.' : 'Add files or paste text above, then test your prompt on a single text.'}
         </div>
       )}
 

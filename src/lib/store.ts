@@ -11,6 +11,7 @@ import {
   DEFAULT_RUN_OPTIONS,
   type BatchPart,
   type Doc,
+  type PromptSpec,
   type ProviderId,
   type Result,
   type ResultLog,
@@ -19,6 +20,7 @@ import {
   type RunSnapshot,
   type Study,
 } from './types';
+import { words } from './subject';
 import { errorMessage, nowIso, shortHash, uid } from './util';
 
 export interface Job {
@@ -125,7 +127,7 @@ export function dismissToast(id: string) {
 
 // ---------- studies ----------
 
-export function newStudy(name = 'Untitled study'): Study {
+export function newStudy(name = 'Untitled study', subject?: PromptSpec['subject']): Study {
   const t = nowIso();
   return {
     id: uid(),
@@ -135,7 +137,7 @@ export function newStudy(name = 'Untitled study'): Study {
     updatedAt: t,
     model: { ...DEFAULT_MODEL_SETTINGS },
     options: { ...DEFAULT_RUN_OPTIONS },
-    prompt: structuredClone(DEFAULT_PROMPT),
+    prompt: { ...structuredClone(DEFAULT_PROMPT), ...(subject ? { subject } : {}) },
   };
 }
 
@@ -222,8 +224,8 @@ async function flushStudies() {
 // Don't lose a pending edit when the tab is closed.
 if (typeof window !== 'undefined') window.addEventListener('pagehide', () => void flushStudies());
 
-export async function createStudy(name: string) {
-  const s = newStudy(name);
+export async function createStudy(name: string, subject?: PromptSpec['subject']) {
+  const s = newStudy(name, subject);
   await dbApi.putStudy(s);
   set((st) => ({ studies: [s, ...st.studies] }));
   await selectStudy(s.id);
@@ -267,6 +269,7 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
   // a few new files, is skipped rather than added again as a copy. Same name with a different text is added.
   const present = new Map<string, string[]>();
   for (const d of state.docs) present.set(nameOf(d), [...(present.get(nameOf(d)) ?? []), d.text]);
+  const w = words(cur.prompt);
   const before = items.length;
   items = items.filter((it) => {
     const texts = present.get(nameOf(it)) ?? [];
@@ -275,7 +278,7 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
     return true;
   });
   const skipped = before - items.length;
-  if (skipped) toast(`Skipped ${skipped.toLocaleString()} text${skipped === 1 ? '' : 's'} already in this study (same name and identical text).`);
+  if (skipped) toast(`Skipped ${skipped.toLocaleString()} ${skipped === 1 ? w.one : w.many} already in this study (same name and identical ${w.one === 'entry' ? 'details' : 'text'}).`);
   if (!items.length) return;
   const taken = new Set(state.docs.map((d) => d.docId));
   let order = state.docs.reduce((m, d) => Math.max(m, d.order), 0);
@@ -295,7 +298,7 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
   });
   await dbApi.putDocs(docs);
   set((s) => ({ docs: [...s.docs, ...docs] }));
-  toast(`Added ${docs.length} text${docs.length === 1 ? '' : 's'}.`, 'success');
+  toast(`Added ${docs.length} ${docs.length === 1 ? w.one : w.many}.`, 'success');
   // Ask the browser not to clear this site's data when disk space runs low (some browsers ask the user once).
   void navigator.storage?.persist?.().catch(() => undefined);
   if (renamed.length) {
@@ -384,7 +387,7 @@ export async function promptFingerprint(st: Study): Promise<string> {
   return shortHash(
     JSON.stringify({
       system: p.system,
-      userTemplate: effectiveTemplate(p.userTemplate),
+      userTemplate: effectiveTemplate(p.userTemplate, p.subject),
       outputMode: p.outputMode,
       variables: p.outputMode === 'structured' ? p.variables : [],
       includeRationale: p.outputMode === 'structured' && p.includeRationale,
@@ -596,7 +599,7 @@ export function batchPlan(st: Study, docs: Doc[]): { mb: number; batches: number
   const base = adapter.buildRequestBase({ model: st.model, options, system: st.prompt.system, outputSchema: buildOutputSchema(st.prompt), promptHash: '' });
   const items: BatchItem[] = [];
   for (const d of docs) {
-    const part = adapter.buildRequestPart(renderMessageParts(st.prompt.userTemplate, d), options, st.model.model);
+    const part = adapter.buildRequestPart(renderMessageParts(st.prompt.userTemplate, d, st.prompt.subject), options, st.model.model);
     for (let r = 1; r <= st.options.replicates; r++) items.push({ customId: `r${items.length}`, part });
   }
   const sizes = requestBytes(base, items);
@@ -652,7 +655,7 @@ function buildTasks(run: Run, include: (docId: string, replicate: number) => boo
   for (const id of run.docIds) {
     const doc = docsById.get(id);
     if (!doc) continue;
-    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, doc), snapshot.options, snapshot.model.model);
+    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, doc, snapshot.prompt.subject), snapshot.options, snapshot.model.model);
     for (let r = 1; r <= snapshot.options.replicates; r++) if (include(doc.id, r)) tasks.push({ doc, replicate: r, part });
   }
   return tasks;
@@ -890,7 +893,7 @@ async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: nu
     const doc = docsById.get(ref[0]);
     if (!doc) continue; // text deleted since submission
     const result = makeResult(run, doc, ref[1], run.createdAt, line.ok ? line.outcome : null, line.ok ? null : line.error, null);
-    const part = adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc), run.snapshot.options, run.snapshot.model.model);
+    const part = adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc, run.snapshot.prompt.subject), run.snapshot.options, run.snapshot.model.model);
     const log: ResultLog = {
       id: result.id,
       runId: run.id,

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getLog } from '../lib/db';
 import { fieldLabel, outputFields } from '../lib/prompt';
-import { isBusy, startRun, useStore } from '../lib/store';
+import { currentStudy, isBusy, startRun, useStore } from '../lib/store';
+import { words } from '../lib/subject';
 import type { Result, ResultLog, Run } from '../lib/types';
 import { fmtDateTime, fmtInt } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
@@ -22,6 +23,7 @@ export function DocDrawer({
   onClose: () => void;
 }) {
   const doc = useStore((s) => s.docs.find((d) => d.id === docId));
+  const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
   const runs = useStore((s) => s.runs);
   const allResults = useStore((s) => s.results);
   const busy = useStore((s) => isBusy(s));
@@ -52,7 +54,7 @@ export function DocDrawer({
     <Drawer
       title={
         <>
-          <span className="hint" style={{ fontWeight: 500 }}>Text</span> <span className="mono">{doc.docId}</span>
+          <span className="hint" style={{ fontWeight: 500 }}>{w.One}</span> <span className="mono">{doc.docId}</span>
           {idx >= 0 && (
             <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>
               {idx + 1} of {docOrder.length}
@@ -63,8 +65,8 @@ export function DocDrawer({
       onClose={onClose}
       actions={
         <>
-          <button className="btn small" disabled={busy} onClick={() => startRun({ docIds: [doc.id], scope: `Test: ${doc.docId}`, forceSync: true })} title="Annotate this text now with the current setup">
-            <Icon name="flask" size={14} /> Test this text
+          <button className="btn small" disabled={busy} onClick={() => startRun({ docIds: [doc.id], scope: `Test: ${doc.docId}`, forceSync: true })} title={`Annotate this ${w.one} now with the current setup`}>
+            <Icon name="flask" size={14} /> Test this {w.one}
           </button>
           <button className="btn small" disabled={idx <= 0} onClick={() => onNavigate(docOrder[idx - 1])} title="Previous (↑)">
             ‹
@@ -95,7 +97,7 @@ export function DocDrawer({
       </section>
 
       <section>
-        <p className="section-title">Text ({doc.text.length.toLocaleString()} characters)</p>
+        <p className="section-title">{w.one === 'entry' ? 'Details sent to the model' : `Text (${doc.text.length.toLocaleString()} characters)`}</p>
         <div className="textblock" style={{ maxHeight: 280 }}>{doc.text}</div>
         <div className="hint" style={{ marginTop: 6 }}>
           Source: {doc.source}

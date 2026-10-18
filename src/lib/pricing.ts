@@ -147,7 +147,7 @@ function effectiveEffort(m: ModelSettings): string {
 /** Characters sent with every text besides the text itself: prompt, system prompt and output schema. */
 export function fixedCharsOf(p: PromptSpec): number {
   const schema = buildOutputSchema(p);
-  return renderMessage(p.userTemplate, { docId: '', text: '', meta: {} }).length + p.system.length + (schema ? JSON.stringify(schema).length : 0);
+  return renderMessage(p.userTemplate, { docId: '', text: '', meta: {} }, p.subject).length + p.system.length + (schema ? JSON.stringify(schema).length : 0);
 }
 
 export function fixedChars(study: Study): number {
@@ -156,7 +156,7 @@ export function fixedChars(study: Study): number {
 
 /** Characters that can be cached: the system prompt and the prompt before the text. */
 function cacheableChars(p: PromptSpec): number {
-  return renderMessageParts(p.userTemplate, { docId: '', text: '', meta: {} }).prefix.length + p.system.length;
+  return renderMessageParts(p.userTemplate, { docId: '', text: '', meta: {} }, p.subject).prefix.length + p.system.length;
 }
 
 /** Answer length (visible output) assumed from the codebook when there are no earlier results. */

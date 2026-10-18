@@ -363,7 +363,7 @@ export function scriptValues(study: Study, run: Run, exportedAt: string): Record
     API_KEY_ENV: provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY',
     PROVIDER: JSON.stringify(provider),
     MODEL: JSON.stringify(run.snapshot.model.model),
-    PROMPT: pyStr(effectiveTemplate(p.userTemplate)),
+    PROMPT: pyStr(effectiveTemplate(p.userTemplate, p.subject)),
     SYSTEM_PROMPT: pyStr(p.system),
     OUTPUT_SCHEMA: pyLiteral(run.snapshot.outputSchema),
     FIELDS: pyLiteral(fields),
