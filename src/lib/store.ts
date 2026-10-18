@@ -563,8 +563,9 @@ function batchTooBig(p: ProviderId, base: Record<string, unknown>, items: { cust
   const enc = new TextEncoder();
   let bytes = 0;
   for (const it of items) bytes += enc.encode(JSON.stringify({ custom_id: it.customId, params: { ...base, ...it.part } })).length;
-  const mb = bytes / 1024 / 1024;
-  if (mb <= limit.mb && items.length <= limit.requests) return null;
+  const mb = bytes / 1e6;
+  // A small margin: the upload adds some wrapping, and being refused after a long upload is worse.
+  if (mb <= 0.95 * limit.mb && items.length <= limit.requests) return null;
   return (
     `This batch would be about ${Math.round(mb)} MB with ${items.length.toLocaleString()} requests; ${provider(p).label} accepts at most ${limit.mb} MB ` +
     `and ${limit.requests.toLocaleString()} requests per batch. Submit it in parts: select part of the texts and run "Selected", then "Remaining" for the rest.`
@@ -600,6 +601,15 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
   const signal = job.abort.signal;
   let next = 0;
   const worker = async () => {
+    try {
+      await sendSome();
+    } catch (e) {
+      // Anything unexpected: stop every worker, so the run doesn't count as finished while requests go on.
+      if (!run.error) run.error = `Stopped by an unexpected error: ${errorMessage(e)}`;
+      job.abort.abort();
+    }
+  };
+  const sendSome = async () => {
     while (next < tasks.length && !signal.aborted) {
       const t = tasks[next++];
       const requestedAt = nowIso();

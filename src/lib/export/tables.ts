@@ -259,6 +259,7 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
     level_of_measurement: a.stats.level,
     n: a.stats.n,
     n_with_label: a.nLabelled,
+    n_left_out_label_not_a_number: a.stats.leftOut.n,
     ...withCi('percent_agreement', a.stats.percentAgreement, a.stats.ci.percentAgreement),
     ...withCi('cohen_kappa', a.stats.cohenKappa, a.stats.ci.cohenKappa),
     ...withCi('weighted_kappa_linear', a.stats.weightedKappaLinear, a.stats.ci.weightedKappaLinear),

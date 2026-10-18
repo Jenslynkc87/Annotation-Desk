@@ -17,6 +17,8 @@ export interface Agreement {
   n: number;
   /** The level the statistics were computed at: the one asked for, or nominal when the values aren't numbers. */
   level: Level;
+  /** On a scale: texts left out because a label wasn't a number (e.g. "NA"), and some of those labels. */
+  leftOut: { n: number; values: string[] };
   percentAgreement: number | null;
   cohenKappa: number | null;
   weightedKappa: number | null; // quadratic weights, ordinal/interval only
@@ -314,8 +316,17 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
     if (a[i] !== '' && b[i] !== '' && a[i] !== undefined && b[i] !== undefined) pairs.push([a[i], b[i]]);
   }
   // On a scale, a value that isn't a number (e.g. "NA" in a coder's column) is missing, not a category of its
-  // own: one such cell would otherwise turn every statistic nominal. (No numbers at all: treated as nominal.)
-  if (level !== 'nominal' && pairs.some(([x, y]) => isNum(x) && isNum(y))) pairs = pairs.filter(([x, y]) => isNum(x) && isNum(y));
+  // own (one such cell would otherwise turn every statistic nominal), as long as most values are numbers.
+  // Those left out are reported. Mostly words (e.g. "2 (moderate)"): compared as categories instead.
+  const leftOut = { n: 0, values: [] as string[] };
+  if (level !== 'nominal') {
+    const numeric = pairs.filter(([x, y]) => isNum(x) && isNum(y));
+    if (numeric.length && numeric.length >= pairs.length / 2 && numeric.length < pairs.length) {
+      leftOut.n = pairs.length - numeric.length;
+      leftOut.values = [...new Set(pairs.flat().filter((v) => !isNum(v)))].slice(0, 5);
+      pairs = numeric;
+    }
+  }
   const numeric = level !== 'nominal' && pairs.length > 0 && pairs.every(([x, y]) => isNum(x) && isNum(y));
   const xs = numeric ? pairs.map(([x]) => Number(x)) : [];
   const ys = numeric ? pairs.map(([, y]) => Number(y)) : [];
@@ -351,6 +362,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
   return {
     n: pairs.length,
     level: alphaLevel,
+    leftOut,
     percentAgreement: percentAgreement(pairs),
     cohenKappa: cohenKappa(pairs),
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,

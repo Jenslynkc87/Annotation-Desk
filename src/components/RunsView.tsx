@@ -285,20 +285,23 @@ function AgreementPanel() {
     // The figures at once; the 95% intervals (several seconds on a full corpus) follow from a background worker.
     return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, false), nLabelled, xs, ys };
   }, [a, b, f, level, yesNo, tolerance, docs, runs, results]);
-  const [intervals, setIntervals] = useState<{ for: Agreement; ci: Agreement['ci'] } | null>(null);
+  // What the intervals depend on: unchanged when results arrive for other runs (e.g. while a run is going).
+  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance }), [xs, ys, level, cf, tolerance]);
+  const jobKey = useMemo(() => JSON.stringify(job), [job]);
+  const [intervals, setIntervals] = useState<{ key: string; ci: Agreement['ci'] } | null>(null);
   useEffect(() => {
     if (figures.n < 10) return; // too few texts for intervals
     let stop = () => {};
-    // A short pause first, so quick changes (or results arriving during a run) don't start a job each time.
-    const t = setTimeout(() => (stop = computeIntervals({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance }, (ci) => setIntervals({ for: figures, ci }))), 300);
+    // A short pause first, so quick changes don't start a job each time.
+    const t = setTimeout(() => (stop = computeIntervals(job, (ci) => setIntervals({ key: jobKey, ci }))), 300);
     return () => {
       clearTimeout(t);
       stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [figures]);
-  const stats: Agreement = intervals?.for === figures ? { ...figures, ci: intervals.ci } : figures;
-  const ciPending = figures.n >= 10 && intervals?.for !== figures;
+  }, [jobKey]);
+  const stats: Agreement = intervals?.key === jobKey ? { ...figures, ci: intervals.ci } : figures;
+  const ciPending = figures.n >= 10 && intervals?.key !== jobKey;
   const ciText = (ci: [number, number] | null | undefined, pct = false) => (ciPending ? 'computing 95% CI…' : formatCi(ci, pct));
 
   const sourceOptions = (allowMeta: boolean) => (
@@ -454,6 +457,13 @@ function AgreementPanel() {
         <div className="notice warn">No texts have a value in both sources for "{f}".</div>
       ) : (
         <>
+          {stats.leftOut.n > 0 && (
+            <div className="notice warn" style={{ marginTop: 6 }}>
+              {fmtInt(stats.leftOut.n)} text{stats.leftOut.n === 1 ? ' was' : 's were'} left out because a label isn't a number:{' '}
+              {stats.leftOut.values.map((v) => `“${v}”`).join(', ')}
+              {stats.leftOut.values.length === 5 ? ', …' : ''}.
+            </div>
+          )}
           <Glance stats={stats} />
           <p className="section-title" style={{ marginTop: 18 }}>Agreement statistics</p>
           <div className="stat-grid" style={{ marginTop: 6 }}>

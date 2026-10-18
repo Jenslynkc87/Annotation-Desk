@@ -179,7 +179,9 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
   const finished = d.runs.filter((r) => d.results.some((x) => x.runId === r.id));
 
   root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
-  root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, d.results, opts.includeLogs));
+  // Without the request/response logs: they are under runs/ already, and each holds the full text again, which
+  // would make the zip too large to build in the browser for a full corpus. (Export → Study backup has them.)
+  root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, d.results, false));
   const corpus = root.folder('corpus')!;
   corpus.file('corpus.csv', toCsv(corpusRows(d.docs, true)));
   corpus.file('corpus.jsonl', jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
@@ -426,7 +428,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
 function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefined, opts: ResearchOptions): string {
   const rows: [string, string][] = [
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
-    ['`study-backup.json`', 'Full backup, re-importable via Studies → Import study backup'],
+    ['`study-backup.json`', 'Backup (settings, texts, runs, results; the request/response logs are under `runs/`), re-importable via Studies → Import study backup'],
     ['`corpus/corpus.csv`, `corpus.jsonl`', 'All texts with metadata'],
     ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), output schema, codebook'],
     ['`runs/run-NN/run.json`', 'Frozen run configuration (model, settings, prompt, exact shared request body)'],
@@ -526,6 +528,7 @@ export async function buildComparisonReport(
     level: s.level,
     n_compared: s.n,
     n_texts_in_both_runs: both.length,
+    ...(s.leftOut.n ? { n_left_out_not_a_number: s.leftOut.n } : {}),
     ...withCi('exact_agreement', s, 'percentAgreement', s.percentAgreement),
     ...(tolerance > 0 ? withCi(tolName, s, 'withinTolerance', s.withinTolerance) : {}),
     ...withCi('differ_2_or_more_points', s, 'largeDifference', s.largeDifference),

@@ -120,7 +120,8 @@ export async function parseFile(file: File): Promise<ParsedFile> {
         // Cells shown as typed (dates, percentages), except plain numbers: Excel's "General" display would turn
         // 9783161484100 into "9.78316E+12" and cut decimals, so those keep every digit.
         for (const [ref, cell] of Object.entries(sheet)) {
-          if (!ref.startsWith('!') && cell?.t === 'n' && cell.z === 'General' && Number.isFinite(cell.v)) cell.w = String(cell.v);
+          // (15 significant digits, as Excel keeps them: a formula's 0.30000000000000004 shows as 0.3.)
+          if (!ref.startsWith('!') && cell?.t === 'n' && cell.z === 'General' && Number.isFinite(cell.v)) cell.w = String(Number(cell.v.toPrecision(15)));
         }
         const objs = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
         return { kind: 'table', table: tableFromObjects(file.name, objs) };

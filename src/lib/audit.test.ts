@@ -32,13 +32,14 @@ describe('plain-text JSON answers annotated more than once', () => {
   const text = { ...DEFAULT_PROMPT, outputMode: 'text' as const };
   const run = mkRun(text, 3);
   const results = [
-    mkResult(1, { response: '{"race": 2, "race_explanation": "a"}' }),
-    mkResult(2, { response: '{"race": 3, "race_explanation": "b"}' }),
+    mkResult(1, { response: '{"race": 3, "race_explanation": "a"}' }),
+    mkResult(2, { response: '{"race": 2, "race_explanation": "b"}' }),
     mkResult(3, { response: '{"race": 2, "race_explanation": "c"}' }),
   ];
   it('combines the scores (median), so columns and agreement still work', () => {
     const v = buildDocViews([doc()], [run], results, 'r').get('d1')!;
-    expect(JSON.parse(v.values.response)).toEqual({ race: 2, race_explanation: 'a | b | c' });
+    // The explanation is the one written with the combined score (the first such), not a merge of all three.
+    expect(JSON.parse(v.values.response)).toEqual({ race: 2, race_explanation: 'b' });
     expect(comparableFields(run, [v]).map((f) => f.key)).toEqual(['race']);
     const row = resultsWide(run, [doc()], [run], results, { text: false, rationale: false })[0];
     expect(row.race).toBe(2);
@@ -53,6 +54,22 @@ describe('plain-text JSON answers annotated more than once', () => {
   it('weighs plain-text scores on the whole scale between the lowest and highest value', () => {
     const views = ['-3', '-1', '0', '3'].map((x) => ({ run: run, results: [], values: { response: `{"s": ${x}}` }, consistency: {}, status: 'ok' as const }));
     expect(comparableFields(run, views)[0].allowed).toEqual(['-3', '-2', '-1', '0', '1', '2', '3']);
+  });
+});
+
+describe('explanations of combined answers in structured runs', () => {
+  it('takes the explanation written with the combined score', () => {
+    const p = {
+      ...DEFAULT_PROMPT,
+      variables: [
+        { name: 'race_explanation', type: 'text' as const, values: [], description: '' },
+        { name: 'race', type: 'ordinal' as const, values: ['0', '1', '2', '3'], description: '' },
+        { name: 'note', type: 'text' as const, values: [], description: '' },
+      ],
+    };
+    const rs = [mkResult(1, { race: '3', race_explanation: 'three', note: 'x' }), mkResult(2, { race: '1', race_explanation: 'one', note: 'x' }), mkResult(3, { race: '1', race_explanation: 'also one', note: 'y' })];
+    const v = buildDocViews([doc()], [mkRun(p, 3)], rs, 'r').get('d1')!;
+    expect(v.values).toMatchObject({ race: '1', race_explanation: 'one', note: 'x' });
   });
 });
 
@@ -76,8 +93,10 @@ describe('scale fields with a stray non-number label', () => {
     expect(withNa.level).toBe('ordinal');
     expect(withNa.krippendorffAlpha).toBeCloseTo(clean.krippendorffAlpha!, 10);
     expect(withNa.weightedKappa).not.toBeNull();
-    // Labels that are no numbers at all are compared as categories, as before.
-    expect(agreement(['low', 'high'], ['low', 'low'], 'ordinal').level).toBe('nominal');
+    expect(withNa.leftOut).toEqual({ n: 1, values: ['NA'] });
+    // Mostly words (e.g. "2 (moderate)"): compared as categories, as before, with nothing left out.
+    const words = agreement(['1', '2 (moderate)', '3 (high)'], ['1', '2 (moderate)', '1 (low)'], 'ordinal');
+    expect([words.level, words.n, words.leftOut.n]).toEqual(['nominal', 3, 0]);
   });
 });
 
