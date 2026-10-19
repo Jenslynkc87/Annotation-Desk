@@ -1,7 +1,7 @@
 // Attach human labels (an "answer key") from a spreadsheet to texts already in the study.
 // Rows are matched to texts by ID or file name; the texts themselves are never changed.
 import type { Doc } from '../types';
-import { baseName, type ParsedTable } from './parse';
+import type { ParsedTable } from './parse';
 
 export interface LabelMatch {
   /** Internal doc id -> label values to add (empty cells are skipped). */
@@ -18,13 +18,17 @@ export interface LabelMatch {
 
 const norm = (s: string) => s.trim().toLowerCase();
 
+/** A name without its file extension (art_1.md → art_1). Only real extensions: in "H.C. Andersen" or
+ *  "Smith et al. 2001" the part after the period belongs to the name, and must not be cut off. */
+const stem = (s: string) => s.trim().replace(/\.(txt|md|markdown|pdf|docx?|html?|rtf|odt|csv|tsv|xlsx?|ods|jsonl?)$/i, '');
+
 /** Lookup from every name a text is known by (ID, file name, either without extension) to the texts. */
 function docIndex(docs: Doc[]): Map<string, Set<string>> {
   const index = new Map<string, Set<string>>();
   for (const d of docs) {
     const names = [d.docId, d.source, d.meta.file ?? ''].filter(Boolean);
     for (const n of names)
-      for (const k of new Set([norm(n), norm(baseName(n))])) {
+      for (const k of new Set([norm(n), norm(stem(n))])) {
         if (!index.has(k)) index.set(k, new Set());
         index.get(k)!.add(d.id);
       }
@@ -33,7 +37,7 @@ function docIndex(docs: Doc[]): Map<string, Set<string>> {
 }
 
 function lookup(index: Map<string, Set<string>>, key: string): Set<string> | undefined {
-  return index.get(norm(key)) ?? index.get(norm(baseName(key)));
+  return index.get(norm(key)) ?? index.get(norm(stem(key)));
 }
 
 export function matchLabels(docs: Doc[], table: ParsedTable, keyColumn: string): LabelMatch {

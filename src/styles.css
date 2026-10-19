@@ -222,6 +222,7 @@ table.data th { text-align: left; font-weight: 600; color: var(--muted); font-si
 table.data td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.data tr.clickable { cursor: pointer; }
 table.data tr.clickable:hover td { background: color-mix(in srgb, var(--navy-050) 60%, transparent); }
+table.data tr.clickable:focus-visible { outline: 2px solid var(--navy); outline-offset: -2px; }
 table.data tr.selected td { background: var(--navy-050); }
 table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .snippet { color: var(--muted); max-width: 420px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -239,7 +240,8 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 /* ---------- variable editor ---------- */
 .vars { display: flex; flex-direction: column; gap: 10px; }
 .var { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; background: color-mix(in srgb, var(--bg) 50%, var(--card)); display: flex; flex-direction: column; gap: 8px; }
-.var-top { display: grid; grid-template-columns: minmax(0, 1fr) 132px repeat(3, 30px); gap: 8px; align-items: center; }
+.var-top { display: grid; grid-template-columns: minmax(0, 1fr) repeat(3, 30px); gap: 8px; align-items: center; }
+.var-row { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 8px; align-items: center; }
 .var .input, .var .select { height: 34px; padding: 4px 9px; font-size: 14px; }
 .var .var-top .input { font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
 

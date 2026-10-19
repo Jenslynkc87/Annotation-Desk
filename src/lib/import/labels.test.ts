@@ -30,3 +30,13 @@ describe('adding labels from a spreadsheet', () => {
     expect(m.replaced).toEqual(['stance_gold']);
   });
 });
+
+describe('names with a period in them', () => {
+  it('match only the same name, not another one that shares the part before the period', () => {
+    const docs = [{ id: 'a', studyId: 's', docId: 'H.C. Andersen', text: 't', meta: {}, source: 'pasted', order: 1, addedAt: '' }];
+    const table = { name: 'answers.csv', columns: ['name', 'score'], rows: [{ name: 'H.C. Andersen', score: '3' }, { name: 'H.C. Lumbye', score: '1' }] };
+    const m = matchLabels(docs, table, 'name');
+    expect(m.updates.get('a')).toEqual({ score: '3' });
+    expect(m.unmatched).toEqual(['H.C. Lumbye']);
+  });
+});

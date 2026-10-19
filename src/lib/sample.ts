@@ -57,14 +57,21 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
   // minimum of one): take from the largest.
   const short = (k: string) => quota.get(k)! - take.get(k)!;
   const byRemainder = [...keys].sort((a, b) => short(b) - short(a) || byCode(a, b));
-  for (let i = 0; total() < size && i < 10 * keys.length; i++) {
-    const k = byRemainder[i % byRemainder.length];
-    if (take.get(k)! < n(k)) take.set(k, take.get(k)! + 1);
+  // Round after round in this order until the total is right (each round changes at least one stratum, or ends).
+  for (let moved = true; total() < size && moved; ) {
+    moved = false;
+    for (const k of byRemainder) {
+      if (total() >= size) break;
+      if (take.get(k)! < n(k)) take.set(k, take.get(k)! + 1), (moved = true);
+    }
   }
   const bySize = [...keys].sort((a, b) => take.get(b)! - take.get(a)! || byCode(a, b));
-  for (let i = 0; total() > size && i < 10 * keys.length; i++) {
-    const k = bySize[i % bySize.length];
-    if (take.get(k)! > 1) take.set(k, take.get(k)! - 1);
+  for (let moved = true; total() > size && moved; ) {
+    moved = false;
+    for (const k of bySize) {
+      if (total() <= size) break;
+      if (take.get(k)! > 1) take.set(k, take.get(k)! - 1), (moved = true);
+    }
   }
   const rnd = seeded(o.seed);
   const ids: string[] = [];

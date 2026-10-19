@@ -33,8 +33,9 @@ export function splitRequestBase(run: Run) {
 /** Python string literal; multi-line strings become readable triple-quoted literals. */
 export function pyStr(s: string): string {
   if (!s.includes('\n')) return JSON.stringify(s);
-  let body = s.replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
-  if (body.endsWith('"')) body = body.slice(0, -1) + '\\"';
+  // Carriage returns escaped: Python would read a raw one in the source as a plain line break.
+  // Quotes escaped where they would end the literal: any that starts three in a row, and those at the very end.
+  const body = s.replace(/\\/g, '\\\\').replace(/\r/g, '\\r').replace(/"(?=""|"*$)/g, '\\"');
   return `"""${body}"""`;
 }
 
@@ -138,7 +139,11 @@ def message_parts(row, doc_id, text):
         if key == "id":
             return doc_id
         if key.startswith("meta."):
-            return str(row.get(key[5:], "") or "")
+            col = key[5:]
+            # corpus.csv renames metadata columns that clash with its own (e.g. source -> meta_source).
+            if col in ("doc_id", "text", "n_characters", "source"):
+                col = "meta_" + col
+            return str(row.get(col, "") or "")
         return m.group(0)
 
     first = PLACEHOLDER.search(PROMPT)

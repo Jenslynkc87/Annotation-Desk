@@ -125,9 +125,13 @@ export function CorpusImport() {
           <button
             className="btn small"
             onClick={() => labelsRef.current?.click()}
-            title={`Add human labels (an answer key) or metadata to the ${entries ? 'entries' : 'texts'} already here, matched by ${entries ? 'name' : 'file name'} or ID`}
+            title={
+              entries
+                ? 'Add your own answers (an answer key) to the entries already here, matched by ID. The model does not see them.'
+                : 'Add human labels (an answer key) or metadata to the texts already here, matched by file name or ID'
+            }
           >
-            {entries ? 'Add your answers or more details from a spreadsheet…' : 'Add labels or metadata from a spreadsheet…'}
+            {entries ? 'Add your answers from a spreadsheet…' : 'Add labels or metadata from a spreadsheet…'}
           </button>
         )}
       </div>
@@ -151,7 +155,7 @@ export function CorpusImport() {
           }}
         />
       )}
-      {labels && <LabelsDialog table={labels} onDone={() => setLabels(null)} />}
+      {labels && <LabelsDialog entries={entries} table={labels} onDone={() => setLabels(null)} />}
       {tables.length > 0 && (
         <TableDialog
           entries={entries}
@@ -183,6 +187,7 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
     <Modal
       title={tableOnly ? 'Paste entries' : 'Paste text'}
       onClose={onClose}
+      confirmEscape={text.trim() ? 'Close without adding what you pasted?' : undefined}
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
@@ -266,12 +271,18 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   const rows = skipEmpty && (!entry || shown.length) ? table.rows.filter((r) => textOf(r).trim()) : table.rows;
   // For entries every column is also kept as metadata (filters, samples, comparisons).
   const metaCols = table.columns.filter((c) => c !== idCol && (entry || c !== textCol));
+  // Entries without an ID column: the first ticked column with a different value in each row (e.g. the title, not
+  // the author), so that answers in a spreadsheet can be matched to the entries later.
+  const unique = (c: string) => new Set(rows.map((r) => String(r[c] ?? '').trim())).size === rows.length;
+  const autoId = entry && !idCol ? (shown.find(unique) ?? shown[0] ?? '') : '';
+  const base = baseName(table.name);
+  const idOf = (r: Record<string, string>, i: number) => String(r[idCol || autoId] ?? '').trim() || `${base}_${i + 1}`;
+  const ids = rows.map(idOf);
+  const repeated = ids.filter((x, i) => ids.indexOf(x) !== i);
   const add = async () => {
-    const base = baseName(table.name);
     const docs = rows.map((r, i) => {
-      const fallback = entry && shown.length ? String(r[shown[0]] ?? '').trim() : '';
       return {
-        docId: (idCol ? String(r[idCol] ?? '').trim() : '') || fallback || `${base}_${i + 1}`,
+        docId: ids[i],
         text: textOf(r),
         meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
         source: table.name,
@@ -302,6 +313,13 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
           </button>
         </div>
       )}
+      {repeated.length > 0 && (
+        <div className="notice warn" style={{ marginBottom: 12 }}>
+          {repeated.length.toLocaleString()} {entry ? (repeated.length === 1 ? 'entry has' : 'entries have') : repeated.length === 1 ? 'text has' : 'texts have'} the same ID as another
+          (e.g. “{repeated[0]}”) and will get _2, _3 and so on. Choose an ID column with a different value in each row, so that labels or answers in a spreadsheet can be
+          matched to them later.
+        </div>
+      )}
       {table.problems?.map((p) => (
         <div key={p} className="notice warn" style={{ marginBottom: 12 }}>
           {p}
@@ -321,7 +339,7 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
         <div className="field">
           <label>ID column</label>
           <select className="select" value={idCol} onChange={(e) => setIdCol(e.target.value)}>
-            <option value="">{entry ? '(the first ticked column)' : '(number the rows)'}</option>
+            <option value="">{entry ? '(first ticked column whose values all differ)' : '(number the rows)'}</option>
             {table.columns.map((c) => (
               <option key={c}>{c}</option>
             ))}
@@ -374,7 +392,7 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
                   {c}
                   {!entry && c === textCol && <span className="badge" style={{ marginLeft: 6 }}>used as text</span>}
                   {entry && shown.includes(c) && <span className="badge" style={{ marginLeft: 6 }}>model sees</span>}
-                  {c === idCol && <span className="badge" style={{ marginLeft: 6 }}>used as ID</span>}
+                  {c === (idCol || autoId) && <span className="badge" style={{ marginLeft: 6 }}>used as ID</span>}
                 </th>
               ))}
             </tr>
@@ -396,34 +414,44 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   );
 }
 
-function LabelsDialog({ table, onDone }: { table: ParsedTable; onDone: () => void }) {
+function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: ParsedTable; onDone: () => void }) {
   const docs = useStore((s) => s.docs);
   const [keyCol, setKeyCol] = useState(() => guessKeyColumn(docs, table));
   const m = useMemo(() => matchLabels(docs, table, keyCol), [docs, table, keyCol]);
   const list = (xs: string[]) => `${xs.slice(0, 5).join(', ')}${xs.length > 5 ? ', …' : ''}`;
+  const [one, many] = entries ? ['entry', 'entries'] : ['text', 'texts'];
   const apply = async () => {
     await addLabels(m.updates);
     onDone();
   };
   return (
     <Modal
-      title={`Add labels: ${table.name}`}
+      title={`${entries ? 'Add answers' : 'Add labels'}: ${table.name}`}
       onClose={onDone}
       footer={
         <>
           <button className="btn" onClick={onDone}>Cancel</button>
           <button className="btn primary" disabled={!m.updates.size || !m.columns.length} onClick={apply}>
-            Add labels to {m.updates.size.toLocaleString()} text{m.updates.size === 1 ? '' : 's'}
+            Add to {m.updates.size.toLocaleString()} {m.updates.size === 1 ? one : many}
           </button>
         </>
       }
     >
       <p className="hint" style={{ marginTop: 0 }}>
-        Each row is matched to a text by its file name or ID; the other columns are added to that text as labels (e.g. human codes to compare
-        with the model). Texts are not changed, and empty cells are skipped.
+        {entries ? (
+          <>
+            Each row is matched to an entry by its ID; the other columns are added to that entry (e.g. your own answers, to compare with the model). The model
+            does not see these columns: what it is sent was fixed when the entries were added. Empty cells are skipped.
+          </>
+        ) : (
+          <>
+            Each row is matched to a text by its file name or ID; the other columns are added to that text as labels (e.g. human codes to compare with the
+            model). Texts are not changed, and empty cells are skipped.
+          </>
+        )}
       </p>
       <div className="field">
-        <label>Column with the file name or ID</label>
+        <label>Column with the {entries ? 'ID' : 'file name or ID'}</label>
         <select className="select" value={keyCol} onChange={(e) => setKeyCol(e.target.value)}>
           {table.columns.map((c) => (
             <option key={c}>{c}</option>
@@ -432,11 +460,11 @@ function LabelsDialog({ table, onDone }: { table: ParsedTable; onDone: () => voi
       </div>
       <div className={`notice ${m.unmatched.length || m.ambiguous.length ? 'warn' : ''}`}>
         <div>
-          <strong>{m.updates.size.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched a text. Labels to add:{' '}
+          <strong>{m.updates.size.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {entries ? 'an entry' : 'a text'}. Columns to add:{' '}
           {m.columns.length ? m.columns.join(', ') : '(none)'}.
         </div>
         {m.unmatched.length > 0 && <div>Not found ({m.unmatched.length}): {list(m.unmatched)}</div>}
-        {m.ambiguous.length > 0 && <div>Matches more than one text, skipped ({m.ambiguous.length}): {list(m.ambiguous)}</div>}
+        {m.ambiguous.length > 0 && <div>Matches more than one {one}, skipped ({m.ambiguous.length}): {list(m.ambiguous)}</div>}
         {m.replaced.length > 0 && <div>Already present, values will be replaced: {m.replaced.join(', ')}</div>}
       </div>
     </Modal>

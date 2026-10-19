@@ -67,6 +67,10 @@ export async function putRun(r: Run) {
   await (await db()).put('runs', r);
 }
 
+export async function getRun(id: string): Promise<Run | undefined> {
+  return (await db()).get('runs', id);
+}
+
 export async function putResult(r: Result, log: ResultLog | null) {
   const tx = (await db()).transaction(['results', 'logs'], 'readwrite');
   const ops: Promise<unknown>[] = [tx.objectStore('results').put(r)];

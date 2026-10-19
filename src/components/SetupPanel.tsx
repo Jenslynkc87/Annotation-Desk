@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
 import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceholders, toNumber, uniqueKey } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
@@ -91,11 +91,20 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
 
   const ownPrice = priceOverrides[m.model];
   const price = ownPrice ?? builtInPrice(m.model);
-  const setPrice = (which: 'input' | 'output', value: string) => {
-    const cur = price ?? { input: 0, output: 0 };
-    const n = value === '' ? 0 : Math.max(0, Number(value) || 0);
-    setPriceOverride(m.model, { input: cur.input, output: cur.output, [which]: n });
-  };
+  // What is typed in a price box shows as typed; it becomes your own price once it is a number (an emptied box
+  // changes nothing, and shows the price again when you leave it).
+  const [priceDraft, setPriceDraft] = useState<{ which: 'input' | 'output'; text: string } | null>(null);
+  const priceProps = (which: 'input' | 'output') => ({
+    value: priceDraft?.which === which ? priceDraft.text : (price?.[which] ?? ''),
+    onChange: (e: ChangeEvent<HTMLInputElement>) => {
+      const text = e.target.value;
+      setPriceDraft({ which, text });
+      if (text.trim() === '' || !(Number(text) >= 0)) return;
+      const cur = price ?? { input: 0, output: 0 };
+      setPriceOverride(m.model, { input: cur.input, output: cur.output, [which]: Number(text) });
+    },
+    onBlur: () => setPriceDraft(null),
+  });
 
   // Keep the settings valid for the chosen model: an effort it supports (medium by default) and no
   // temperature where the model rejects one. The dropdowns then always show what is sent.
@@ -121,7 +130,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const showPreview = async () => {
     const st = currentStudy(getState())!;
     const snap = await buildSnapshot(st, st.options.batch);
-    const doc = getState().docs[0] ?? { docId: 'example', text: '(your text appears here)', meta: {} };
+    const doc = getState().docs[0] ?? { docId: 'example', text: `(your ${words(st.prompt).one} appears here)`, meta: {} };
     const part = provider(st.model.provider).buildRequestPart(renderMessageParts(st.prompt.userTemplate, doc, st.prompt.subject), snap.options, st.model.model);
     setPreview({ ...snap.requestBase, ...part });
   };
@@ -138,7 +147,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
       <div className="card-head card-pad" style={{ paddingBottom: 0 }}>
         <span className="step">01</span>
         <h2>Set up</h2>
-        <button className="btn ghost small right" onClick={showPreview} title="Show the exact request that will be sent for the first text">
+        <button className="btn ghost small right" onClick={showPreview} title={`Show the exact request that will be sent for the first ${w.one}`}>
           Preview request
         </button>
       </div>
@@ -271,15 +280,15 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
                 <NumberField id="conc" className="input" min={1} max={16} value={o.concurrency} disabled={o.batch} onChange={(n) => updateStudy((s) => void (s.options.concurrency = n))} />
               </div>
             </div>
-            <div className="hint tight">How many texts are sent at once (not used for batches). Lower it if you hit rate limits.</div>
+            <div className="hint tight">How many {w.many} are sent at once (not used for batches). Lower it if you hit rate limits.</div>
             <div className="grid2" style={{ marginTop: 12 }}>
               <div className="field">
                 <label htmlFor="price-in">Price per million input tokens ($)</label>
-                <input id="price-in" className="input" type="number" min="0" step="any" value={price?.input ?? ''} placeholder="Unknown" onChange={(e) => setPrice('input', e.target.value)} />
+                <input id="price-in" className="input" type="number" min="0" step="any" placeholder="Unknown" {...priceProps('input')} />
               </div>
               <div className="field">
                 <label htmlFor="price-out">Price per million output tokens ($)</label>
-                <input id="price-out" className="input" type="number" min="0" step="any" value={price?.output ?? ''} placeholder="Unknown" onChange={(e) => setPrice('output', e.target.value)} />
+                <input id="price-out" className="input" type="number" min="0" step="any" placeholder="Unknown" {...priceProps('output')} />
               </div>
             </div>
             <div className="hint tight">
@@ -392,7 +401,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
               {m.provider === 'anthropic'
                 ? 'Saves cost when the fixed part of your prompt is long (about 400+ words; more on older models).'
                 : supportsExplicitCaching(m.model)
-                  ? 'Caches only the fixed part of your prompt (not the texts). Off: nothing is cached or written.'
+                  ? `Caches only the fixed part of your prompt (not the ${w.many}). Off: nothing is cached or written.`
                   : 'This OpenAI model caches long prompts automatically and it cannot be turned off.'}
             </div>
           </span>
@@ -497,13 +506,6 @@ function VariableEditor() {
                   })
                 }
               />
-              <select className="select" value={v.type} aria-label="Field type" onChange={(e) => upd(i, (x) => void (x.type = e.target.value as VariableType))}>
-                {Object.entries(TYPE_LABELS).map(([k, l]) => (
-                  <option key={k} value={k}>
-                    {l}
-                  </option>
-                ))}
-              </select>
               <button
                 className="btn ghost small icon move"
                 title="Move up (the model writes the fields in this order)"
@@ -536,15 +538,25 @@ function VariableEditor() {
                 <Icon name="trash" size={15} />
               </button>
             </div>
-            {(v.type === 'category' || v.type === 'ordinal') && (
-              <input
-                className="input"
-                aria-label="Allowed values"
-                placeholder={v.type === 'ordinal' ? 'Allowed values, e.g. 0, 1, 2' : 'Allowed values, e.g. positive, neutral, negative'}
-                value={v.values.join(', ')}
-                onChange={(e) => upd(i, (x) => void (x.values = e.target.value.split(',').map((s) => s.trimStart())))}
-              />
-            )}
+            {/* The type on a row of its own (with the allowed values), so the name gets the full width. */}
+            <div className="var-row">
+              <select className="select" value={v.type} aria-label="Field type" onChange={(e) => upd(i, (x) => void (x.type = e.target.value as VariableType))}>
+                {Object.entries(TYPE_LABELS).map(([k, l]) => (
+                  <option key={k} value={k}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+              {(v.type === 'category' || v.type === 'ordinal') && (
+                <input
+                  className="input"
+                  aria-label="Allowed values"
+                  placeholder={v.type === 'ordinal' ? 'Allowed values, e.g. 0, 1, 2' : 'Allowed values, e.g. positive, neutral, negative'}
+                  value={v.values.join(', ')}
+                  onChange={(e) => upd(i, (x) => void (x.values = e.target.value.split(',').map((s) => s.trimStart())))}
+                />
+              )}
+            </div>
             {v.type === 'ordinal' && v.values.some((x) => x.trim() && !Number.isInteger(toNumber(x))) && <div className="hint err">Ordinal values must be whole numbers.</div>}
             <input className="input" aria-label="Field description" placeholder="Description for the model (optional)" value={v.description} onChange={(e) => upd(i, (x) => void (x.description = e.target.value))} />
           </div>

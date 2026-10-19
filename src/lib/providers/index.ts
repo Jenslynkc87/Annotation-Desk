@@ -31,8 +31,12 @@ export function isPermanentError(e: unknown): boolean {
   return typeof status === 'number' && status >= 400 && status < 500 && ![408, 409, 429].includes(status);
 }
 
-/** Turn SDK errors into one readable line. */
+/** Turn SDK errors into one readable line (stored with the result, so any API key in it is masked). */
 export function describeApiError(e: unknown): string {
+  return describe(e).replace(/\b(sk-[a-z]*-?)[A-Za-z0-9_-]{8,}/g, '$1…');
+}
+
+function describe(e: unknown): string {
   if (e && typeof e === 'object') {
     const err = e as { status?: number; message?: string; name?: string; error?: { error?: { message?: string } } };
     if (err.name === 'AbortError' || err.name === 'APIUserAbortError') return 'Cancelled';

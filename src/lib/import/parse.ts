@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import { toNumber } from '../prompt';
 
 export interface ParsedText {
   name: string;
@@ -114,11 +115,14 @@ export async function parseFile(file: File): Promise<ParsedFile> {
         const XLSX = await import('xlsx');
         const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellNF: true });
         const sheet = wb.Sheets[wb.SheetNames[0]];
-        // Cells shown as typed (dates, percentages), except plain numbers: Excel's "General" display would turn
-        // 9783161484100 into "9.78316E+12" and cut decimals, so those keep every digit.
+        // Cells as shown (dates, percentages, 2.0, 00123), unless the display is not the same number: Excel's
+        // "General" display turns 9783161484100 into "9.78316E+12", a "0" format shows 2.5 as "3", "#,##0" adds
+        // commas. Those keep the full number (15 significant digits, as Excel keeps them: 0.30000000000000004 is 0.3).
         for (const [ref, cell] of Object.entries(sheet)) {
-          // (15 significant digits, as Excel keeps them: a formula's 0.30000000000000004 shows as 0.3.)
-          if (!ref.startsWith('!') && cell?.t === 'n' && cell.z === 'General' && Number.isFinite(cell.v)) cell.w = String(Number(cell.v.toPrecision(15)));
+          if (ref.startsWith('!') || cell?.t !== 'n' || !Number.isFinite(cell.v)) continue;
+          const full = String(Number(cell.v.toPrecision(15)));
+          const fmt = String(cell.z ?? 'General');
+          if (fmt === 'General' || (!XLSX.SSF.is_date(fmt) && !fmt.includes('%') && toNumber(String(cell.w ?? '')) !== Number(full))) cell.w = full;
         }
         const objs = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
         return { kind: 'table', table: tableFromObjects(file.name, objs) };
@@ -164,8 +168,10 @@ function readDelimited(name: string, text: string, delimiter: string): ParsedTab
  * commas, the column names in the first row.
  */
 export function parsePastedTable(text: string): ParsedTable {
-  // One column is fine too (e.g. a list of names under a heading).
-  return readDelimited('pasted', text.trim(), text.includes('\t') ? '\t' : '');
+  // One column is fine too (e.g. a list of names under a heading). Only blank lines are trimmed at either end:
+  // a leading tab is an empty first cell (e.g. an Excel header row whose first cell is blank).
+  const body = text.replace(/^(?:[ \t]*\r?\n)+/, '').replace(/(?:\r?\n[ \t]*)+$/, '');
+  return readDelimited('pasted', body, text.includes('\t') ? '\t' : '');
 }
 
 /** Guess which column holds the text: the one with the longest average content. */

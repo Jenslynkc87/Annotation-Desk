@@ -8,9 +8,10 @@ export interface IntervalJob {
   level: Level;
   allowed: string[];
   tolerance: number;
+  scaleSeen?: boolean;
 }
 
 self.onmessage = (e: MessageEvent<IntervalJob>) => {
-  const { a, b, level, allowed, tolerance } = e.data;
-  self.postMessage(agreement(a, b, level, allowed, tolerance).ci);
+  const { a, b, level, allowed, tolerance, scaleSeen } = e.data;
+  self.postMessage(agreement(a, b, level, allowed, tolerance, { scaleSeen }).ci);
 };

@@ -1,7 +1,7 @@
 // Builds the downloadable exports: Excel workbook, research repository, supplementary repository.
 import JSZip from 'jszip';
 import { getLogsForRun } from '../db';
-import { fmtStat } from '../metrics';
+import { fixed, fmtStat } from '../metrics';
 import { comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel } from '../prompt';
@@ -108,7 +108,7 @@ function settingsRows(study: Study, run: Run): Row[] {
     { setting: 'Thinking', value: m.provider === 'anthropic' ? thinkingLabel(m.model, m.reasoningSummary) : 'n/a (reasoning controlled by effort)' },
     { setting: 'Temperature', value: m.temperature ?? 'model default' },
     { setting: 'Max output tokens', value: m.maxOutputTokens },
-    { setting: 'Runs per text', value: o.replicates },
+    { setting: `Annotations per ${words(p).one}`, value: o.replicates },
     { setting: 'Prompt caching', value: cachingLabel(run) },
     { setting: 'Mode', value: run.mode === 'batch' ? 'Batch API' : 'immediate requests' },
     { setting: 'Prompt version', value: `v${run.snapshot.promptVersion} (${run.snapshot.promptHash})` },
@@ -346,6 +346,7 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
 }
 
 function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof supplementaryMetadata>, agr: ReturnType<typeof agreementForRun>, opts: SupplementaryOptions): string {
+  const w = words(run.snapshot.prompt);
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
@@ -360,8 +361,8 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| Effort / reasoning | ${meta.model.effort} |`,
     `| Temperature | ${meta.model.temperature} |`,
     `| Max output tokens | ${meta.model.max_output_tokens} |`,
-    `| Texts with a usable annotation | ${meta.corpus.n_texts_with_usable_labels} of ${meta.corpus.n_texts_in_run} |`,
-    `| Annotations per text | ${meta.options.replicates_per_text} |`,
+    `| ${w.Many} with a usable annotation | ${meta.corpus.n_texts_with_usable_labels} of ${meta.corpus.n_texts_in_run} |`,
+    `| Annotations per ${w.one} | ${meta.options.replicates_per_text} |`,
     `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed} |`,
     `| Annotation period | ${meta.requests.first_requested_at ?? '—'} to ${meta.requests.last_completed_at ?? '—'} |`,
     `| Prompt version / hash | v${meta.prompt.version} / \`${meta.prompt.sha256_prefix}\` |`,
@@ -369,7 +370,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   ];
   if (agr.length) {
     const ci = (x: [number, number] | null | undefined, pct = false) =>
-      x ? ` [${pct ? (x[0] * 100).toFixed(1) : x[0].toFixed(2)}, ${pct ? (x[1] * 100).toFixed(1) : x[1].toFixed(2)}]` : '';
+      x ? ` [${pct ? (x[0] * 100).toFixed(1) : fixed(x[0], 2)}, ${pct ? (x[1] * 100).toFixed(1) : fixed(x[1], 2)}]` : '';
     lines.push(
       '## Agreement with human labels',
       '',
@@ -384,7 +385,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     }
     lines.push(
       '',
-      'Brackets: 95% bootstrap intervals (2,000 resamples of texts). "Of labelled": texts with a human label; those without a usable model answer are not compared. Rows with a column name under Annotations compare two human label columns (human–human baseline).',
+      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). "Of labelled": ${w.many} with a human label; those without a usable model answer are not compared. Rows with a column name under Annotations compare two human label columns (human–human baseline).`,
       '',
     );
   }
@@ -400,15 +401,15 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '| File | Contents |',
     '|---|---|',
     '| `metadata.json` | Machine-readable record of model, settings, dates, counts and token use |',
-    '| `prompt/prompt.txt` | The prompt sent with each text; `{{text}}` marks where the text was inserted |',
+    `| \`prompt/prompt.txt\` | The prompt sent with each ${w.one}; \`{{text}}\` marks where ${w.one === 'entry' ? 'the entry’s details were' : 'the text was'} inserted |`,
     ...(run.snapshot.prompt.system.trim() ? ['| `prompt/system_prompt.txt` | System prompt sent with every request |'] : []),
     '| `prompt/output_schema.json` | JSON schema the responses had to follow |',
     '| `prompt/codebook.md`, `codebook.json` | Annotation fields, types and allowed values |',
-    `| \`results/results.csv\` | One row per text${opts.includeTexts ? ' (with text)' : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
+    `| \`results/results.csv\` | One row per ${w.one}${opts.includeTexts ? ` (with ${w.one === 'entry' ? 'its details' : 'text'})` : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
     '| `results/results_by_replicate.csv` | One row per request, with status, tokens and timing |',
   );
   if (agr.length) lines.push('| `results/agreement.csv` | Agreement statistics |');
-  if (opts.includeTexts) lines.push('| `data/corpus.csv` | The annotated texts and their metadata |');
+  if (opts.includeTexts) lines.push(`| \`data/corpus.csv\` | The annotated ${w.many} and their metadata |`);
   if (opts.includeLogs) lines.push('| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response |');
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
@@ -427,19 +428,20 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     'Hosted models may be updated or retired and generation is not fully deterministic, so a re-run may not reproduce every label exactly.',
     '',
   );
-  if (!opts.includeTexts) lines.push('The annotated texts are not included in this package (e.g. for copyright or privacy reasons).', '');
+  if (!opts.includeTexts) lines.push(`The annotated ${w.many} are not included in this package (e.g. for copyright or privacy reasons).`, '');
   return lines.join('\n');
 }
 
 function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefined, opts: ResearchOptions): string {
+  const w = words(d.study.prompt);
   const rows: [string, string][] = [
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
-    ['`study-backup.json`', 'Backup (settings, texts, runs, results; the request/response logs are under `runs/`), re-importable via Studies → Import study backup'],
-    ['`corpus/corpus.csv`, `corpus.jsonl`', 'All texts with metadata'],
+    ['`study-backup.json`', `Backup (settings, ${w.many}, runs, results; the request/response logs are under \`runs/\`), re-importable via Studies → Import study backup`],
+    ['`corpus/corpus.csv`, `corpus.jsonl`', `All ${w.many} with metadata`],
     ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), output schema, codebook'],
     ['`runs/run-NN/run.json`', 'Frozen run configuration (model, settings, prompt, exact shared request body)'],
     ['`runs/run-NN/results_long.csv`', 'One row per request: annotations, rationale, reasoning summary, status, tokens, timing'],
-    ['`runs/run-NN/results_wide.csv`', 'One row per text: aggregated annotations'],
+    ['`runs/run-NN/results_wide.csv`', `One row per ${w.one}: aggregated annotations`],
   ];
   if (opts.includeLogs) rows.push(['`runs/run-NN/requests.jsonl`, `responses.jsonl`', 'Every request body sent and every raw API response']);
   rows.push(
@@ -456,7 +458,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     '',
     `Complete record of this annotation study, exported from Annotation Desk ${__APP_VERSION__} on ${exportedAt}.`,
     '',
-    `- ${d.docs.length.toLocaleString('en-US')} texts, ${d.runs.length} run(s), ${d.results.length.toLocaleString('en-US')} model responses.`,
+    `- ${d.docs.length.toLocaleString('en-US')} ${w.many}, ${d.runs.length} run(s), ${d.results.length.toLocaleString('en-US')} model responses.`,
     '- API keys are never stored or exported.',
     '',
     '## Layout',
@@ -496,6 +498,7 @@ export async function buildComparisonReport(
 ): Promise<Blob> {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
+  const w = words(runA.snapshot.prompt);
   const viewsA = buildDocViews(docs, runs, results, runA.id);
   const viewsB = buildDocViews(docs, runs, results, runB.id);
   const keysB = new Set(comparableFields(runB, viewsB.values()).map((f) => f.key));
@@ -515,12 +518,12 @@ export async function buildComparisonReport(
       const y = normalizeLabel(fieldValue(runB, vb.values, f.key), f.yesNo);
       if (x && y) items.push({ doc: d, x, y });
     }
-    const all = agreement(items.map((i) => i.x), items.map((i) => i.y), f.level, f.allowed, tolerance);
+    const all = agreement(items.map((i) => i.x), items.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen });
     // Shared zeros ("no evaluation" from both runs) inflate agreement: also report texts where at least one run is non-zero.
     const zeroOnScale = all.meanDifference !== null && (f.allowed.includes('0') || items.some((i) => i.x === '0' || i.y === '0'));
     const nz = items.filter((i) => i.x !== '0' || i.y !== '0');
     // Only when some texts got 0 from both runs; otherwise the row would repeat the one above.
-    const nonZero = zeroOnScale && nz.length < items.length ? agreement(nz.map((i) => i.x), nz.map((i) => i.y), f.level, f.allowed, tolerance) : null;
+    const nonZero = zeroOnScale && nz.length < items.length ? agreement(nz.map((i) => i.x), nz.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen }) : null;
     return { f, items, all, nonZero };
   });
 
@@ -562,7 +565,7 @@ export async function buildComparisonReport(
     'Draft text',
     compared.map(({ f, all, nonZero }) => ({
       field: f.label,
-      draft_text: comparisonSentence(f.label, name(runA), name(runB), all, both.length) + (nonZero ? ' ' + nonZeroSentence(nonZero) : ''),
+      draft_text: comparisonSentence(f.label, name(runA), name(runB), all, both.length, w) + (nonZero ? ' ' + nonZeroSentence(nonZero, w) : ''),
     })),
   );
 
@@ -576,7 +579,6 @@ export async function buildComparisonReport(
     }
     return rationale ?? '';
   };
-  const firstRationale = (views: typeof viewsA, id: string) => views.get(id)?.results.find((r) => r.status === 'ok')?.rationale ?? '';
   const review = compared.flatMap(({ f, items, all }) =>
     items.map(({ doc, x, y }) => {
       const numeric = all.meanDifference !== null;
@@ -593,8 +595,8 @@ export async function buildComparisonReport(
         second: numeric ? Number(y) : y,
         difference: diff,
         category,
-        first_explanation: reasoningOf(runA, viewsA.get(doc.id)!.values, firstRationale(viewsA, doc.id), f.key),
-        second_explanation: reasoningOf(runB, viewsB.get(doc.id)!.values, firstRationale(viewsB, doc.id), f.key),
+        first_explanation: reasoningOf(runA, viewsA.get(doc.id)!.values, viewsA.get(doc.id)!.rationale, f.key),
+        second_explanation: reasoningOf(runB, viewsB.get(doc.id)!.values, viewsB.get(doc.id)!.rationale, f.key),
         // Sort by category, then by this column, to draw a reproducible random selection within a category.
         random: stableRandom(`${doc.meta.file ?? doc.docId}|${f.key}`),
         judgment: '',
@@ -615,7 +617,7 @@ export async function buildComparisonReport(
       compared.flatMap(({ f, items }) =>
         groups.map((g) => {
           const sub = items.filter((i) => (i.doc.meta[groupBy] ?? '') === g);
-          const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((i) => i.x), sub.map((i) => i.y), f.level, f.allowed, tolerance));
+          const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((i) => i.x), sub.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen }));
           return { field, [groupBy]: g || '(none)', ...rest, n_texts_in_both_runs: both.filter((d) => (d.meta[groupBy] ?? '') === g).length };
         }),
       ),
@@ -657,12 +659,12 @@ export async function buildComparisonReport(
   }
 
   addSheet(wb, 'Notes', [
-    { note: `First: ${name(runA)}. Second: ${name(runB)}. Texts compared: those annotated in both runs with a usable value for the field.` },
-    { note: `Exact agreement: share of texts with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
-    { note: '"At least one non-zero" rows repeat the statistics on texts where at least one run gave a score other than 0, because shared zeros inflate agreement.' },
+    { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those annotated in both runs with a usable value for the field.` },
+    { note: `Exact agreement: share of ${w.many} with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
+    { note: `"At least one non-zero" rows repeat the statistics on ${w.many} where at least one run gave a score other than 0, because shared zeros inflate agreement.` },
     { note: 'Weighted kappa (linear or quadratic weights over the codebook scale), Gwet\'s AC2 (linear weights) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories. AC1/AC2 stay stable when one score (e.g. 0) dominates, where kappa can drop sharply.' },
     { note: 'Mean difference = second minus first (positive: the second run scores higher on average). Mean absolute difference: average distance regardless of direction.' },
-    { note: 'Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of texts, fixed seed, so the same data gives the same interval).' },
+    { note: `Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of ${w.many}, fixed seed, so the same data gives the same interval).` },
     { note: 'Review sheet: every compared score, opposite directions first, then the largest differences. To draw at random within a category (e.g. 30 opposite-direction cases), sort by category and then by "random", and take the first rows; the numbers never change, so the draw is reproducible. The judgment and note columns are for your own labels.' },
     ...(groupBy ? [{ note: `"By ${groupBy}" sheet: the same figures per ${groupBy}; exploratory, as small groups give wide intervals.` }] : []),
   ]);
@@ -671,21 +673,21 @@ export async function buildComparisonReport(
 }
 
 const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)}%`);
-const num2 = (x: number | null) => (x === null ? '—' : x.toFixed(2));
+const num2 = (x: number | null) => (x === null ? '—' : fixed(x, 2));
 
 /** Draft sentence for a paper describing how well two runs agree on one field. */
-export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number): string {
-  if (!s.n) return `No texts had a usable value for ${label} in both runs.`;
+export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number, w = words({})): string {
+  if (!s.n) return `No ${w.many} had a usable value for ${label} in both runs.`;
   const ciP = (k: CiStat) => (s.ci[k] ? ` (95% CI ${pct(s.ci[k]![0])}–${pct(s.ci[k]![1])})` : '');
   const ciN = (k: CiStat) => (s.ci[k] ? ` [${num2(s.ci[k]![0])}, ${num2(s.ci[k]![1])}]` : '');
-  const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} texts annotated in both runs` : ''}`;
+  const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} ${w.many} annotated in both runs` : ''}`;
   if (s.meanDifference === null) {
-    return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}; Cohen's κ = ${num2(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+    return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}; Cohen's κ = ${num2(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   }
   const within = s.tolerance > 0 && s.withinTolerance !== null ? ` and scores within ${s.tolerance} point${s.tolerance === 1 ? '' : 's'} for ${pct(s.withinTolerance)}${ciP('withinTolerance')}` : '';
-  const serious = ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of texts${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`;
+  const serious = ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of ${w.many}${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`;
   const kappa = s.weightedKappaLinear !== null ? `linear-weighted κ = ${num2(s.weightedKappaLinear)}${ciN('weightedKappaLinear')}, ` : '';
-  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of texts${ciP('percentAgreement')}${within}; ${kappa}linear-weighted Gwet's AC2 = ${num2(s.gwetAC2Linear)}${ciN('gwetAC2Linear')}, Krippendorff's α (${s.level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}${within}; ${kappa}linear-weighted Gwet's AC2 = ${num2(s.gwetAC2Linear)}${ciN('gwetAC2Linear')}, Krippendorff's α (${s.level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   const d = s.meanDifference;
   const ci = s.ci.meanDifference;
   const shift =
@@ -696,7 +698,7 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
 }
 
 /** The same figures on texts where at least one run gave a non-zero score. */
-function nonZeroSentence(s: Agreement): string {
-  if (!s.n) return 'No text received a non-zero score from either run.';
-  return `On the ${s.n.toLocaleString('en-US')} texts where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)}, linear-weighted κ = ${num2(s.weightedKappaLinear)} and AC2 = ${num2(s.gwetAC2Linear)}.`;
+function nonZeroSentence(s: Agreement, w: ReturnType<typeof words>): string {
+  if (!s.n) return `No ${w.one} received a non-zero score from either run.`;
+  return `On the ${s.n.toLocaleString('en-US')} ${w.many} where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)}, linear-weighted κ = ${num2(s.weightedKappaLinear)} and AC2 = ${num2(s.gwetAC2Linear)}.`;
 }

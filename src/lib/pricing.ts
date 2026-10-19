@@ -40,7 +40,11 @@ const BUILT_IN: Record<string, Price> = {
   'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2 },
   'claude-opus-5': { input: 5, output: 25 },
   'claude-opus-4': { input: 5, output: 25 },
-  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.1 },
+  // Claude Opus 4 and 4.1 (and their dated ids) were priced higher than later Opus 4.x models.
+  'claude-opus-4-0': { input: 15, output: 75 },
+  'claude-opus-4-1': { input: 15, output: 75 },
+  'claude-opus-4-2025': { input: 15, output: 75 },
+  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.2 },
   'claude-sonnet-5': { input: 2, output: 10 },
   'claude-sonnet-4': { input: 3, output: 15 },
   'claude-haiku-5-5': { input: 0.1, output: 0.5, long: { over: 100_000, input: 0.5, output: 2.5 } },
@@ -114,10 +118,12 @@ export function charsPerToken(model: string): number {
   return 4;
 }
 
-/** Shortest fixed prompt part Anthropic will cache (shorter prefixes silently aren't cached). */
+/** Shortest fixed prompt part Anthropic will cache (shorter prefixes silently aren't cached), per its
+ *  prompt-caching documentation (checked October 2026). */
 function minCacheable(model: string): number {
-  if (/^claude-(fable|mythos)|^claude-opus-5/.test(model)) return 512;
-  if (/^claude-haiku-4-5/.test(model)) return 4096;
+  if (/^claude-(fable|mythos)|^claude-opus-5|^claude-(sonnet|haiku)-5-5/.test(model)) return 512;
+  if (/^claude-opus-4-7|^claude-haiku-3-5/.test(model)) return 2048;
+  if (/^claude-opus-4-[56]|^claude-haiku-4-5/.test(model)) return 4096;
   return 1024;
 }
 

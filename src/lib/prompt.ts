@@ -135,7 +135,8 @@ export function buildOutputSchema(p: PromptSpec): Record<string, unknown> | null
   if (p.includeRationale) {
     properties[RATIONALE_KEY] = {
       type: 'string',
-      description: 'Brief justification for the annotation, citing the text where relevant.',
+      // (Entries studies supply no text to cite.)
+      description: p.subject === 'entries' ? 'Brief justification for the annotation.' : 'Brief justification for the annotation, citing the text where relevant.',
     };
   }
   for (const v of p.variables) properties[v.name] = variableSchema(v);

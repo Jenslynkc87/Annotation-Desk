@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { importBackup } from '../lib/export/backup';
 import { createStudy, currentStudy, duplicateStudy, getState, isBusy, refreshStudies, removeStudy, selectStudy, toast, useStore } from '../lib/store';
+import { words } from '../lib/subject';
 import { errorMessage, fmtDateTime } from '../lib/util';
 import { Icon, Menu, Modal } from './ui';
 
@@ -10,6 +11,7 @@ export function StudyMenu() {
   // While a run is being sent or uploaded, the open study must stay open (and in place).
   const busy = useStore((s) => isBusy(s));
   const fileRef = useRef<HTMLInputElement>(null);
+  const w = words({ subject: current?.prompt.subject });
   const [choosing, setChoosing] = useState(false);
   const start = (subject?: 'entries') => {
     setChoosing(false);
@@ -70,7 +72,7 @@ export function StudyMenu() {
               Duplicate settings & prompt
             </button>
             <button className="menu-item" disabled={busy} onClick={() => (close(), void duplicateStudy(true))}>
-              Duplicate with texts
+              Duplicate with {w.many}
             </button>
             <button className="menu-item" disabled={busy} onClick={() => (close(), fileRef.current?.click())}>
               Import study backup (.json)…
@@ -87,7 +89,7 @@ export function StudyMenu() {
                 if (!cur) return;
                 const pending = s.runs.filter((r) => r.status === 'submitted').length;
                 const note = pending ? ` ${pending} batch${pending === 1 ? ' is' : 'es are'} still processing and will be cancelled.` : '';
-                if (confirm(`Delete "${cur.name}" with all ${s.docs.length} texts and ${s.runs.length} runs?${note} This cannot be undone.`)) {
+                if (confirm(`Delete "${cur.name}" with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
                   void removeStudy(cur.id);
                 }
               }}

@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react';
 import { drawStratifiedSample, SAMPLING_METHOD } from '../lib/sample';
-import { markSample, useStore } from '../lib/store';
+import { currentStudy, markSample, useStore } from '../lib/store';
+import { words } from '../lib/subject';
 import { Modal, NumberField } from './ui';
 
 /** Draw a stratified random sample (e.g. held-out validation texts) and mark it in a metadata column. */
 export function SampleDialog({ onClose }: { onClose: () => void }) {
   const docs = useStore((s) => s.docs);
+  const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
   const columns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const valuesOf = (c: string) => [...new Set(docs.map((d) => d.meta[c] ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   // Columns that group texts (era, journal, …): a few distinct values, not one per text.
@@ -38,7 +40,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const apply = async () => {
     const date = new Date().toISOString().slice(0, 10);
     const note =
-      `Sample ${column} = ${value} (${date}): ${r.ids.length} of ${r.eligible} texts drawn at random` +
+      `Sample ${column} = ${value} (${date}): ${r.ids.length} of ${r.eligible} ${w.many} drawn at random` +
       (strata.length ? ` within ${strata.join(' × ')} strata (proportional allocation, at least one per stratum)` : '') +
       (exclude ? `, excluding ${exclude.column} = ${exclude.value}` : '') +
       `; seed ${seed} (${SAMPLING_METHOD}).`;
@@ -55,19 +57,19 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={!r.ids.length || !column.trim() || !value.trim()} onClick={apply}>
-            Mark {r.ids.length} texts as {column} = {value}
+            Mark {r.ids.length} {r.ids.length === 1 ? w.one : w.many} as {column} = {value}
           </button>
         </>
       }
     >
       <p className="hint" style={{ marginTop: 0 }}>
-        Draws texts at random, in proportion to the size of each group, with at least one per group. The same seed always gives the same sample;
+        Draws {w.many} at random, in proportion to the size of each group, with at least one per group. The same seed always gives the same sample;
         the rule and seed are saved with the study. Afterwards, filter the list by {column} = {value}, choose Select → all shown, and run the
         selection.
       </p>
       <div className="grid2">
         <div className="field">
-          <label htmlFor="s-size">Number of texts</label>
+          <label htmlFor="s-size">Number of {w.many}</label>
           <NumberField id="s-size" className="input" min={1} value={size} onChange={setSize} />
         </div>
         <div className="field">
@@ -86,13 +88,13 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
               </label>
             ))
           ) : (
-            <span className="hint">No grouping columns yet (add era, journal, … with Add labels or metadata from a spreadsheet).</span>
+            <span className="hint">No grouping columns yet (add era, journal, … from a spreadsheet).</span>
           )}
         </div>
       </div>
       <div className="grid2">
         <div className="field">
-          <label htmlFor="s-excol">Leave out texts where</label>
+          <label htmlFor="s-excol">Leave out {w.many} where</label>
           <select id="s-excol" className="select" value={excludeCol} onChange={(e) => (setExcludeCol(e.target.value), setExcludeVal(''))}>
             <option value="">(leave nothing out)</option>
             {columns.filter((c) => valuesOf(c).length <= 200).map((c) => (
@@ -124,10 +126,10 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       </div>
       <div className="notice">
         <div>
-          {r.ids.length} of {r.eligible.toLocaleString()} eligible texts{strata.length ? `, from ${r.strata.length} groups` : ''}.
-          {types.length > 0 && <> File types: {types.map(([e, [n, k]]) => `${e} ${k} in the sample (${Math.round((100 * n) / Math.max(1, r.eligible))}% of eligible texts)`).join(', ')}.</>}
+          {r.ids.length} of {r.eligible.toLocaleString()} eligible {w.many}{strata.length ? `, from ${r.strata.length} groups` : ''}.
+          {types.length > 0 && <> File types: {types.map(([e, [n, k]]) => `${e} ${k} in the sample (${Math.round((100 * n) / Math.max(1, r.eligible))}% of eligible ${w.many})`).join(', ')}.</>}
         </div>
-        {already > 0 && <div>Replaces the {already} texts currently marked {column} = {value}.</div>}
+        {already > 0 && <div>Replaces the {already} {already === 1 ? w.one : w.many} currently marked {column} = {value}.</div>}
       </div>
       {strata.length > 0 && (
         <div className="table-wrap" style={{ maxHeight: 240, marginTop: 10 }}>
@@ -135,7 +137,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
             <thead>
               <tr>
                 <th>{strata.join(' · ')}</th>
-                <th className="num">Texts</th>
+                <th className="num">{w.Many}</th>
                 <th className="num">Drawn</th>
               </tr>
             </thead>

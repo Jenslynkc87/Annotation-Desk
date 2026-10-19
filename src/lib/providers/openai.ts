@@ -6,6 +6,9 @@ function client(apiKey: string) {
   return new OpenAI({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 4 });
 }
 
+/** Starting a batch is never sent twice: a repeat could start a second, paid batch. */
+const ONCE = { maxRetries: 0 };
+
 /**
  * GPT-5.6 and later have explicit prompt caching: with `prompt_cache_options.mode = "explicit"`
  * only developer-placed breakpoints are cached (none = no caching and no cache writes, which are
@@ -153,7 +156,8 @@ export const openaiAdapter: ProviderAdapter = {
 
   async send(apiKey, base, part, signal) {
     const params = { ...base, ...part } as unknown as OpenAI.Responses.ResponseCreateParamsNonStreaming;
-    const r = await client(apiKey).responses.create(params, { signal });
+    // 30 minutes rather than the SDK's 10: long reasoning at high effort can take longer, and a timeout is sent again (and paid again).
+    const r = await client(apiKey).responses.create(params, { signal, timeout: 1_800_000 });
     return toOutcome(r as unknown as ResponseLike);
   },
 
@@ -162,15 +166,21 @@ export const openaiAdapter: ProviderAdapter = {
     const jsonl = items
       .map((it) => JSON.stringify({ custom_id: it.customId, method: 'POST', url: '/v1/responses', body: { ...base, ...it.part } }))
       .join('\n');
-    const file = await c.files.create({
-      file: new File([jsonl], 'annotation-batch.jsonl', { type: 'application/jsonl' }),
-      purpose: 'batch',
-    });
-    const batch = await c.batches.create({
-      input_file_id: file.id,
-      endpoint: '/v1/responses',
-      completion_window: '24h',
-    });
+    const file = await c.files.create(
+      {
+        file: new File([jsonl], 'annotation-batch.jsonl', { type: 'application/jsonl' }),
+        purpose: 'batch',
+      },
+      { timeout: 3_600_000 }, // (a file sent twice costs nothing)
+    );
+    const batch = await c.batches.create(
+      {
+        input_file_id: file.id,
+        endpoint: '/v1/responses',
+        completion_window: '24h',
+      },
+      ONCE,
+    );
     return { batchId: batch.id, inputFileId: file.id };
   },
 

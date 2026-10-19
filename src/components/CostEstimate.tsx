@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { calibrate, estimateRun, fmtRange, fmtTokens, fmtUsd, PRICE_SOURCES, usePriceOverrides, type Part } from '../lib/pricing';
 import { currentStudy, promptFingerprint, useStore } from '../lib/store';
+import { words } from '../lib/subject';
 import { Icon } from './ui';
 
 type Scope = 'all' | 'selected' | 'remaining';
@@ -11,6 +12,7 @@ type Scope = 'all' | 'selected' | 'remaining';
  */
 export function CostEstimate({ selected, onClose }: { selected: Set<string>; onClose: () => void }) {
   const study = useStore((s) => currentStudy(s))!;
+  const w = words(study.prompt);
   const docs = useStore((s) => s.docs);
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
@@ -49,7 +51,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
   const remainingN = doneIds ? docs.filter((d) => !doneIds.has(d.id)).length : null;
   const tokens = (p: Part) => (p.basis === 'none' ? '0' : fmtRange(p.tokens, fmtTokens));
   const cost = (p: Part) => (p.basis === 'none' ? '—' : p.cost ? fmtRange(p.cost, fmtUsd) : '—');
-  const perText = (p: Part) => `${fmtRange({ low: p.tokens.low / Math.max(1, e.requests), high: p.tokens.high / Math.max(1, e.requests) }, fmtTokens)} tokens per text`;
+  const perText = (p: Part) => `${fmtRange({ low: p.tokens.low / Math.max(1, e.requests), high: p.tokens.high / Math.max(1, e.requests) }, fmtTokens)} tokens per ${w.one}`;
 
   return (
     <div className="estimate" role="region" aria-label="Cost estimate">
@@ -61,7 +63,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
           <div className="hint">
             {study.model.model}
             {e.effort !== 'none' && ` · ${e.effort} effort`} · {e.batch ? 'Batch (½ price)' : 'Now'}
-            {study.options.replicates > 1 && ` · ${e.texts.toLocaleString()} texts × ${study.options.replicates}`}
+            {study.options.replicates > 1 && ` · ${e.texts.toLocaleString()} ${w.many} × ${study.options.replicates}`}
           </div>
         </div>
         <button className="btn ghost small" onClick={onClose} aria-label="Close cost estimate">
@@ -89,7 +91,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
       </div>
       {e.tooLong.length > 0 && (
         <div className="hint warn" style={{ marginTop: 4 }}>
-          {e.tooLong.length} text{e.tooLong.length === 1 ? ' is' : 's are'} probably too long for this model; those requests will most likely fail but are still counted.
+          {e.tooLong.length} {e.tooLong.length === 1 ? `${w.one} is` : `${w.many} are`} probably too long for this model; those requests will most likely fail but are still counted.
         </div>
       )}
 
@@ -106,7 +108,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
             </thead>
             <tbody>
               <tr>
-                <td>Input (prompt + text)</td>
+                <td>Input (prompt + {w.one})</td>
                 <td className="num">{tokens(e.input)}</td>
                 <td className="num">{cost(e.input)}</td>
               </tr>
@@ -124,7 +126,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
           </table>
           <ul className="estimate-notes hint">
             <li>
-              <strong>Input:</strong> characters of the prompt, output schema and each text, divided by{' '}
+              <strong>Input:</strong> characters of the prompt, output schema and each {w.one}, divided by{' '}
               {e.input.basis === 'measured'
                 ? `${e.charsPerToken.toFixed(2)} characters per token, measured on ${cal.inputN.toLocaleString()} earlier result${cal.inputN === 1 ? '' : 's'} with this model (±5%).`
                 : `about ${e.charsPerToken} characters per token, a rule of thumb for English with this model’s tokenizer (−15% to +20%). It is replaced by a measured figure once this model has results in the study.`}
@@ -141,7 +143,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
                 ? 'none: this model runs without reasoning at this setting.'
                 : e.reasoning.basis === 'measured'
                   ? `average of ${cal.reasoningN.toLocaleString()} earlier result${cal.reasoningN === 1 ? '' : 's'} with this model at ${e.effort} effort (−20% to +30%). Billed as output.`
-                  : `assumed for ${e.effort} effort: ${perText(e.reasoning)}. This is the least certain part; Test on 1 text or a small random sample replaces it with a measured figure. Billed as output.`}
+                  : `assumed for ${e.effort} effort: ${perText(e.reasoning)}. This is the least certain part; Test on 1 ${w.one} or a small random sample replaces it with a measured figure. Billed as output.`}
             </li>
             <li>
               <strong>Cache savings:</strong>{' '}
@@ -151,7 +153,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
             </li>
             {e.batch && (
               <li>
-                <strong>Batch:</strong> half price applied to everything. Test on 1 text and Random sample always run now, at full price.
+                <strong>Batch:</strong> half price applied to everything. Test on 1 {w.one} and Random sample always run now, at full price.
               </li>
             )}
             <li>
@@ -165,7 +167,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
               · Checked {src.checked}
               {src.note && ` (${src.note})`}.
             </li>
-            <li>No paid API calls are made to estimate cost: it is worked out in your browser from text lengths, the codebook and earlier results in this study.</li>
+            <li>No paid API calls are made to estimate cost: it is worked out in your browser from {w.one} lengths, the codebook and earlier results in this study.</li>
           </ul>
         </div>
       </details>

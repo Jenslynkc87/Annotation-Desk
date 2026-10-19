@@ -19,6 +19,10 @@ export function App() {
   const [tab, setTab] = useState<Tab>('workbench');
   const [keysOpen, setKeysOpen] = useState(false);
   const keyCount = Object.values(keys).filter(Boolean).length;
+  // A key that was set but failed its check (e.g. 401) should not look fine in the top bar.
+  const modelsStatus = useStore((s) => s.modelsStatus);
+  const modelsError = useStore((s) => s.modelsError);
+  const failing = (Object.keys(keys) as (keyof typeof keys)[]).filter((p) => keys[p] && modelsStatus[p] === 'error');
   // Closing or reloading the tab stops a run that is being sent (or a batch being uploaded): ask first.
   const busy = useStore((s) => isBusy(s));
   useEffect(() => {
@@ -49,7 +53,13 @@ export function App() {
           {ready && <StudyMenu />}
           <button className="btn" onClick={() => setKeysOpen(true)}>
             <Icon name="key" /> API keys
-            <span className={`badge ${keyCount ? 'ok' : 'warn'}`}>{keyCount ? `${keyCount} set` : 'none'}</span>
+            {failing.length ? (
+              <span className="badge err" title={failing.map((p) => modelsError[p]).join(' ')}>
+                check failed
+              </span>
+            ) : (
+              <span className={`badge ${keyCount ? 'ok' : 'warn'}`}>{keyCount ? `${keyCount} set` : 'none'}</span>
+            )}
           </button>
           <span className="save-status" title="Studies, texts and results are stored in this browser (IndexedDB).">
             <Icon name="check" size={14} /> {saving ? 'Saving…' : 'Saved in this browser'}

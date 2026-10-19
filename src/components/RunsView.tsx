@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { agreement, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
+import { agreement, fixed, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
 import { comparableFields, fieldValue } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
-import { effectiveTemplate, normalizeLabel, outputFields } from '../lib/prompt';
+import { effectiveTemplate, normalizeLabel, outputFields, toNumber } from '../lib/prompt';
 import { cachingLabel, goldColumnsFor } from '../lib/export/tables';
 import { batchParts, cancelBatch, checkBatch, currentStudy, deleteRunById, getState, isBusy, renameRun, retryableCount, retryFailed, toast, useStore } from '../lib/store';
 import type { Run } from '../lib/types';
@@ -25,6 +25,8 @@ export function RunsView() {
   const results = useStore((s) => s.results);
   const docs = useStore((s) => s.docs);
   const busy = useStore((s) => isBusy(s));
+  // While batches are being uploaded (a new run or a retry), runs are not deleted: the upload adds to its run.
+  const uploading = useStore((s) => !!s.submitting);
   const [inspect, setInspect] = useState<Run | null>(null);
   const sorted = [...runs].reverse();
 
@@ -135,11 +137,12 @@ export function RunsView() {
                           )}
                           <button
                             className="btn small danger"
-                            disabled={r.status === 'running'}
+                            disabled={r.status === 'running' || uploading}
                             onClick={async () => {
                               const pending = r.status === 'submitted' ? ' The batch is still running at the provider and will be cancelled.' : '';
                               if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending} This cannot be undone.`)) return;
-                              if (pending) await cancelBatch(r.id);
+                              // A batch that could not be cancelled would go on (and be charged) with nowhere to deliver its results.
+                              if (pending && !(await cancelBatch(r.id))) return;
                               await deleteRunById(r.id);
                             }}
                           >
@@ -184,7 +187,7 @@ export function RunsView() {
             <dt>App version</dt>
             <dd>{inspect.snapshot.appVersion}</dd>
           </dl>
-          <p className="section-title" style={{ marginTop: 16 }}>Prompt (sent with each text)</p>
+          <p className="section-title" style={{ marginTop: 16 }}>Prompt (sent with each {words(inspect.snapshot.prompt).one})</p>
           <pre className="textblock">{effectiveTemplate(inspect.snapshot.prompt.userTemplate, inspect.snapshot.prompt.subject)}</pre>
           {inspect.snapshot.prompt.system.trim() && (
             <>
@@ -288,10 +291,10 @@ function AgreementPanel() {
       }
     }
     // The figures at once; the 95% intervals (several seconds on a full corpus) follow from a background worker.
-    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, false), nLabelled, xs, ys };
+    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, { withIntervals: false, scaleSeen: cf?.scaleSeen }), nLabelled, xs, ys };
   }, [a, b, f, level, yesNo, tolerance, docs, runs, results]);
   // What the intervals depend on: unchanged when results arrive for other runs (e.g. while a run is going).
-  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance }), [xs, ys, level, cf, tolerance]);
+  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance, scaleSeen: cf?.scaleSeen }), [xs, ys, level, cf, tolerance]);
   const jobKey = useMemo(() => JSON.stringify(job), [job]);
   const [intervals, setIntervals] = useState<{ key: string; ci: Agreement['ci'] } | null>(null);
   useEffect(() => {
@@ -371,9 +374,14 @@ function AgreementPanel() {
     }
   };
   const srcB = decode(b);
-  // A metadata column where (almost) every row is different is an identifier, not a set of labels.
-  const bDistinct = srcB?.kind === 'meta' ? new Set(docs.map((d) => d.meta[srcB.col] ?? '')).size : 0;
-  const looksLikeIds = srcB?.kind === 'meta' && docs.length >= 5 && bDistinct > docs.length * 0.7;
+  // A metadata column where (almost) every row is different is an identifier, not a set of labels. (Not in fewer
+  // than 30 rows, e.g. a small pilot whose scores all differ, and not numbers compared as numbers, e.g. 0–100.)
+  const bValues = srcB?.kind === 'meta' ? docs.map((d) => d.meta[srcB.col] ?? '') : [];
+  const looksLikeIds =
+    srcB?.kind === 'meta' &&
+    docs.length >= 30 &&
+    new Set(bValues).size > docs.length * 0.7 &&
+    !(level === 'interval' && bValues.every((v) => v.trim() === '' || Number.isFinite(toNumber(v))));
   const showMatrix = !isFreeText && !looksLikeIds && stats.categories.length > 1 && stats.categories.length <= 12;
 
   return (
@@ -453,13 +461,13 @@ function AgreementPanel() {
         </div>
       ) : looksLikeIds ? (
         <div className="notice warn" style={{ marginTop: 6 }}>
-          "{srcB?.kind === 'meta' ? srcB.col : ''}" looks like an identifier (nearly every text has a different value), not a set of labels. Choose the column that
+          "{srcB?.kind === 'meta' ? srcB.col : ''}" looks like an identifier (nearly every {w.one} has a different value), not a set of labels. Choose the column that
           holds your human labels.
         </div>
       ) : !b ? (
-        <div className="hint">Choose what to compare with. To compare with human labels, import them as a column alongside your texts.</div>
+        <div className="hint">Choose what to compare with. To compare with human labels, import them as a column alongside your {w.many}.</div>
       ) : stats.n === 0 ? (
-        <div className="notice warn">No texts have a value in both sources for "{f}".</div>
+        <div className="notice warn">No {w.many} have a value in both sources for "{f}".</div>
       ) : (
         <>
           {stats.leftOut.n > 0 && (
@@ -469,7 +477,7 @@ function AgreementPanel() {
               {stats.leftOut.values.length === 5 ? ', …' : ''}.
             </div>
           )}
-          <Glance stats={stats} noun={w.one} />
+          <Glance stats={stats} w={w} />
           <p className="section-title" style={{ marginTop: 18 }}>Agreement statistics</p>
           <div className="stat-grid" style={{ marginTop: 6 }}>
             <Stat k={`${w.Many} compared`} v={fmtInt(stats.n)} sub={`of ${fmtInt(nLabelled)} with a value in the second source`} />
@@ -528,11 +536,12 @@ function AgreementPanel() {
   );
 }
 
-const plural = (n: number, word: string) => `${fmtInt(n)} ${word}${n === 1 ? '' : 's'}`;
+type Words = ReturnType<typeof words>;
+const plural = (n: number, w: Words) => `${fmtInt(n)} ${n === 1 ? w.one : w.many}`;
 const share = (n: number, total: number) => `${Math.round((n / Math.max(1, total)) * 100)}%`;
 
-/** Plain-language summary: how many texts got the same answer, how far apart the others are, and the commonest mix-ups. */
-function Glance({ stats, noun }: { stats: Agreement; noun: string }) {
+/** Plain-language summary: how many texts (entries) got the same answer, how far apart the others are, and the commonest mix-ups. */
+function Glance({ stats, w }: { stats: Agreement; w: Words }) {
   const n = stats.n;
   const g = stats.gaps;
   const same = g ? g.same : Math.round((stats.percentAgreement ?? 0) * n);
@@ -561,10 +570,10 @@ function Glance({ stats, noun }: { stats: Agreement; noun: string }) {
     <div className="glance">
       <p className="section-title" style={{ marginTop: 6 }}>At a glance</p>
       <p className="glance-head">
-        <strong>{plural(same, noun)}</strong> ({share(same, n)}) got the same answer from both sides
+        <strong>{plural(same, w)}</strong> ({share(same, n)}) got the same answer from both sides
         {diff > 0 ? (
           <>
-            ; <strong>{plural(diff, noun)}</strong> ({share(diff, n)}) got different answers.
+            ; <strong>{plural(diff, w)}</strong> ({share(diff, n)}) got different answers.
           </>
         ) : (
           '.'
@@ -585,12 +594,12 @@ function Glance({ stats, noun }: { stats: Agreement; noun: string }) {
       {g && diff > 0 && (
         <ul className="glance-list">
           <li>
-            When they differ, the “Compared with” side gives the <strong>higher</strong> value in {plural(higher, noun)} and the <strong>lower</strong> value in{' '}
-            {plural(lower, noun)}.
+            When they differ, the “Compared with” side gives the <strong>higher</strong> value in {plural(higher, w)} and the <strong>lower</strong> value in{' '}
+            {plural(lower, w)}.
           </li>
           {stats.oppositeDirection !== null && stats.midpoint !== null && (
             <li>
-              In {plural(Math.round(stats.oppositeDirection * n), 'text')} ({share(Math.round(stats.oppositeDirection * n), n)}) the two land on opposite sides of the middle of the scale ({stats.midpoint}), i.e. they
+              In {plural(Math.round(stats.oppositeDirection * n), w)} ({share(Math.round(stats.oppositeDirection * n), n)}) the two land on opposite sides of the middle of the scale ({stats.midpoint}), i.e. they
               disagree about the direction, not just the degree.
             </li>
           )}
@@ -601,7 +610,7 @@ function Glance({ stats, noun }: { stats: Agreement; noun: string }) {
           <li className="glance-title">Most common mix-ups (Annotations → Compared with):</li>
           {mixups.map((m) => (
             <li key={`${m.a}|${m.b}`}>
-              “{m.a}” where the other side says “{m.b}”: <strong>{plural(m.n, 'text')}</strong>
+              “{m.a}” where the other side says “{m.b}”: <strong>{plural(m.n, w)}</strong>
             </li>
           ))}
         </ul>
@@ -613,7 +622,7 @@ function Glance({ stats, noun }: { stats: Agreement; noun: string }) {
 /** "95% CI 0.71–0.86" (percentages for percent agreement); empty when there are too few texts. */
 function formatCi(ci: [number, number] | null | undefined, pct = false): string {
   if (!ci) return '';
-  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : x.toFixed(2));
+  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : fixed(x, 2));
   return `95% CI ${f(ci[0])}–${f(ci[1])}`;
 }
 

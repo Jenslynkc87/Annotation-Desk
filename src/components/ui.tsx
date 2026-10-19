@@ -1,7 +1,22 @@
 import { useEffect, useRef, useState, type InputHTMLAttributes, type ReactNode } from 'react';
 
-export function Modal({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
-  useEscape(onClose);
+export function Modal({
+  title,
+  onClose,
+  children,
+  footer,
+  wide,
+  confirmEscape,
+}: {
+  title: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+  wide?: boolean;
+  /** Asked before Escape closes the dialog (e.g. when it holds pasted text). */
+  confirmEscape?: string;
+}) {
+  useEscape(() => (!confirmEscape || confirm(confirmEscape)) && onClose());
   // Dialogs with a footer hold something being entered (pasted text, choices): a stray click beside them doesn't discard it.
   return (
     <div className="overlay" onMouseDown={(e) => !footer && e.target === e.currentTarget && onClose()}>
@@ -94,8 +109,13 @@ export function Menu({ button, children, align = 'right' }: { button: (open: () 
   useEffect(() => {
     if (!open) return;
     const h = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
     document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
+    document.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('mousedown', h);
+      document.removeEventListener('keydown', esc);
+    };
   }, [open]);
   return (
     <div className="menu" ref={ref}>

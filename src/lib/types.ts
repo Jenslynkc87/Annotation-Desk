@@ -143,6 +143,8 @@ export interface BatchPart {
   status: 'submitted' | 'collected' | 'failed';
   lastStatus: string;
   error?: string;
+  /** When it was sent (older runs: the run's start). */
+  submittedAt?: string;
 }
 
 export interface Usage {

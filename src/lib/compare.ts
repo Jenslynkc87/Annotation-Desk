@@ -1,6 +1,6 @@
 // Which fields of a run agreement can be computed on, and their values per text.
 import type { Level } from './metrics';
-import { fieldLabel, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY } from './prompt';
+import { fieldLabel, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from './prompt';
 import type { Run } from './types';
 import type { DocView } from './view';
 
@@ -10,10 +10,10 @@ export interface ComparableField {
   level: Level;
   /** The codebook's allowed values (normalized), so statistics use the whole scale. */
   allowed: string[];
+  /** Plain-text runs: `allowed` is the range of values seen, not a codebook scale (see `agreement`). */
+  scaleSeen?: boolean;
   yesNo: boolean;
 }
-
-const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
 /**
  * Structured runs: the codebook fields (free-text fields excluded). Plain-text runs whose answers are JSON:
@@ -39,17 +39,18 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
     if (!flat) continue;
     for (const [k, v] of Object.entries(flat)) if (v.trim() !== '') values.set(k, [...(values.get(k) ?? []), v]);
   }
+  // A field of scores, even if a few answers are not numbers (e.g. "NA", left out and reported by `agreement`).
   return [...values.entries()]
-    .filter(([, vs]) => vs.every(isNum))
-    .map(([key, vs]) => {
-      const nums = vs.map(Number);
+    .map(([key, vs]) => [key, vs.map(toNumber).filter(Number.isFinite)] as const)
+    .filter(([key, nums]) => nums.length > 0 && nums.length >= (values.get(key)?.length ?? 0) / 2)
+    .map(([key, nums]) => {
       const ordinal = nums.every(Number.isInteger);
       // Whole-number scores: the scale is every value from the lowest to the highest seen, so weighted κ measures
       // distances on the scale even where a value (e.g. −2) was never used. (No codebook says what the scale is.)
       const lo = Math.min(...nums);
       const hi = Math.max(...nums);
       const allowed = ordinal && hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [];
-      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, yesNo: false };
+      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, yesNo: false };
     });
 }
 

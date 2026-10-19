@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/prompt';
 import { batchPlan, cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
@@ -103,6 +103,12 @@ function TextsAndResults() {
   const pendingBatches = runs.filter((r) => r.status === 'submitted');
   const reps = study.options.replicates;
 
+  // Texts deleted (e.g. with Delete all) leave the selection, so "Selected" never counts texts that are gone.
+  useEffect(() => {
+    const present = new Set(docs.map((d) => d.id));
+    setSelected((s) => ([...s].every((id) => present.has(id)) ? s : new Set([...s].filter((id) => present.has(id)))));
+  }, [docs]);
+
   const toggle = (id: string) =>
     setSelected((s) => {
       const n = new Set(s);
@@ -147,7 +153,7 @@ function TextsAndResults() {
         : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length} ${w.many} × ${reps} runs)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length.toLocaleString()} ${w.many} × ${reps} annotations)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
     );
   };
 
@@ -219,7 +225,7 @@ function TextsAndResults() {
                 </button>
               </span>
               {selected.size > 0 && (
-                <button className="btn" disabled={busy} onClick={() => runDocs(docs.filter((d) => selected.has(d.id)), `Selected texts (${selected.size})`, false)}>
+                <button className="btn" disabled={busy} onClick={() => runDocs(docs.filter((d) => selected.has(d.id)), `Selected ${w.many} (${selected.size})`, false)}>
                   Selected ({selected.size})
                 </button>
               )}
@@ -398,7 +404,13 @@ function TextsAndResults() {
                   const v = views.get(d.id)!;
                   const gold = compareCol ? d.meta[compareCol] ?? '' : '';
                   return (
-                    <tr key={d.id} className={`clickable ${selected.has(d.id) ? 'selected' : ''}`} onClick={() => setOpenDoc(d.id)}>
+                    <tr
+                      key={d.id}
+                      className={`clickable ${selected.has(d.id) ? 'selected' : ''}`}
+                      tabIndex={0}
+                      onClick={() => setOpenDoc(d.id)}
+                      onKeyDown={(e) => e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), setOpenDoc(d.id))}
+                    >
                       <td onClick={(e) => e.stopPropagation()}>
                         <input type="checkbox" className="cbx" aria-label={`Select ${d.docId}`} checked={selected.has(d.id)} onChange={() => toggle(d.id)} />
                       </td>
@@ -415,7 +427,7 @@ function TextsAndResults() {
                               // One badge per failed text, not one per column.
                               i === 0 && <span className="badge err">failed</span>
                             ) : (
-                              <span className={`val ${cmp}`} title={v.consistency[f] !== undefined ? `${Math.round(v.consistency[f] * 100)}% of runs agree` : undefined}>
+                              <span className={`val ${cmp}`} title={v.consistency[f] !== undefined ? `${Math.round(v.consistency[f] * 100)}% of the annotations agree` : undefined}>
                                 {f === 'response' ? <span className="snippet" style={{ fontWeight: 400 }}>{val}</span> : val || (v.status === 'none' ? '' : '—')}
                                 {v.consistency[f] !== undefined && v.consistency[f] < 1 && <span className="badge warn" style={{ marginLeft: 6 }}>{Math.round(v.consistency[f] * 100)}%</span>}
                               </span>
@@ -438,7 +450,7 @@ function TextsAndResults() {
                 })}
               </tbody>
             </table>
-            {!pageDocs.length && <div className="empty">No texts match.</div>}
+            {!pageDocs.length && <div className="empty">No {w.many} match.</div>}
           </div>
           <div className="pager">
             <span>

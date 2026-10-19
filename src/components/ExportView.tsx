@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { comparableFields } from '../lib/compare';
 import { buildBackup } from '../lib/export/backup';
 import { buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from '../lib/export/packages';
 import { goldColumnsFor } from '../lib/export/tables';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
-import { runTitle } from '../lib/view';
+import { words } from '../lib/subject';
+import { buildDocViews, runTitle } from '../lib/view';
 import { Icon } from './ui';
 
 function exportData(): ExportData {
@@ -34,11 +36,14 @@ export function ExportView() {
     }
   };
 
-  const gold =
-    run && run.snapshot.prompt.outputMode === 'structured'
-      ? run.snapshot.prompt.variables.filter((v) => v.type !== 'text').flatMap((v) => goldColumnsFor(v.name, docs).map((c) => `${v.name} ↔ ${c}`))
-      : [];
+  // The label columns agreement is computed for (as in the exports: codebook fields, or scores in JSON answers).
+  const gold = useMemo(() => {
+    if (!run) return [];
+    const views = run.snapshot.prompt.outputMode === 'text' ? buildDocViews(docs, runs, results, run.id).values() : [];
+    return comparableFields(run, views).flatMap((f) => goldColumnsFor(f.key, docs).map((c) => `${f.label} ↔ ${c}`));
+  }, [run, docs, runs, results]);
   const study = currentStudy(getState())!;
+  const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
 
   return (
     <div className="stack">
@@ -67,7 +72,7 @@ export function ExportView() {
           <div className="card-head">
             <h2>Excel workbook</h2>
           </div>
-          <p className="hint">Results for the chosen run, one row per text, plus per-replicate results, agreement, settings and a run overview.</p>
+          <p className="hint">Results for the chosen run, one row per {w.one}, plus per-replicate results, agreement, settings and a run overview.</p>
           <button
             className="btn primary export-btn"
             disabled={!run || !!busy}
@@ -115,8 +120,8 @@ export function ExportView() {
           <label className="check">
             <input type="checkbox" checked={supp.includeTexts} onChange={(e) => setSupp({ ...supp, includeTexts: e.target.checked })} />
             <span>
-              Include the texts
-              <div className="hint">Off by default: check copyright and privacy before sharing texts publicly.</div>
+              Include the {w.many}
+              <div className="hint">Off by default: check copyright and privacy before sharing {w.many} publicly.</div>
             </span>
           </label>
           <label className="check">
@@ -126,7 +131,7 @@ export function ExportView() {
             <input type="checkbox" checked={supp.includeLogs} onChange={(e) => setSupp({ ...supp, includeLogs: e.target.checked })} />
             <span>
               Include raw request/response logs
-              <div className="hint">These contain the texts.</div>
+              <div className="hint">These contain the {w.many}.</div>
             </span>
           </label>
           <button
@@ -148,7 +153,7 @@ export function ExportView() {
         <div className="row">
           <div className="grow">
             <strong>Study backup</strong>
-            <div className="hint">A single .json file with settings, texts, runs and results. Import it on another computer or browser via Studies → Import.</div>
+            <div className="hint">A single .json file with settings, {w.many}, runs and results. Import it on another computer or browser via Studies → Import.</div>
           </div>
           <button
             className="btn"

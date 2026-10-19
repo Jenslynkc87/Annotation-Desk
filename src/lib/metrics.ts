@@ -309,8 +309,17 @@ function scaleMidpoint(scale: number[], observed: number[]): number | null {
 /**
  * `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`.
  * `withIntervals` false: leave out the bootstrap intervals (the slow part), e.g. to show the figures first.
+ * `scaleSeen`: `allowed` is only the range of values seen (no codebook scale), so it sets the weights but not
+ * the scale's midpoint (which decides "opposite direction").
  */
-export function agreement(a: string[], b: string[], level: Level, allowed: string[] = [], tolerance = 1, withIntervals = true): Agreement {
+export function agreement(
+  a: string[],
+  b: string[],
+  level: Level,
+  allowed: string[] = [],
+  tolerance = 1,
+  { withIntervals = true, scaleSeen = false }: { withIntervals?: boolean; scaleSeen?: boolean } = {},
+): Agreement {
   let pairs: [string, string][] = [];
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
     if (a[i] !== '' && b[i] !== '' && a[i] !== undefined && b[i] !== undefined) pairs.push([a[i], b[i]]);
@@ -336,7 +345,7 @@ export function agreement(a: string[], b: string[], level: Level, allowed: strin
   for (const [x, y] of pairs) confusion[x][y]++;
   const scale = numeric ? allowed.filter(isNum) : [];
   const alphaLevel = numeric ? level : 'nominal';
-  const midpoint = numeric ? scaleMidpoint(scale.map(Number), [...xs, ...ys]) : null;
+  const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : scale.map(Number), [...xs, ...ys]) : null;
   const stats = {
     percentAgreement,
     cohenKappa: (p: [string, string][]) => cohenKappa(p),
@@ -408,8 +417,13 @@ export function aggregate(values: string[], method: Aggregation): string {
   return top.length === 1 ? top[0] : top.sort().join(' | ');
 }
 
+/** A number to `digits` decimals, without a minus sign on zero (a tiny negative such as −1e-17 is "0.000", not "-0.000"). */
+export function fixed(x: number, digits: number): string {
+  return x.toFixed(digits).replace(/^-(0(\.0+)?)$/, '$1');
+}
+
 export function fmtStat(x: number | null, digits = 3): string {
-  return x === null || Number.isNaN(x) ? '—' : x.toFixed(digits);
+  return x === null || Number.isNaN(x) ? '—' : fixed(x, digits);
 }
 
 export function fmtPct(x: number | null): string {

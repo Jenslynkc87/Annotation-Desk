@@ -3,7 +3,7 @@ import * as dbApi from './db';
 import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
 import { describeApiError, isPermanentError, provider } from './providers';
 import { rejectsTemperature } from './providers/anthropic';
-import type { BatchLine, CallOutcome, ModelInfo } from './providers/types';
+import type { BatchLine, BatchStatus, CallOutcome, ModelInfo } from './providers/types';
 import { ZERO_USAGE } from './providers/types';
 import {
   DEFAULT_MODEL_SETTINGS,
@@ -246,7 +246,9 @@ export async function duplicateStudy(withCorpus: boolean) {
 export async function removeStudy(id: string) {
   if (isBusy()) return toast('Finish or cancel the running job first.', 'error');
   // Batches still processing would keep running (and be charged) with nowhere to deliver their results.
-  for (const r of id === state.currentId ? state.runs : []) if (r.status === 'submitted') await cancelBatch(r.id);
+  for (const r of id === state.currentId ? state.runs : []) {
+    if (r.status === 'submitted' && !(await cancelBatch(r.id))) return toast('The study was not deleted, so the batch’s results can still be collected.', 'error');
+  }
   await dbApi.deleteStudy(id);
   const studies = state.studies.filter((s) => s.id !== id);
   set({ studies });
@@ -313,7 +315,8 @@ export async function addLabels(updates: Map<string, Record<string, string>>) {
   await dbApi.putDocs(changed);
   const byId = new Map(changed.map((d) => [d.id, d]));
   set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
-  toast(`Added labels to ${changed.length} text${changed.length === 1 ? '' : 's'}.`, 'success');
+  const w = words(currentStudy()!.prompt);
+  toast(`Added columns to ${changed.length} ${changed.length === 1 ? w.one : w.many}.`, 'success');
 }
 
 /**
@@ -335,7 +338,8 @@ export async function markSample(column: string, value: string, ids: string[], n
   const byId = new Map(changed.map((d) => [d.id, d]));
   set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
   updateStudy((s) => void (s.description = `${s.description.trim() ? s.description.trim() + '\n' : ''}${note}`));
-  toast(`Marked ${ids.length} text${ids.length === 1 ? '' : 's'} as ${column} = ${value} (seed ${seed}). The rule and seed are in the Excel Settings sheet and the supplementary metadata.`, 'success');
+  const w = words(currentStudy()!.prompt);
+  toast(`Marked ${ids.length} ${ids.length === 1 ? w.one : w.many} as ${column} = ${value} (seed ${seed}). The rule and seed are in the Excel Settings sheet and the supplementary metadata.`, 'success');
 }
 
 export async function removeDocs(ids: string[]) {
@@ -469,7 +473,12 @@ function incompleteMessage(rawText: string, stopReason: string): string {
   return `${rawText ? 'Incomplete answer' : 'Empty response'} (stop reason: ${stopReason})`;
 }
 
-async function saveRun(run: Run) {
+/** Store a run. Its name is kept as stored (it may have been renamed while the run was going), unless renaming. */
+async function saveRun(run: Run, rename = false) {
+  if (!rename) {
+    const stored = await dbApi.getRun(run.id);
+    if (stored) run.label = stored.label;
+  }
   await dbApi.putRun(run);
   // The study may have been switched while a batch was being collected: only the open study's runs are in view.
   if (state.currentId !== run.studyId) return;
@@ -505,7 +514,7 @@ export async function startRun(req: RunRequest): Promise<void> {
   const key = state.keys[st.model.provider];
   if (!key) return toast(`Add your ${provider(st.model.provider).label} API key first (API keys, top right).`, 'error');
   if (!st.model.model) return toast('Choose a model first.', 'error');
-  if (!req.docIds.length) return toast('No texts in this selection.', 'error');
+  if (!req.docIds.length) return toast(`No ${words(st.prompt).many} in this selection.`, 'error');
   if (st.prompt.outputMode === 'structured' && !st.prompt.variables.length) {
     return toast('Add at least one output field, or switch the output to plain text.', 'error');
   }
@@ -609,7 +618,8 @@ export function batchPlan(st: Study, docs: Doc[]): { mb: number; batches: number
 /** The batches of a batch run (older runs have one, recorded only as `batchId`). */
 export function batchParts(run: Run): BatchPart[] {
   if (!run.batch) return [];
-  return run.batch.parts ?? [{ batchId: run.batch.batchId, inputFileId: run.batch.inputFileId, status: run.status === 'submitted' ? 'submitted' : 'collected', lastStatus: run.batch.lastStatus }];
+  const status = run.status === 'submitted' ? 'submitted' : run.status === 'failed' ? 'failed' : 'collected';
+  return run.batch.parts ?? [{ batchId: run.batch.batchId, inputFileId: run.batch.inputFileId, status, lastStatus: run.batch.lastStatus }];
 }
 
 /**
@@ -627,7 +637,7 @@ async function submitBatches(run: Run, key: string, items: BatchItem[], map: Rec
     set({ submitting: `Uploading ${which} (${group.length.toLocaleString()} request${group.length === 1 ? '' : 's'}) to ${adapter.label}…` });
     try {
       const h = await adapter.submitBatch(key, snapshot.requestBase, group);
-      parts.push({ batchId: h.batchId, inputFileId: h.inputFileId, status: 'submitted', lastStatus: 'submitted' });
+      parts.push({ batchId: h.batchId, inputFileId: h.inputFileId, status: 'submitted', lastStatus: 'submitted', submittedAt: nowIso() });
     } catch (e) {
       const rest = sent ? ` The ${sent} already submitted continue; send the rest with Retry failed when ${sent === 1 ? 'it has' : 'they have'} finished.` : '';
       toast(`Submitting ${which} failed: ${describeApiError(e)}.${rest}`, 'error');
@@ -815,7 +825,7 @@ export async function deleteRunById(runId: string) {
 export async function renameRun(runId: string, label: string) {
   const run = state.runs.find((r) => r.id === runId);
   if (!run) return;
-  await saveRun({ ...run, label });
+  await saveRun({ ...run, label }, true);
 }
 
 // ---------- batches ----------
@@ -825,6 +835,8 @@ const checking = new Set<string>();
 export async function checkBatch(runId: string, quiet = false) {
   const run = state.runs.find((r) => r.id === runId);
   if (!run?.batch || run.status !== 'submitted' || checking.has(runId)) return;
+  // Batches being uploaded (e.g. a retry of this run) are added to the run as they go up: check after that.
+  if (state.submitting) return;
   const key = state.keys[run.batch.provider];
   if (!key) {
     if (!quiet) toast(`Add your ${provider(run.batch.provider).label} key to check this batch.`, 'error');
@@ -836,9 +848,18 @@ export async function checkBatch(runId: string, quiet = false) {
     const parts = batchParts(run).map((p) => ({ ...p }));
     const counts = { ok: 0, failed: 0 };
     const errors: string[] = [];
+    let lookupError = '';
     for (const p of parts) {
       if (p.status !== 'submitted') continue;
-      const st = await adapter.checkBatch(key, p.batchId);
+      let st: BatchStatus;
+      try {
+        st = await adapter.checkBatch(key, p.batchId);
+      } catch (e) {
+        // One batch that can't be read now doesn't hold up the others; it is checked again next time.
+        lookupError = describeApiError(e);
+        p.lastStatus = `could not be checked (${lookupError})`;
+        continue;
+      }
       p.lastStatus = `${st.status} · ${st.completed + st.failed}/${st.total}`;
       if (!st.done) continue;
       let lines: BatchLine[];
@@ -851,27 +872,37 @@ export async function checkBatch(runId: string, quiet = false) {
         lines = [];
         p.error = `A batch ended with status "${st.status}" and its results could not be collected: ${describeApiError(e)}`;
       }
-      const c = await storeBatchResults(run, lines);
+      if (!(await dbApi.getRun(runId))) break; // deleted meanwhile
+      const c = await storeBatchResults(run, lines, p.submittedAt ?? run.createdAt);
       counts.ok += c.ok;
       counts.failed += c.failed;
       p.status = lines.length ? 'collected' : 'failed';
       if (!lines.length) p.error ??= `A batch ended with status "${st.status}" and returned no results.`;
       if (p.error) errors.push(p.error);
     }
-    const waiting = parts.filter((p) => p.status === 'submitted');
+    // Saved onto the run as it is now: it may have been renamed meanwhile, or deleted (its results then go too).
+    const latest = await dbApi.getRun(runId);
+    if (!latest?.batch) {
+      await dbApi.deleteRun(runId);
+      set((s) => ({ results: s.results.filter((r) => r.runId !== runId) }));
+      return;
+    }
+    const merged = batchParts(latest).map((p) => parts.find((q) => q.batchId === p.batchId) ?? p);
+    const waiting = merged.filter((p) => p.status === 'submitted');
     const lastStatus = waiting.map((p) => p.lastStatus).join('; ') || 'ended';
-    const updated: Run = { ...run, batch: { ...run.batch, parts, lastStatus, lastCheckedAt: nowIso() } };
+    const updated: Run = { ...latest, batch: { ...latest.batch, parts: merged, lastStatus, lastCheckedAt: nowIso() } };
     if (!waiting.length) {
       // Every batch is in. The run failed only if no batch returned anything.
-      updated.status = parts.some((p) => p.status === 'collected') ? 'completed' : 'failed';
+      updated.status = merged.some((p) => p.status === 'collected') ? 'completed' : 'failed';
       updated.finishedAt = nowIso();
-      updated.error = errors.length ? errors.join(' ') : null;
+      const allErrors = merged.map((p) => p.error).filter((x): x is string => !!x);
+      updated.error = allErrors.length ? allErrors.join(' ') : null;
       const mine = state.currentId === run.studyId ? state.results.filter((r) => r.runId === run.id) : null;
       const ok = mine ? mine.filter((r) => r.status === 'ok').length : counts.ok;
       const failed = mine ? mine.length - ok : counts.failed;
       toast(updated.status === 'failed' ? `Batch run #${run.number}: ${updated.error}` : `Batch run #${run.number} finished: ${ok} ok, ${failed} failed.`, failed || errors.length ? 'error' : 'success');
     } else if (!quiet) {
-      toast(`Batch run #${run.number}: ${lastStatus}.`);
+      toast(`Batch run #${run.number}: ${lastStatus}.`, lookupError ? 'error' : undefined);
     }
     await saveRun(updated);
   } catch (e) {
@@ -881,7 +912,7 @@ export async function checkBatch(runId: string, quiet = false) {
   }
 }
 
-async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: number; failed: number }> {
+async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: string): Promise<{ ok: number; failed: number }> {
   // Read the run's own texts (not the open study's): the user may switch studies while results are collected.
   const docsById = new Map((await dbApi.getDocsForStudy(run.studyId)).map((d) => [d.id, d]));
   const adapter = provider(run.snapshot.model.provider);
@@ -892,7 +923,7 @@ async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: nu
     if (!ref) continue;
     const doc = docsById.get(ref[0]);
     if (!doc) continue; // text deleted since submission
-    const result = makeResult(run, doc, ref[1], run.createdAt, line.ok ? line.outcome : null, line.ok ? null : line.error, null);
+    const result = makeResult(run, doc, ref[1], requestedAt, line.ok ? line.outcome : null, line.ok ? null : line.error, null);
     const part = adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc, run.snapshot.prompt.subject), run.snapshot.options, run.snapshot.model.model);
     const log: ResultLog = {
       id: result.id,
@@ -912,15 +943,22 @@ async function storeBatchResults(run: Run, lines: BatchLine[]): Promise<{ ok: nu
   return counts;
 }
 
-export async function cancelBatch(runId: string) {
+/** Ask the provider to stop a run's unfinished batches. False if any of them could not be cancelled. */
+export async function cancelBatch(runId: string): Promise<boolean> {
   const run = state.runs.find((r) => r.id === runId);
-  if (!run?.batch) return;
-  try {
-    for (const p of batchParts(run)) if (p.status === 'submitted') await provider(run.batch.provider).cancelBatch(state.keys[run.batch.provider], p.batchId);
-    toast('Cancellation requested. Results finished before cancelling will still be collected.');
-  } catch (e) {
-    toast(`Could not cancel: ${errorMessage(e)}`, 'error');
+  if (!run?.batch) return true;
+  const failures: string[] = [];
+  for (const p of batchParts(run)) {
+    if (p.status !== 'submitted') continue;
+    try {
+      await provider(run.batch.provider).cancelBatch(state.keys[run.batch.provider], p.batchId);
+    } catch (e) {
+      failures.push(describeApiError(e));
+    }
   }
+  if (failures.length) toast(`Could not cancel ${failures.length === 1 ? 'a batch' : `${failures.length} batches`}: ${failures[0]}`, 'error');
+  else toast('Cancellation requested. Results finished before cancelling will still be collected.');
+  return !failures.length;
 }
 
 let polling = false;

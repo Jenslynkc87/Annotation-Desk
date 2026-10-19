@@ -14,6 +14,9 @@ function client(apiKey: string) {
   return new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 4 });
 }
 
+/** Uploading a batch (up to 256 MB) may take a while; never sent twice, since a repeat could start a second, paid batch. */
+const UPLOAD = { timeout: 3_600_000, maxRetries: 0 };
+
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
@@ -154,12 +157,15 @@ export const anthropicAdapter: ProviderAdapter = {
   },
 
   async submitBatch(apiKey, base, items) {
-    const batch = await client(apiKey).messages.batches.create({
-      requests: items.map((it) => ({
-        custom_id: it.customId,
-        params: { ...base, ...it.part } as unknown as Anthropic.MessageCreateParamsNonStreaming,
-      })),
-    });
+    const batch = await client(apiKey).messages.batches.create(
+      {
+        requests: items.map((it) => ({
+          custom_id: it.customId,
+          params: { ...base, ...it.part } as unknown as Anthropic.MessageCreateParamsNonStreaming,
+        })),
+      },
+      UPLOAD,
+    );
     return { batchId: batch.id };
   },
 

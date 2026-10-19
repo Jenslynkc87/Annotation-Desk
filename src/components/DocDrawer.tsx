@@ -103,11 +103,18 @@ export function DocDrawer({
           Source: {doc.source}
         </div>
         {Object.keys(doc.meta).length > 0 && (
-          <dl className="kv" style={{ marginTop: 10 }}>
-            {Object.entries(doc.meta).map(([k, v]) => (
-              <FragmentKV key={k} k={k} v={v} />
-            ))}
-          </dl>
+          <>
+            {w.one === 'entry' && (
+              <p className="section-title" style={{ marginTop: 12 }}>
+                All columns (the model sees only the details above)
+              </p>
+            )}
+            <dl className="kv" style={{ marginTop: 10 }}>
+              {Object.entries(doc.meta).map(([k, v]) => (
+                <FragmentKV key={k} k={k} v={v} />
+              ))}
+            </dl>
+          </>
         )}
       </section>
     </Drawer>
@@ -204,7 +211,7 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
             <div className="hint">No log stored for this result.</div>
           ) : (
             <>
-              <p className="section-title" style={{ marginTop: 12 }}>Request (shared part + this text)</p>
+              <p className="section-title" style={{ marginTop: 12 }}>Request (shared part + this {words(run.snapshot.prompt).one})</p>
               <RequestView request={{ ...run.snapshot.requestBase, ...log.requestPart }} />
               <p className="section-title" style={{ marginTop: 12 }}>Response</p>
               <pre className="textblock mono">{JSON.stringify(log.response, null, 2)}</pre>

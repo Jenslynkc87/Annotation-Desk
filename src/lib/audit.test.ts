@@ -1,7 +1,8 @@
 // Tests for fixes from the October 2026 audit.
 import { describe, expect, it } from 'vitest';
 import { comparableFields } from './compare';
-import { goldColumnsFor, resultsWide } from './export/tables';
+import { pyStr } from './export/python';
+import { agreementForRun, goldColumnsFor, resultsLong, resultsWide } from './export/tables';
 import { agreement } from './metrics';
 import { buildOutputSchema, normalizeLabel, toNumber } from './prompt';
 import { groupForBatches, incompleteAnswer } from './store';
@@ -52,7 +53,7 @@ describe('plain-text JSON answers annotated more than once', () => {
     expect(cols).toEqual(['race', 'race_explanation', 'gender', 'gender_explanation']);
   });
   it('weighs plain-text scores on the whole scale between the lowest and highest value', () => {
-    const views = ['-3', '-1', '0', '3'].map((x) => ({ run: run, results: [], values: { response: `{"s": ${x}}` }, consistency: {}, status: 'ok' as const }));
+    const views = ['-3', '-1', '0', '3'].map((x) => ({ run: run, results: [], values: { response: `{"s": ${x}}` }, consistency: {}, rationale: '', status: 'ok' as const }));
     expect(comparableFields(run, views)[0].allowed).toEqual(['-3', '-2', '-1', '0', '1', '2', '3']);
   });
 });
@@ -113,5 +114,55 @@ describe('batches over the provider’s limit', () => {
     expect(groupForBatches('anthropic', [1e6, 2e6])).toEqual([[0, 1]]);
     // OpenAI: 200 MB per batch, so 2 × 100 MB no longer fit together with the margin.
     expect(groupForBatches('openai', [100e6, 100e6])).toEqual([[0], [1]]);
+  });
+});
+
+describe('second audit (Oct 2026)', () => {
+  const text = { ...DEFAULT_PROMPT, outputMode: 'text' as const };
+  it('exports agreement for the scores in plain-text JSON answers, as the app shows it', () => {
+    const run = mkRun(text);
+    const results = [mkResult(1, { response: '{"race": 2, "explanation": "x"}' })];
+    const rows = agreementForRun(run, [doc({ race_gold: '2' })], [run], results);
+    expect(rows.map((r) => [r.field, r.compared_with, r.stats.n])).toEqual([['race', 'race_gold', 1]]);
+  });
+  it('treats a JSON field of scores with a stray "NA" as scores', () => {
+    const views = ['1', '2', '"NA"', '3'].map((x) => ({ run: mkRun(text), results: [], values: { response: `{"s": ${x}}` }, consistency: {}, rationale: '', status: 'ok' as const }));
+    const f = comparableFields(mkRun(text), views);
+    expect(f.map((x) => [x.key, x.level, x.scaleSeen])).toEqual([['s', 'ordinal', true]]);
+  });
+  it('does not take the midpoint of the values seen as the scale’s midpoint', () => {
+    // Scores 0–3 seen, no codebook: 1 vs 3 is not "opposite direction" (the scale may well be −3…3).
+    const a = ['1', '3', '0', '2'];
+    const b = ['3', '1', '0', '2'];
+    const allowed = ['0', '1', '2', '3'];
+    expect(agreement(a, b, 'ordinal', allowed).oppositeDirection).toBe(0.5);
+    expect(agreement(a, b, 'ordinal', allowed, 1, { scaleSeen: true }).oppositeDirection ?? null).toBeNull();
+  });
+  it('takes the explanation and rationale written with the combined category', () => {
+    const p = {
+      ...DEFAULT_PROMPT,
+      includeRationale: true,
+      variables: [
+        { name: 'stance', type: 'category' as const, values: ['for', 'against'], description: '' },
+        { name: 'stance_explanation', type: 'text' as const, values: [], description: '' },
+      ],
+    };
+    const rs = [mkResult(1, { stance: 'for', stance_explanation: 'pro' }), mkResult(2, { stance: 'against', stance_explanation: 'contra' }), mkResult(3, { stance: 'against', stance_explanation: 'also contra' })];
+    rs.forEach((r, i) => (r.rationale = `rationale ${i + 1}`));
+    const v = buildDocViews([doc()], [mkRun(p, 3)], rs, 'r').get('d1')!;
+    expect([v.values.stance, v.values.stance_explanation, v.rationale]).toEqual(['against', 'contra', 'rationale 2']);
+  });
+  it('gives a field named like one of the table’s own columns its own column', () => {
+    const p = { ...DEFAULT_PROMPT, variables: [{ name: 'status', type: 'category' as const, values: ['active', 'retired'], description: '' }] };
+    const run = mkRun(p);
+    const r = { ...mkResult(1, { status: 'retired' }), error: null };
+    const long = resultsLong({ name: 'S' } as never, [run], [doc()], [r], { rationale: false, reasoning: false })[0];
+    expect([long.status, long.answer_status]).toEqual(['ok', 'retired']);
+    const json = resultsLong({ name: 'S' } as never, [mkRun(text)], [doc()], [mkResult(1, { response: '{"error": 1, "rationale": "why"}' })], { rationale: true, reasoning: false })[0];
+    expect([json.error, json.answer_error, json.answer_rationale]).toEqual(['', 1, 'why']);
+  });
+  it('writes any text as a Python literal that reads back the same', () => {
+    expect(pyStr('a\r\nb')).toBe('"""a\\r\nb"""');
+    expect(pyStr('"""\n"""')).toBe('"""\\"""\n\\"\\"\\""""');
   });
 });

@@ -1,5 +1,6 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
+import { comparableFields, fieldValue, type ComparableField } from '../compare';
 import { agreement, type Agreement, type Level } from '../metrics';
 import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
@@ -32,6 +33,20 @@ export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
   }));
 }
 
+/**
+ * The results tables' own columns. A codebook field or JSON value with one of these names gets an "answer_"
+ * prefix (e.g. answer_status), so it neither overwrites nor is overwritten by the table's own column.
+ */
+const OWN_COLUMNS = new Set([
+  'doc_id', 'file', 'text', 'study', 'run', 'run_label', 'prompt_version', 'prompt_hash', 'provider', 'model_requested', 'model_reported',
+  'replicate', 'status', 'rationale', 'reasoning_summary', 'parse_error', 'error', 'stop_reason', 'input_tokens', 'output_tokens',
+  'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'latency_ms', 'requested_at', 'completed_at', 'response_id', 'n_ok', 'n_error',
+  TEXT_RESPONSE_KEY,
+]);
+const answerColumn = (k: string) => (OWN_COLUMNS.has(k) ? `answer_${k}` : k);
+/** A run's output field as a column name (the raw answer of a plain-text run keeps its own "response" column). */
+const fieldColumn = (run: Run, f: string) => (run.snapshot.prompt.outputMode === 'text' && f === TEXT_RESPONSE_KEY ? f : answerColumn(f));
+
 /** Free-text runs that answered with JSON get one extra column per value; the raw response column stays. */
 function jsonColumns(run: Run, response: string | undefined): Row {
   if (run.snapshot.prompt.outputMode !== 'text') return {};
@@ -54,7 +69,7 @@ function jsonColumns(run: Run, response: string | undefined): Row {
     for (const m of sorted) if (scoreOf(m) === k) place(m);
   };
   for (const k of sorted) if (scoreOf(k) === null) place(k);
-  return Object.fromEntries(keys.map((k) => [k, numify(flat[k])]));
+  return Object.fromEntries(keys.map((k) => [answerColumn(k), numify(flat[k])]));
 }
 
 /** Numbers as numbers (so Excel can sort and sum them); anything else unchanged.
@@ -109,7 +124,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       replicate: r.replicate,
       status: r.status,
     };
-    for (const f of outputFields(run.snapshot.prompt)) row[f] = isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
+    for (const f of outputFields(run.snapshot.prompt)) row[fieldColumn(run, f)] = isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
     Object.assign(row, jsonColumns(run, r.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale) row.rationale = r.rationale;
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
@@ -145,13 +160,13 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
     const row: Row = { doc_id: d.docId };
     if (opts.text) row.text = d.text;
     for (const f of fields) {
-      row[f] = isNumericVar(run, f) ? numify(v.values[f]) : (v.values[f] ?? '');
+      row[fieldColumn(run, f)] = isNumericVar(run, f) ? numify(v.values[f]) : (v.values[f] ?? '');
       // (Plain-text answers are combined value by value, so a share of identical answers says nothing.)
       if (reps > 1 && run.snapshot.prompt.outputMode === 'structured') row[`${f}_agreement_across_runs`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
     }
     Object.assign(row, jsonColumns(run, v.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale && run.snapshot.prompt.includeRationale && run.snapshot.prompt.outputMode === 'structured') {
-      row.rationale = v.results.find((r) => r.status === 'ok')?.rationale ?? '';
+      row.rationale = v.rationale; // the one written with the combined labels
     }
     // Metadata (including any human labels) after the annotations; prefixed if a name collides.
     for (const c of cols) row[c in row ? `meta_${c}` : c] = numify(d.meta[c]);
@@ -184,61 +199,54 @@ export function goldColumnsFor(field: string, docs: Doc[]): string[] {
   });
 }
 
-export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: Result[], extra: { field: string; column: string }[] = []): AgreementRow[] {
+export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: Result[]): AgreementRow[] {
   const views = buildDocViews(docs, allRuns, results, run.id);
   const out: AgreementRow[] = [];
-  const pairs: { field: string; column: string }[] = [];
-  if (run.snapshot.prompt.outputMode === 'structured') {
-    // Free-text fields (e.g. explanations) have no agreement to compute: every answer is its own category.
-    for (const v of run.snapshot.prompt.variables) if (v.type !== 'text') for (const c of goldColumnsFor(v.name, docs)) pairs.push({ field: v.name, column: c });
-  }
-  for (const e of extra) if (!pairs.some((p) => p.field === e.field && p.column === e.column)) pairs.push(e);
+  // The fields agreement can be computed on: codebook fields (free text excluded: every answer is its own
+  // category), or the numeric scores in plain-text JSON answers. Each with the label columns named after it.
+  const fields = comparableFields(run, views.values());
+  const pairs = fields.flatMap((f) => goldColumnsFor(f.key, docs).map((column) => ({ field: f.key, column })));
   const inRun = new Set(run.docIds);
-  const setup = (field: string) => {
-    const variable = run.snapshot.prompt.variables.find((v) => v.name === field);
-    const level: Level = variable?.type === 'ordinal' ? 'ordinal' : variable?.type === 'number' ? 'interval' : 'nominal';
-    const allowed = variable && (variable.type === 'category' || variable.type === 'ordinal') ? variable.values.map((x) => normalizeLabel(x)).filter(Boolean) : [];
-    return { level, allowed, yesNo: variable?.type === 'boolean' };
-  };
+  const setup = (field: string) => fields.find((f) => f.key === field)!;
+  const stats = (xs: string[], ys: string[], f: ComparableField) => agreement(xs, ys, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen });
   for (const { field, column } of pairs) {
-    const { level, allowed, yesNo } = setup(field);
+    const f = setup(field);
     const xs: string[] = [];
     const ys: string[] = [];
     let nLabelled = 0;
     for (const d of docs) {
-      const y = normalizeLabel(d.meta[column], yesNo);
+      const y = normalizeLabel(d.meta[column], f.yesNo);
       if (!y || !inRun.has(d.id)) continue;
       nLabelled++;
       const v = views.get(d.id)!;
-      const x = normalizeLabel(v.values[field], yesNo);
+      const x = normalizeLabel(fieldValue(run, v.values, field), f.yesNo);
       if (v.status !== 'none' && x) {
         xs.push(x);
         ys.push(y);
       }
     }
-    out.push({ field, source: 'model', compared_with: column, level, stats: agreement(xs, ys, level, allowed), nLabelled });
+    out.push({ field, source: 'model', compared_with: column, level: f.level, stats: stats(xs, ys, f), nLabelled });
   }
   // Human–human baseline: two label columns for the same field (e.g. stance_gold and stance_coder2).
-  const fields = [...new Set(pairs.map((p) => p.field))];
-  for (const field of fields) {
+  for (const field of new Set(pairs.map((p) => p.field))) {
     const cols = pairs.filter((p) => p.field === field).map((p) => p.column);
-    const { level, allowed, yesNo } = setup(field);
+    const f = setup(field);
     for (let i = 0; i < cols.length; i++)
       for (let j = i + 1; j < cols.length; j++) {
         const xs: string[] = [];
         const ys: string[] = [];
         let nLabelled = 0;
         for (const d of docs) {
-          const y = normalizeLabel(d.meta[cols[j]], yesNo);
+          const y = normalizeLabel(d.meta[cols[j]], f.yesNo);
           if (!y) continue;
           nLabelled++;
-          const x = normalizeLabel(d.meta[cols[i]], yesNo);
+          const x = normalizeLabel(d.meta[cols[i]], f.yesNo);
           if (x) {
             xs.push(x);
             ys.push(y);
           }
         }
-        out.push({ field, source: cols[i], compared_with: cols[j], level, stats: agreement(xs, ys, level, allowed), nLabelled });
+        out.push({ field, source: cols[i], compared_with: cols[j], level: f.level, stats: stats(xs, ys, f), nLabelled });
       }
   }
   return out;
