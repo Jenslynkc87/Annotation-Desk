@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -141,6 +141,37 @@ describe('exported script', () => {
     const doc = { docId: 'Niels Bohr', text: 'name: Niels Bohr\nborn: 1885', meta: {} };
     expect(out).toEqual({ ...run.snapshot.requestBase, ...anthropicAdapter.buildRequestPart(renderMessageParts(prompt.userTemplate, doc, 'entries'), run.snapshot.options, run.snapshot.model.model) });
     expect(JSON.stringify(out)).toContain('<entry>');
+  });
+
+  it('runs with an odd study name, a field named like its own columns, and a plain source column', () => {
+    if (!hasPython()) return;
+    const prompt: PromptSpec = {
+      ...promptPlain,
+      userTemplate: 'Rate {{meta.source}}.',
+      variables: [{ name: 'status', type: 'category', values: ['active', 'retired'], description: '' }],
+    };
+    const { study, run } = makeRun('anthropic', prompt);
+    study.name = 'C:\\New """odd"""\nname\\';
+    run.label = 'ends with "';
+    const dir = mkdtempSync(join(tmpdir(), 'annot-'));
+    writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
+    // The owner's own CSV: a plain "source" column (corpus.csv from the app would have meta_source).
+    writeFileSync(join(dir, 'corpus.csv'), 'doc_id,text,source\na1,Some text,Journal X\n');
+    const dry = JSON.parse(execFileSync('python3', ['-I', join(dir, 'annotate.py'), join(dir, 'corpus.csv'), '--dry-run']).toString());
+    expect(JSON.stringify(dry)).toContain('"text":"Journal X.');
+    const code = [
+      'import sys, importlib.util',
+      'spec = importlib.util.spec_from_file_location("annotate", sys.argv[1])',
+      'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)',
+      'm.make_client = lambda: None',
+      `m.call_model = lambda client, body: ('{"rationale": "why", "status": "retired"}', "", "claude", "end_turn", {}, {})`,
+      'sys.argv = ["annotate.py", sys.argv[2], "--out", sys.argv[3], "--log", sys.argv[4]]',
+      'm.main()',
+    ].join('\n');
+    execFileSync('python3', ['-I', '-c', code, join(dir, 'annotate.py'), join(dir, 'corpus.csv'), join(dir, 'out.csv'), join(dir, 'log.jsonl')], { stdio: 'pipe' });
+    const [header, first] = readFileSync(join(dir, 'out.csv'), 'utf8').trim().split(/\r?\n/).map((l) => l.split(','));
+    const row = Object.fromEntries(header.map((h, i) => [h, first[i]]));
+    expect([row.status, row.answer_status, row.rationale]).toEqual(['ok', 'retired', 'why']);
   });
 
   it('template keeps placeholders; filled script has none left', () => {

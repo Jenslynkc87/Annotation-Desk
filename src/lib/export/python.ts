@@ -39,6 +39,9 @@ export function pyStr(s: string): string {
   return `"""${body}"""`;
 }
 
+/** Text for a line of the script's opening docstring, where a backslash, """ or a line break would break the script. */
+const docLine = (s: string) => s.replace(/\\/g, '\\\\').replace(/"""/g, "'''").replace(/\r?\n/g, ' ');
+
 /** JSON value -> Python literal (True/False/None), pretty-printed. */
 export function pyLiteral(v: unknown, indent = 0): string {
   const pad = '    '.repeat(indent);
@@ -141,7 +144,7 @@ def message_parts(row, doc_id, text):
         if key.startswith("meta."):
             col = key[5:]
             # corpus.csv renames metadata columns that clash with its own (e.g. source -> meta_source).
-            if col in ("doc_id", "text", "n_characters", "source"):
+            if col in ("doc_id", "text", "n_characters", "source") and "meta_" + col in row:
                 col = "meta_" + col
             return str(row.get(col, "") or "")
         return m.group(0)
@@ -315,9 +318,11 @@ def main():
 
     client = make_client()
     extra = ["rationale"] if OUTPUT_SCHEMA and "rationale" in OUTPUT_SCHEMA.get("properties", {}) else []
-    columns = ["doc_id", "replicate", "status", *FIELDS, *extra, "parse_error", "error", "model_reported",
-               "stop_reason", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-               "latency_s", "completed_at"]
+    own = ["doc_id", "replicate", "status", "parse_error", "error", "model_reported", "stop_reason", "input_tokens",
+           "output_tokens", "cache_read_tokens", "cache_write_tokens", "latency_s", "completed_at"]
+    # As in Annotation Desk's exports: a field named like one of these columns is written as answer_<name>.
+    column_of = {f: "answer_" + f if f in own else f for f in FIELDS}
+    columns = [*own[:3], *column_of.values(), *extra, *own[3:]]
     with open(args.out, "w", newline="", encoding="utf-8") as out, open(args.log, "a", encoding="utf-8") as log:
         writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
@@ -331,7 +336,7 @@ def main():
                 try:
                     text, summary, model, stop, usage, raw = call_model(client, body)
                     values, parse_error = parse_output(text)
-                    record.update(values)
+                    record.update({column_of.get(k, k): v for k, v in values.items()})
                     record.update(usage)
                     # As in Annotation Desk: a cut-off, refused, empty or unreadable answer counts as failed.
                     incomplete = stop not in ("", "end_turn", "stop_sequence", "completed")
@@ -363,8 +368,8 @@ export function scriptValues(study: Study, run: Run, exportedAt: string): Record
   const provider = run.snapshot.model.provider;
   return {
     APP_VERSION: run.snapshot.appVersion,
-    STUDY_NAME: study.name.replace(/"""/g, "'''"),
-    RUN_DESCRIPTION: `#${run.number}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}; exported ${exportedAt}`,
+    STUDY_NAME: docLine(study.name),
+    RUN_DESCRIPTION: docLine(`#${run.number}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}; exported ${exportedAt}`),
     API_KEY_ENV: provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY',
     PROVIDER: JSON.stringify(provider),
     MODEL: JSON.stringify(run.snapshot.model.model),

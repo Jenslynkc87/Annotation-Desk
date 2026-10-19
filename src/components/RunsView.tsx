@@ -130,7 +130,14 @@ export function RunsView() {
                               <button className="btn small" onClick={() => checkBatch(r.id)}>
                                 Check
                               </button>
-                              <button className="btn small" onClick={() => confirm('Cancel this batch at the provider?') && cancelBatch(r.id)}>
+                              <button
+                                className="btn small"
+                                onClick={async () => {
+                                  if (!confirm('Cancel this batch at the provider?')) return;
+                                  const why = await cancelBatch(r.id);
+                                  toast(why || 'Cancellation requested. Results finished before cancelling will still be collected.', why ? 'error' : 'info');
+                                }}
+                              >
                                 Cancel
                               </button>
                             </>
@@ -141,8 +148,9 @@ export function RunsView() {
                             onClick={async () => {
                               const pending = r.status === 'submitted' ? ' The batch is still running at the provider and will be cancelled.' : '';
                               if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending} This cannot be undone.`)) return;
-                              // A batch that could not be cancelled would go on (and be charged) with nowhere to deliver its results.
-                              if (pending && !(await cancelBatch(r.id))) return;
+                              // A batch that could not be cancelled would go on (and be charged) with nowhere to deliver its results: ask.
+                              const why = pending ? await cancelBatch(r.id) : '';
+                              if (why && !confirm(`${why}\n\nDelete run #${r.number} anyway? A batch still running at the provider may be charged, and its results can't be collected here.`)) return;
                               await deleteRunById(r.id);
                             }}
                           >

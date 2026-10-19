@@ -278,7 +278,8 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   const base = baseName(table.name);
   const idOf = (r: Record<string, string>, i: number) => String(r[idCol || autoId] ?? '').trim() || `${base}_${i + 1}`;
   const ids = rows.map(idOf);
-  const repeated = ids.filter((x, i) => ids.indexOf(x) !== i);
+  const seen = new Set<string>();
+  const repeated = ids.filter((x) => seen.has(x) || (seen.add(x), false));
   const add = async () => {
     const docs = rows.map((r, i) => {
       return {

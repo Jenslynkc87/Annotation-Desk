@@ -247,7 +247,8 @@ export async function removeStudy(id: string) {
   if (isBusy()) return toast('Finish or cancel the running job first.', 'error');
   // Batches still processing would keep running (and be charged) with nowhere to deliver their results.
   for (const r of id === state.currentId ? state.runs : []) {
-    if (r.status === 'submitted' && !(await cancelBatch(r.id))) return toast('The study was not deleted, so the batch’s results can still be collected.', 'error');
+    const why = r.status === 'submitted' ? await cancelBatch(r.id) : '';
+    if (why && !confirm(`${why}\n\nDelete the study anyway? A batch still running at the provider may be charged, and its results can't be collected here.`)) return;
   }
   await dbApi.deleteStudy(id);
   const studies = state.studies.filter((s) => s.id !== id);
@@ -836,7 +837,10 @@ export async function checkBatch(runId: string, quiet = false) {
   const run = state.runs.find((r) => r.id === runId);
   if (!run?.batch || run.status !== 'submitted' || checking.has(runId)) return;
   // Batches being uploaded (e.g. a retry of this run) are added to the run as they go up: check after that.
-  if (state.submitting) return;
+  if (state.submitting) {
+    if (!quiet) toast('A batch is being uploaded; check again when that is done.');
+    return;
+  }
   const key = state.keys[run.batch.provider];
   if (!key) {
     if (!quiet) toast(`Add your ${provider(run.batch.provider).label} key to check this batch.`, 'error');
@@ -895,7 +899,10 @@ export async function checkBatch(runId: string, quiet = false) {
       // Every batch is in. The run failed only if no batch returned anything.
       updated.status = merged.some((p) => p.status === 'collected') ? 'completed' : 'failed';
       updated.finishedAt = nowIso();
-      const allErrors = merged.map((p) => p.error).filter((x): x is string => !!x);
+      // Errors of the batches sent since the last retry (a retry replaces what failed before it).
+      const since = latest.retries?.at(-1)?.at ?? '';
+      const current = merged.filter((p) => (p.submittedAt ?? '') >= since);
+      const allErrors = current.map((p) => p.error).filter((x): x is string => !!x);
       updated.error = allErrors.length ? allErrors.join(' ') : null;
       const mine = state.currentId === run.studyId ? state.results.filter((r) => r.runId === run.id) : null;
       const ok = mine ? mine.filter((r) => r.status === 'ok').length : counts.ok;
@@ -943,22 +950,28 @@ async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: stri
   return counts;
 }
 
-/** Ask the provider to stop a run's unfinished batches. False if any of them could not be cancelled. */
-export async function cancelBatch(runId: string): Promise<boolean> {
+/**
+ * Ask the provider to stop a run's unfinished batches. Returns why one could not be stopped ('' if all were
+ * stopped or had already ended).
+ */
+export async function cancelBatch(runId: string): Promise<string> {
   const run = state.runs.find((r) => r.id === runId);
-  if (!run?.batch) return true;
+  if (!run?.batch) return '';
+  const adapter = provider(run.batch.provider);
+  const key = state.keys[run.batch.provider];
+  if (!key) return `The batch could not be cancelled: no ${adapter.label} API key is set (API keys, top right).`;
   const failures: string[] = [];
   for (const p of batchParts(run)) {
     if (p.status !== 'submitted') continue;
     try {
-      await provider(run.batch.provider).cancelBatch(state.keys[run.batch.provider], p.batchId);
+      await adapter.cancelBatch(key, p.batchId);
     } catch (e) {
-      failures.push(describeApiError(e));
+      // A batch that has already ended has nothing left to stop.
+      const ended = await adapter.checkBatch(key, p.batchId).then((st) => st.done, () => false);
+      if (!ended) failures.push(describeApiError(e));
     }
   }
-  if (failures.length) toast(`Could not cancel ${failures.length === 1 ? 'a batch' : `${failures.length} batches`}: ${failures[0]}`, 'error');
-  else toast('Cancellation requested. Results finished before cancelling will still be collected.');
-  return !failures.length;
+  return failures.length ? `Could not cancel ${failures.length === 1 ? 'a batch' : `${failures.length} batches`}: ${failures[0]}` : '';
 }
 
 let polling = false;
