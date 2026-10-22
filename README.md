@@ -10,9 +10,9 @@ Everything runs in your browser. Your API key, texts and results never pass thro
 - **Structured output:** define the fields the model must return (category, ordinal scale, number, yes/no, free text), optionally preceded by a rationale. Responses are enforced with a JSON schema, so every annotation becomes a clean column.
 - **Add texts:** drag and drop TXT, MD, PDF, DOCX or HTML files (one text each), a whole corpus as CSV, TSV, XLSX, JSON or JSONL (choose the text and ID columns; other columns become metadata), or paste text.
 - **Or annotate entries from the model's own knowledge:** a second kind of study (Studies → New study…) for people, organizations, works, places or events, each described by a few details pasted as a table or added from a spreadsheet (one row per entry; you choose which columns the model sees, your own answers stay aside for comparison). Each entry is sent after the prompt between `<entry>` tags.
-- **Add an answer key:** human labels can be added later from a spreadsheet, matched to the texts by file name or ID (the texts are not changed).
+- **Add an answer key:** human labels can be added later from a spreadsheet, matched to the texts by file name or ID (the texts are not changed). A corrected sheet replaces the columns it has, and a column added by mistake can be removed.
 - **Tinker quickly:** test the prompt on one text or a random sample, look at the result and rationale, adjust, repeat. Each run is numbered and the prompt is versioned automatically, so earlier results stay comparable.
-- **Run at scale:** run everything, a selection, or only texts not yet annotated with the current prompt; with optional prompt caching, the providers' Batch APIs (about 50% cheaper, results collected later), several annotations per text (retest reliability) and adjustable parallelism.
+- **Run at scale:** run everything, a selection, or only texts not yet annotated with the current prompt and model; with optional prompt caching, the providers' Batch APIs (about 50% cheaper, results collected later), several annotations per text (retest reliability) and adjustable parallelism.
 - **Retry failed requests** within the same run, with its frozen settings, so one run stays one complete dataset (in a batch run, as a new batch at batch price). A batch run too large for one batch is sent as several, after a warning.
 - **Inspect results:** a results list with per-text detail (rationale, reasoning summary, tokens, timing, the exact request and the full raw response), comparison against any metadata column, and an agreement panel (percent agreement, Cohen's κ, weighted κ, Krippendorff's α, Gwet's AC1, Spearman ρ, MAE, confusion matrix) for model vs. human labels, run vs. run, or replicate vs. replicate.
 - **Compare two runs** (e.g. two models): agreement within a chosen tolerance (exact, ±1, ±2 points), systematic difference (does one score higher?), and a downloadable Excel comparison report with intervals, confusion tables, both runs' settings and draft text for a paper. Plain-text runs that answer in JSON are compared on their numeric scores.
@@ -27,7 +27,7 @@ Everything runs in your browser. Your API key, texts and results never pass thro
 
 Open the hosted app, click **API keys**, paste a key from [console.anthropic.com](https://console.anthropic.com/settings/keys) or [platform.openai.com](https://platform.openai.com/api-keys), and create your first study.
 
-Keys are kept only for the open tab unless you tick *Remember keys in this browser*. Studies are saved automatically in the browser (IndexedDB); use **Export → Study backup** to move a study to another computer or browser.
+Keys are kept only for the open tab unless you tick *Remember keys in this browser*. Studies are saved automatically in the browser (IndexedDB); use **Export → Study backup** to move a study to another computer or browser, and keep one, since a browser can clear a site's data (e.g. when the disk is full). The app works in one tab at a time: a second tab waits until the first is closed, so the same requests are never sent twice.
 
 ## Development
 
@@ -51,5 +51,8 @@ The app is a static site (Vite + React + TypeScript) and uses the official `@ant
 - Claude models always run with (adaptive) thinking; effort controls how much they reason.
 - Effort is always set explicitly (it starts at medium), because providers' defaults differ between models and can change. Runs made before this was the case are recorded as "model default". Models without an effort setting show "Not supported" and nothing is sent.
 - Current Claude models don't accept a temperature setting, so none is sent or recorded for them.
-- Every label comes from the chosen model: a text the model declines is recorded as failed (stop reason "refusal"), never re-run on another model.
+- Every label comes from the chosen model: a text the model declines is recorded as failed (stop reason "refusal"), never re-run on another model. An empty answer counts as failed too.
+- Weighted κ weighs a disagreement by the distance between the two values over the codebook's scale (on a whole-number scale the same as counting steps), so a combined label between two scale points (the median of an even number of annotations, e.g. 0.5) gets partial credit. Labels outside the scale (e.g. a missing-value code such as 99) are left out and reported, like "NA".
+- Human–human agreement (two coders' columns) is computed on the same texts as the model's agreement for that run.
+- Retrying failed requests keeps the replaced attempts' logs and counts their tokens; each retry is recorded with the number of requests it actually sent.
 - When iterating on prompts against human labels, keep a held-out set for the final agreement estimate, so prompt selection doesn't inflate it.

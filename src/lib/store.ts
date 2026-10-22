@@ -1042,6 +1042,8 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
   const signal = job.abort.signal;
   // Stopped because of the settings: no further requests are sent; those already under way finish and are kept.
   let stopping = false;
+  // Requests answered (stored) so far, and how many of them failed because of the settings.
+  let answered = 0;
   let settingsFailures = 0;
   let sent = 0;
   let next = 0;
@@ -1061,13 +1063,14 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
       const started = performance.now();
       let outcome: CallOutcome | null = null;
       let error: string | null = null;
+      let fromSettings = false;
       sent++;
       try {
         outcome = await adapter.send(key, snapshot.requestBase, t.part, signal);
       } catch (e) {
         if (signal.aborted) return;
         error = describeApiError(e);
-        if (settingsError(e)) settingsFailures++;
+        fromSettings = settingsError(e);
       }
       const result = makeResult(run, t.doc, t.replicate, requestedAt, outcome, error, Math.round(performance.now() - started));
       const log: ResultLog = { id: result.id, runId: run.id, studyId: run.studyId, requestPart: t.part, response: outcome?.response ?? { error } };
@@ -1089,10 +1092,11 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
       set((s) => (s.job ? { job: { ...s.job, done: s.job.done + 1, failed: s.job.failed + (failed ? 1 : 0) } } : {}));
       // Stop when every request so far failed because of the settings (almost certainly a configuration problem).
       // Answers that came back refused, cut off or unreadable say something about one text, not the settings.
-      const j = getState().job;
-      if (!stopping && j && j.done >= 3 && settingsFailures === j.done) {
+      answered++;
+      if (fromSettings) settingsFailures++;
+      if (!stopping && answered >= 3 && settingsFailures === answered) {
         stopping = true;
-        run.error = `${retry ? 'Retry stopped' : 'Stopped'}: the first ${j.done} requests all failed with an error that points to the settings rather than the ${words(snapshot.prompt).many}: ${result.error}`;
+        run.error = `${retry ? 'Retry stopped' : 'Stopped'}: the first ${answered} requests all failed with an error that points to the settings rather than the ${words(snapshot.prompt).many}: ${result.error}`;
       }
     }
   };
