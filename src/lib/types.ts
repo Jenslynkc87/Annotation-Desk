@@ -75,6 +75,8 @@ export interface Study {
   options: RunOptions;
   prompt: PromptSpec;
   savedPrompts?: SavedPrompt[];
+  /** Set while a backup is being imported into this study; a study still marked is a partial import. */
+  importIncomplete?: boolean;
 }
 
 export interface Doc {
@@ -130,11 +132,32 @@ export interface Run {
     /** Every batch of the run: a run too large for one batch is sent as several, and failed requests of a
      *  batch run are re-sent as further batches. Missing in older runs (see `batchParts`). */
     parts?: BatchPart[];
+    /** Set while a batch of this run is being uploaded (when it began, and its number of requests): if the page
+     *  closes meanwhile, whether the provider received that batch is unknown. */
+    uploading?: UploadAttempt;
+    /** An upload whose outcome is unknown (connection lost, or the page closed during it): sending the same
+     *  requests again could start a second, paid batch, so it is looked for at the provider first. */
+    uploadUnknown?: UploadAttempt;
   };
   error: string | null;
+  /** While a retry is being sent (status "running"): the run's status and error before it, restored if the page
+   *  is closed meanwhile. */
+  resumeStatus?: RunStatus;
+  resumeError?: string | null;
   /** Failed requests re-sent within this run (same frozen settings). `asBatch`: re-sent as a new batch
-   *  (batch runs from October 2026 on; earlier retries were always individual requests). */
+   *  (batch runs from October 2026 on; earlier retries were always individual requests). `requests`: those
+   *  actually sent (runs before October 22, 2026: those planned, even if a retry was stopped early). */
   retries?: { at: string; requests: number; asBatch?: boolean }[];
+  /** Failed attempts replaced by a retry (from October 22, 2026): their number and token use, which the
+   *  results no longer show (their logs are kept, see ResultLog.attempt). */
+  replaced?: { requests: number; usage: Usage };
+}
+
+export interface UploadAttempt {
+  since: string;
+  requests: number;
+  /** OpenAI: the uploaded input file, when the file arrived but starting the batch got no answer. */
+  inputFileId?: string;
 }
 
 export interface BatchPart {
@@ -145,6 +168,11 @@ export interface BatchPart {
   error?: string;
   /** When it was sent (older runs: the run's start). */
   submittedAt?: string;
+  /** When the provider finished it (results collected from October 22, 2026 on). */
+  endedAt?: string;
+  /** Its results arrived but could not be stored (e.g. the browser's storage is full): not fetched again until
+   *  the owner checks the run by hand. */
+  saveFailed?: string;
 }
 
 export interface Usage {
@@ -176,16 +204,21 @@ export interface Result {
   responseId: string;
   modelReported: string;
   stopReason: string;
+  /** How many times this request was sent (absent = 1); earlier attempts' logs are kept as `${id}#${n}`. */
+  attempt?: number;
 }
 
 /** Heavy per-result data, loaded on demand. */
 export interface ResultLog {
-  id: string; // same as Result.id
+  id: string; // same as Result.id; `${Result.id}#${attempt}` for an earlier attempt replaced by a retry
   runId: string;
   studyId: string;
   /** The per-text part of the request (messages / input). Combine with run.snapshot.requestBase. */
   requestPart: Record<string, unknown>;
   response: unknown;
+  /** An earlier, failed attempt that a retry replaced: which attempt it was, and its outcome. */
+  attempt?: number;
+  replaced?: Pick<Result, 'status' | 'error' | 'parseError' | 'stopReason' | 'usage' | 'requestedAt' | 'completedAt'>;
 }
 
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = {

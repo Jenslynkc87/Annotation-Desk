@@ -1,6 +1,6 @@
 // Derived views over results: which result(s) to show per text, and aggregated values.
 import { aggregate, type Aggregation } from './metrics';
-import { flattenJsonResponse, isExplanationKey, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY } from './prompt';
+import { flattenJsonResponse, isExplanationKey, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY, toNumber } from './prompt';
 import type { Doc, PromptSpec, Result, Run } from './types';
 
 export type RunFilter = 'latest' | string; // 'latest' or a run id
@@ -79,17 +79,28 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
 /**
  * Plain-text runs whose answers are JSON, annotated more than once: combine value by value (the median of
  * numbers, the majority otherwise) into one JSON answer, so the score columns and agreement work as with
- * a single answer. (The answers as a whole always differ, e.g. in their explanations.) Null if any isn't JSON.
+ * a single answer. (The answers as a whole always differ, e.g. in their explanations.) Only the answers that
+ * are JSON are combined: one written as prose has no scores to add, like a failed one. Null if none is JSON.
+ * A value that is a number in most answers is a score: the median of its numbers ("NA" in one answer is left
+ * out, as agreement leaves it out).
  */
 function combineJsonAnswers(ok: Result[]): string | null {
-  const flat = ok.map((r) => flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]));
-  if (flat.some((x) => !x)) return null;
-  const answers = flat as Record<string, string>[];
+  const answers = ok.map((r) => flattenJsonResponse(r.values[TEXT_RESPONSE_KEY])).filter((x): x is Record<string, string> => !!x);
+  if (!answers.length) return null;
   const keys = [...new Set(answers.flatMap((x) => Object.keys(x)))];
-  const scores = keys.filter((k) => answers.every((x) => (x[k] ?? '') === '' || isNum(x[k])) && answers.some((x) => isNum(x[k] ?? '')));
+  const isScore = (k: string) => {
+    const vs = answers.map((x) => x[k] ?? '').filter((v) => v.trim() !== '');
+    const nums = vs.filter((v) => Number.isFinite(toNumber(v)));
+    return nums.length > 0 && nums.length >= vs.length / 2;
+  };
+  const scores = keys.filter((k) => !isExplanationKey(k) && isScore(k));
   const combined: Record<string, string> = {};
   const labels = keys.filter((k) => !isExplanationKey(k));
-  for (const k of labels) combined[k] = aggregate(answers.map((x) => x[k] ?? ''), scores.includes(k) ? 'median' : 'majority');
+  for (const k of labels) {
+    combined[k] = scores.includes(k)
+      ? aggregate(answers.map((x) => toNumber(x[k] ?? '')).filter(Number.isFinite).map(String), 'median')
+      : aggregate(answers.map((x) => x[k] ?? ''), 'majority');
+  }
   for (const k of keys.filter(isExplanationKey)) combined[k] = answers[explanationSource(k, combined, answers, labels, new Set(scores))][k] ?? '';
   // Keys in the order of the first answer; numbers as numbers.
   return JSON.stringify(Object.fromEntries(keys.map((k) => [k, scores.includes(k) && combined[k] !== '' ? Number(combined[k]) : combined[k]])));
@@ -120,11 +131,12 @@ function explanationSource(key: string, combined: Record<string, string>, answer
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
-export function runTokens(results: Result[], runId: string) {
-  let input = 0;
-  let output = 0;
-  let cacheRead = 0;
-  let cacheWrite = 0;
+/** A run's token use: its results, plus failed attempts that a retry replaced (`replaced`), which were paid for too. */
+export function runTokens(results: Result[], runId: string, replaced?: Run['replaced']) {
+  let input = replaced?.usage.inputTokens ?? 0;
+  let output = replaced?.usage.outputTokens ?? 0;
+  let cacheRead = replaced?.usage.cacheReadTokens ?? 0;
+  let cacheWrite = replaced?.usage.cacheWriteTokens ?? 0;
   let ok = 0;
   let failed = 0;
   for (const r of results) {

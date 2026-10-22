@@ -84,7 +84,7 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
   const add = (name: string, rows: Row[]) => addSheet(wb, name, rows);
   add('Results', dropRedundantId(resultsWide(run, d.docs, d.runs, d.results, opts)));
   add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }));
-  const agr = agreementForRun(run, d.docs, d.runs, d.results);
+  const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
   if (agr.length) add('Agreement', agreementRows(agr, run.number));
   add('Settings', settingsRows(d.study, run));
   add('All runs', runSummaryRows(d.runs, d.results));
@@ -209,7 +209,7 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
     f.file('results_long.csv', toCsv(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true })));
     f.file('results_wide.csv', toCsv(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
     if (opts.includeLogs) await addRunLogs(f, run, d.docs);
-    agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results), run.number));
+    agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results, d.study), run.number));
   }
   if (agr.length) results.file('agreement.csv', toCsv(agr));
 
@@ -243,7 +243,8 @@ export async function buildSupplementary(d: ExportData, run: Run, opts: Suppleme
   const res = root.folder('results')!;
   res.file('results.csv', toCsv(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
   res.file('results_by_replicate.csv', toCsv(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false })));
-  const agr = agreementForRun(run, runDocs, d.runs, d.results);
+  // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
+  const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
   if (agr.length) res.file('agreement.csv', toCsv(agreementRows(agr, run.number)));
   if (opts.includeTexts) root.folder('data')!.file('corpus.csv', toCsv(corpusRows(runDocs, true)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs')!, run, runDocs);
@@ -254,14 +255,25 @@ export async function buildSupplementary(d: ExportData, run: Run, opts: Suppleme
 }
 
 function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
+  // Requests and tokens: everything sent (and paid for), also for texts deleted from the study since. Texts: only
+  // those still in the study, as in results.csv and the agreement figures.
   const rs = d.results.filter((r) => r.runId === run.id);
+  const present = new Set(d.docs.map((x) => x.id));
   const started = rs.map((r) => r.requestedAt).sort();
   const times = rs.map((r) => r.completedAt).sort();
-  const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0);
+  const replaced = run.replaced?.usage;
+  const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0) + (replaced?.[k] ?? 0);
   const m = run.snapshot.model;
   const ok = rs.filter((r) => r.status === 'ok');
+  // A text has a usable label if it has a usable answer; in a plain-text run whose answers give scores as JSON,
+  // only if its (combined) answer has a score (not, e.g., a reply in prose).
+  const views = buildDocViews(d.docs, d.runs, d.results, run.id);
+  const scoreKeys = run.snapshot.prompt.outputMode === 'text' ? comparableFields(run, views.values()).map((f) => f.key) : [];
+  const answered = [...new Set(ok.map((r) => r.docId))].filter((id) => present.has(id));
+  const hasScores = (id: string) => !scoreKeys.length || scoreKeys.some((k) => fieldValue(run, views.get(id)?.values ?? {}, k) !== '');
+  const usable = answered.filter(hasScores);
   return {
-    software: { name: 'Annotation Desk', version: run.snapshot.appVersion },
+    software: { name: 'Annotation Desk', version: __APP_VERSION__, version_used_for_run: run.snapshot.appVersion },
     exported_at: exportedAt,
     study: d.study.name,
     // Notes kept with the study, e.g. how a validation sample was drawn (rule and seed).
@@ -281,15 +293,20 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     options: { replicates_per_text: run.snapshot.options.replicates, prompt_caching: cachingLabel(run) },
     request_settings: run.snapshot.requestBase,
     corpus: {
-      n_texts_in_run: run.docIds.length,
-      n_texts_with_results: new Set(rs.map((r) => r.docId)).size,
-      n_texts_with_usable_labels: new Set(ok.map((r) => r.docId)).size,
+      n_texts_in_run: run.docIds.filter((id) => present.has(id)).length,
+      n_texts_with_results: new Set(rs.map((r) => r.docId).filter((id) => present.has(id))).size,
+      n_texts_with_usable_labels: usable.length,
+      ...(scoreKeys.length ? { n_texts_answer_without_scores: answered.length - usable.length } : {}),
+      // Annotated, then deleted from the study: not in results.csv or the agreement figures.
+      n_texts_removed_from_study_since: run.docIds.filter((id) => !present.has(id)).length,
     },
     requests: {
       total: rs.length,
       ok: ok.length,
       failed: rs.filter((r) => r.status === 'error').length,
       parse_errors: rs.filter((r) => r.parseError).length,
+      // Failed attempts that "Retry failed" replaced: not in the totals above, but in the tokens and the logs.
+      replaced_by_retries: run.replaced?.requests ?? 0,
       first_requested_at: started[0] ?? null,
       last_completed_at: times[times.length - 1] ?? null,
     },
@@ -306,6 +323,8 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
 function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>): string {
   const m = run.snapshot.model;
   const { total, failed } = meta.requests;
+  const noScores = meta.corpus.n_texts_answer_without_scores ?? 0;
+  const removed = meta.corpus.n_texts_removed_from_study_since;
   const retried = (run.retries ?? []).reduce((s, x) => s + x.requests, 0);
   const retriedAs = run.mode !== 'batch' ? '' : (run.retries ?? []).every((x) => x.asBatch) ? ' in a new batch' : (run.retries ?? []).every((x) => !x.asBatch) ? ' as individual requests' : '';
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
@@ -335,6 +354,12 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
       : '',
     failed
       ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} ${w.many} without a label` : ''}.`
+      : '',
+    noScores
+      ? `${noScores.toLocaleString('en-US')} ${noScores === 1 ? `${w.one} was` : `${w.many} were`} answered without scores (e.g. in prose) and ${noScores === 1 ? 'was' : 'were'} excluded${failed ? '' : `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} ${w.many} without a label`}.`
+      : '',
+    removed
+      ? `${removed.toLocaleString('en-US')} annotated ${removed === 1 ? w.one : w.many} ${removed === 1 ? 'was' : 'were'} later removed from the study and ${removed === 1 ? 'is' : 'are'} not included in N or the results.`
       : '',
     retried
       ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer ${retried === 1 ? 'was' : 'were'} re-sent with identical settings${retriedAs}.`

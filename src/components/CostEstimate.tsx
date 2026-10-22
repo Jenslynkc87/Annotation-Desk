@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { calibrate, estimateRun, fmtRange, fmtTokens, fmtUsd, PRICE_SOURCES, usePriceOverrides, type Part } from '../lib/pricing';
-import { currentStudy, promptFingerprint, useStore } from '../lib/store';
+import { currentStudy, remainingDocs, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import { Icon } from './ui';
 
@@ -20,22 +20,14 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
   const [scope, setScope] = useState<Scope>(selected.size ? 'selected' : 'all');
   const effScope: Scope = scope === 'selected' && !selected.size ? 'all' : scope;
 
-  // Texts without a usable result for the current prompt (what "Remaining" would send).
-  const [doneIds, setDoneIds] = useState<Set<string> | null>(null);
-  useEffect(() => {
-    let live = true;
-    void promptFingerprint(study).then((hash) => {
-      const ok = new Set(runs.filter((r) => r.snapshot.promptHash === hash).map((r) => r.id));
-      if (live) setDoneIds(new Set(results.filter((r) => r.status === 'ok' && ok.has(r.runId)).map((r) => r.docId)));
-    });
-    return () => void (live = false);
-  }, [study, runs, results]);
+  // What "Remaining" would send (the same rule as the button: not texts done, or waiting in a batch).
+  const remaining = useMemo(() => remainingDocs(study, docs, runs, results).todo, [study, docs, runs, results]);
 
   const scopeDocs = useMemo(() => {
     if (effScope === 'selected') return docs.filter((d) => selected.has(d.id));
-    if (effScope === 'remaining') return doneIds ? docs.filter((d) => !doneIds.has(d.id)) : [];
+    if (effScope === 'remaining') return remaining;
     return docs;
-  }, [effScope, docs, selected, doneIds]);
+  }, [effScope, docs, selected, remaining]);
 
   const cal = useMemo(() => calibrate(study.model, study.prompt, runs, results, docs), [study.model, study.prompt, runs, results, docs]);
   const e = estimateRun({
@@ -48,7 +40,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
     calibration: cal,
   });
   const src = PRICE_SOURCES[study.model.provider];
-  const remainingN = doneIds ? docs.filter((d) => !doneIds.has(d.id)).length : null;
+  const remainingN = remaining.length;
   const tokens = (p: Part) => (p.basis === 'none' ? '0' : fmtRange(p.tokens, fmtTokens));
   const cost = (p: Part) => (p.basis === 'none' ? '—' : p.cost ? fmtRange(p.cost, fmtUsd) : '—');
   const perText = (p: Part) => `${fmtRange({ low: p.tokens.low / Math.max(1, e.requests), high: p.tokens.high / Math.max(1, e.requests) }, fmtTokens)} tokens per ${w.one}`;
@@ -81,7 +73,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
           </button>
         )}
         <button role="radio" aria-checked={effScope === 'remaining'} className={effScope === 'remaining' ? 'on' : ''} onClick={() => setScope('remaining')} title="Texts without a usable result for the current prompt">
-          Remaining{remainingN !== null && ` (${remainingN.toLocaleString()})`}
+          Remaining ({remainingN.toLocaleString()})
         </button>
       </span>
 

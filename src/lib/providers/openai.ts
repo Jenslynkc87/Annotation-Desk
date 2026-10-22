@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { BatchFailedError, type BatchLine, type BatchStatus, type CallOutcome, type ModelInfo, type ProviderAdapter, type RequestInputs } from './types';
+import { BatchFailedError, type BatchLine, type BatchStatus, type CallOutcome, type ListedBatch, type ModelInfo, type ProviderAdapter, type RequestInputs } from './types';
 
 function client(apiKey: string) {
   // Calls go straight from the browser to OpenAI; the key never touches another server.
@@ -166,35 +166,59 @@ export const openaiAdapter: ProviderAdapter = {
     const jsonl = items
       .map((it) => JSON.stringify({ custom_id: it.customId, method: 'POST', url: '/v1/responses', body: { ...base, ...it.part } }))
       .join('\n');
-    const file = await c.files.create(
-      {
-        file: new File([jsonl], 'annotation-batch.jsonl', { type: 'application/jsonl' }),
-        purpose: 'batch',
-      },
-      { timeout: 3_600_000 }, // (a file sent twice costs nothing)
-    );
-    const batch = await c.batches.create(
-      {
-        input_file_id: file.id,
-        endpoint: '/v1/responses',
-        completion_window: '24h',
-      },
-      ONCE,
-    );
-    return { batchId: batch.id, inputFileId: file.id };
+    let file: { id: string };
+    try {
+      file = await c.files.create(
+        {
+          file: new File([jsonl], 'annotation-batch.jsonl', { type: 'application/jsonl' }),
+          purpose: 'batch',
+        },
+        { timeout: 3_600_000 }, // (a file sent twice costs nothing)
+      );
+    } catch (e) {
+      // No file, so no batch: nothing was started.
+      throw Object.assign(e instanceof Error ? e : new Error(String(e)), { notCreated: true });
+    }
+    try {
+      const batch = await c.batches.create(
+        {
+          input_file_id: file.id,
+          endpoint: '/v1/responses',
+          completion_window: '24h',
+        },
+        ONCE,
+      );
+      return { batchId: batch.id, inputFileId: file.id };
+    } catch (e) {
+      // The batch may have been started without an answer arriving: it can be found by its input file.
+      throw Object.assign(e instanceof Error ? e : new Error(String(e)), { inputFileId: file.id });
+    }
   },
 
   async checkBatch(apiKey, batchId): Promise<BatchStatus> {
     const b = await client(apiKey).batches.retrieve(batchId);
     const c = b.request_counts;
     const terminal = ['completed', 'failed', 'expired', 'cancelled'];
+    const end = b.completed_at ?? b.failed_at ?? b.expired_at ?? b.cancelled_at;
     return {
       status: b.status,
       done: terminal.includes(b.status),
       total: c?.total ?? 0,
       completed: c?.completed ?? 0,
       failed: c?.failed ?? 0,
+      endedAt: end ? new Date(end * 1000).toISOString() : undefined,
     };
+  },
+
+  async listRecentBatches(apiKey, sinceIso) {
+    const since = Date.parse(sinceIso) - 120_000;
+    const out: ListedBatch[] = [];
+    // Newest first: stop at the first batch created before the upload began.
+    for await (const b of client(apiKey).batches.list({ limit: 20 })) {
+      if (b.created_at * 1000 < since) break;
+      out.push({ batchId: b.id, createdAt: new Date(b.created_at * 1000).toISOString(), requests: b.request_counts?.total ?? 0, inputFileId: b.input_file_id });
+    }
+    return out;
   },
 
   async fetchBatchResults(apiKey, batchId) {

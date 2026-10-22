@@ -2,7 +2,7 @@
 import Papa from 'papaparse';
 import { comparableFields, fieldValue, type ComparableField } from '../compare';
 import { agreement, type Agreement, type Level } from '../metrics';
-import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields } from '../prompt';
+import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields, toNumber } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
@@ -47,20 +47,25 @@ const answerColumn = (k: string) => (OWN_COLUMNS.has(k) ? `answer_${k}` : k);
 /** A run's output field as a column name (the raw answer of a plain-text run keeps its own "response" column). */
 const fieldColumn = (run: Run, f: string) => (run.snapshot.prompt.outputMode === 'text' && f === TEXT_RESPONSE_KEY ? f : answerColumn(f));
 
-/** Free-text runs that answered with JSON get one extra column per value; the raw response column stays. */
-function jsonColumns(run: Run, response: string | undefined): Row {
-  if (run.snapshot.prompt.outputMode !== 'text') return {};
-  const flat = flattenJsonResponse(response) ?? {};
+/**
+ * The order of the extra columns of plain-text runs that answered with JSON, over all the answers of a table
+ * (so every row has the same columns in the same order, whichever text comes first or failed).
+ */
+function jsonKeyOrder(run: Run, responses: (string | undefined)[]): string[] {
+  if (run.snapshot.prompt.outputMode !== 'text') return [];
+  const all: string[] = [];
+  const seen = new Set<string>();
+  for (const r of responses) for (const k of Object.keys(flattenJsonResponse(r) ?? {})) if (!seen.has(k)) (seen.add(k), all.push(k));
   // The model writes its reasoning first (better answers), but readers want the scores first:
   // within each group (e.g. each domain) put the reasoning column last.
   const isReasoning = isExplanationKey;
   const groupOf = (k: string) => (k.includes('_') ? k.slice(0, k.lastIndexOf('_')) : '');
   const order: string[] = [];
-  for (const k of Object.keys(flat)) if (!order.includes(groupOf(k))) order.push(groupOf(k));
-  const sorted = Object.keys(flat).sort((a, b) => order.indexOf(groupOf(a)) - order.indexOf(groupOf(b)) || Number(isReasoning(a)) - Number(isReasoning(b)));
+  for (const k of all) if (!order.includes(groupOf(k))) order.push(groupOf(k));
+  const sorted = [...all].sort((a, b) => order.indexOf(groupOf(a)) - order.indexOf(groupOf(b)) || Number(isReasoning(a)) - Number(isReasoning(b)));
   // Flat names ("race", "race_explanation"): each explanation goes right after its own score.
   const scoreOf = (k: string) => {
-    for (const suffix of ['_explanation', '_reasoning']) if (k.endsWith(suffix) && k.slice(0, -suffix.length) in flat) return k.slice(0, -suffix.length);
+    for (const suffix of ['_explanation', '_reasoning']) if (k.endsWith(suffix) && seen.has(k.slice(0, -suffix.length))) return k.slice(0, -suffix.length);
     return null;
   };
   const keys: string[] = [];
@@ -69,6 +74,14 @@ function jsonColumns(run: Run, response: string | undefined): Row {
     for (const m of sorted) if (scoreOf(m) === k) place(m);
   };
   for (const k of sorted) if (scoreOf(k) === null) place(k);
+  return keys;
+}
+
+/** Free-text runs that answered with JSON get one extra column per value (all of `keys`, empty where this answer
+ *  has none); the raw response column stays. */
+function jsonColumns(keys: string[], response: string | undefined): Row {
+  if (!keys.length) return {};
+  const flat = flattenJsonResponse(response) ?? {};
   return Object.fromEntries(keys.map((k) => [answerColumn(k), numify(flat[k])]));
 }
 
@@ -83,10 +96,6 @@ function numify(v: string | undefined): string | number {
 function isNumericVar(run: Run, f: string): boolean {
   const t = run.snapshot.prompt.variables.find((x) => x.name === f)?.type;
   return t === 'number' || t === 'ordinal';
-}
-
-function hasJson(run: Run, response: string | undefined): boolean {
-  return run.snapshot.prompt.outputMode === 'text' && flattenJsonResponse(response) !== null;
 }
 
 /** Identifying columns first (id, file name), annotations next, bulky columns (raw JSON answer, full text) last. */
@@ -125,7 +134,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       status: r.status,
     };
     for (const f of outputFields(run.snapshot.prompt)) row[fieldColumn(run, f)] = isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
-    Object.assign(row, jsonColumns(run, r.values[TEXT_RESPONSE_KEY]));
+    Object.assign(row, jsonColumns(jsonKeyOrder(run, [r.values[TEXT_RESPONSE_KEY]]), r.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale) row.rationale = r.rationale;
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
     Object.assign(row, {
@@ -147,32 +156,45 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
   return rows;
 }
 
-/** One row per text for a single run: metadata + aggregated annotations. */
+/** One row per text for a single run: metadata + aggregated annotations. Every row has the same columns. */
 export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Result[], opts: { text: boolean; rationale: boolean }): Row[] {
   const views = buildDocViews(docs, allRuns, results, run.id);
   const fields = outputFields(run.snapshot.prompt);
+  const p = run.snapshot.prompt;
   const reps = run.snapshot.options.replicates;
-  const cols = metaColumns(docs);
+  const shown = docs.filter((d) => views.get(d.id)!.status !== 'none');
+  const jsonKeys = jsonKeyOrder(run, shown.map((d) => views.get(d.id)!.values[TEXT_RESPONSE_KEY]));
+  const withJson = jsonKeys.length > 0;
+  // Share of a text's annotations that agree with the combined label, for fields that have one (not free text;
+  // plain-text answers are combined value by value, so a share of identical answers says nothing).
+  const typeOf = (f: string) => p.variables.find((v) => v.name === f)?.type;
+  const consistencyOf = (f: string) => reps > 1 && p.outputMode === 'structured' && typeOf(f) !== undefined && typeOf(f) !== 'text';
+  const withRationale = opts.rationale && p.includeRationale && p.outputMode === 'structured';
+  // The table's own columns, decided once: a metadata column with one of these names gets a prefix in every row
+  // (deciding row by row would put e.g. a human label "race" under the model's "race" where an answer has none).
+  const annotationCols = [
+    ...fields.flatMap((f) => [fieldColumn(run, f), ...(consistencyOf(f) ? [`${f}_replicate_agreement`] : [])]),
+    ...jsonKeys.map(answerColumn),
+    ...(withRationale ? ['rationale'] : []),
+  ];
+  const taken = new Set(['doc_id', 'text', 'n_ok', 'n_error', ...annotationCols]);
+  const cols = metaColumns(docs).map((c) => [c, taken.has(c) ? `meta_${c}` : c] as const);
   const rows: Row[] = [];
-  for (const d of docs) {
+  for (const d of shown) {
     const v = views.get(d.id)!;
-    if (v.status === 'none') continue;
     const row: Row = { doc_id: d.docId };
     if (opts.text) row.text = d.text;
     for (const f of fields) {
       row[fieldColumn(run, f)] = isNumericVar(run, f) ? numify(v.values[f]) : (v.values[f] ?? '');
-      // (Plain-text answers are combined value by value, so a share of identical answers says nothing.)
-      if (reps > 1 && run.snapshot.prompt.outputMode === 'structured') row[`${f}_agreement_across_runs`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
+      if (consistencyOf(f)) row[`${f}_replicate_agreement`] = v.consistency[f] !== undefined ? Math.round(v.consistency[f] * 1000) / 1000 : '';
     }
-    Object.assign(row, jsonColumns(run, v.values[TEXT_RESPONSE_KEY]));
-    if (opts.rationale && run.snapshot.prompt.includeRationale && run.snapshot.prompt.outputMode === 'structured') {
-      row.rationale = v.rationale; // the one written with the combined labels
-    }
-    // Metadata (including any human labels) after the annotations; prefixed if a name collides.
-    for (const c of cols) row[c in row ? `meta_${c}` : c] = numify(d.meta[c]);
+    Object.assign(row, jsonColumns(jsonKeys, v.values[TEXT_RESPONSE_KEY]));
+    if (withRationale) row.rationale = v.rationale; // the one written with the combined labels
+    // Metadata (including any human labels) after the annotations.
+    for (const [c, name] of cols) row[name] = numify(d.meta[c]);
     row.n_ok = v.results.filter((r) => r.status === 'ok').length;
     row.n_error = v.results.filter((r) => r.status === 'error').length;
-    rows.push(readingOrder(row, hasJson(run, v.values[TEXT_RESPONSE_KEY])));
+    rows.push(readingOrder(row, withJson));
   }
   return rows;
 }
@@ -188,24 +210,85 @@ export interface AgreementRow {
   nLabelled: number;
 }
 
-/** Find metadata columns that look like human labels for a field, e.g. "sentiment", "sentiment_gold", "human_sentiment".
- *  Coders' notes (e.g. "sentiment_explanation") are not labels. */
-export function goldColumnsFor(field: string, docs: Doc[]): string[] {
+/** Words in a column name that mark coders' notes or ratings about a field, not labels for it (race_note,
+ *  race_confidence, race_explanation_coder2). */
+const NOT_LABEL_WORDS = new Set(['explanation', 'explanations', 'reasoning', 'rationale', 'note', 'notes', 'comment', 'comments', 'memo', 'confidence', 'certainty', 'flag', 'flags']);
+
+/** The rest of a column's name around a field's name ("gold" in race_gold or gold_race); null if not named after it. */
+function nameRest(column: string, field: string): string | null {
+  const x = column.toLowerCase();
   const f = field.toLowerCase();
+  if (x === f) return '';
+  if (x.startsWith(`${f}_`)) return x.slice(f.length + 1);
+  if (x.endsWith(`_${f}`)) return x.slice(0, -(f.length + 1));
+  return null;
+}
+
+/** Does a label fit the field: one of its categories, a yes/no, or a number on its scale? */
+function fitsField(v: string, f: ComparableField): boolean {
+  const n = normalizeLabel(v, f.yesNo);
+  if (f.yesNo) return n === 'true' || n === 'false';
+  if (f.level === 'nominal') return !f.allowed.length || f.allowed.includes(n);
+  const x = toNumber(v);
+  if (!Number.isFinite(x)) return false;
+  if (f.scaleSeen || !f.allowed.length) return true;
+  const scale = f.allowed.map(Number).filter(Number.isFinite);
+  return !scale.length || (x >= Math.min(...scale) - 1e-9 && x <= Math.max(...scale) + 1e-9);
+}
+
+/**
+ * Metadata columns that hold human labels for a field: named after it ("sentiment", "sentiment_gold",
+ * "human_sentiment", "sentiment_coder2") and, when the field is known, holding mostly its values. Not labels:
+ * coders' notes and ratings named after it (sentiment_explanation, sentiment_note, sentiment_confidence); a
+ * column named after a longer field in `knownFields` (gender_role_gold belongs to gender_role, not gender);
+ * and a column whose values are mostly not values of the field (e.g. author_race holding words, for a −3…3 scale).
+ */
+export function goldColumnsFor(field: ComparableField | string, docs: Doc[], knownFields: string[] = []): string[] {
+  const f = typeof field === 'string' ? null : field;
+  const key = typeof field === 'string' ? field : field.key;
+  const longer = knownFields.filter((g) => g.toLowerCase() !== key.toLowerCase() && g.length > key.length);
   return metaColumns(docs).filter((c) => {
-    const x = c.toLowerCase();
-    if (isExplanationKey(x) && !isExplanationKey(f)) return false;
-    return x === f || x.startsWith(`${f}_`) || x.endsWith(`_${f}`) || x === `gold_${f}` || x === `human_${f}`;
+    const rest = nameRest(c, key);
+    if (rest === null) return false;
+    if (isExplanationKey(c.toLowerCase()) && !isExplanationKey(key.toLowerCase())) return false;
+    if (rest.split('_').some((w) => NOT_LABEL_WORDS.has(w))) return false;
+    if (longer.some((g) => nameRest(c, g) !== null)) return false;
+    if (!f) return true;
+    const values = docs.map((d) => d.meta[c] ?? '').filter((v) => v.trim() !== '');
+    return values.length > 0 && values.filter((v) => fitsField(v, f)).length >= values.length / 2;
   });
 }
 
-export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: Result[]): AgreementRow[] {
+/** The label column to show first for a field: one named exactly like it, else a "gold" or "human" one, else the first. */
+export function preferredGoldColumn(field: string, columns: string[]): string | undefined {
+  const f = field.toLowerCase();
+  return (
+    columns.find((c) => c.toLowerCase() === f) ??
+    columns.find((c) => (nameRest(c, f) ?? '').split('_').some((w) => w === 'gold' || w === 'human')) ??
+    columns[0]
+  );
+}
+
+/** Every field name a study or its runs use (current prompt, saved prompts, runs), to tell gender from gender_role. */
+export function knownFieldNames(study: Study | null, runs: Run[], extra: string[] = []): string[] {
+  const prompts = [...(study ? [study.prompt, ...(study.savedPrompts ?? []).map((x) => x.prompt)] : []), ...runs.map((r) => r.snapshot.prompt)];
+  return [...new Set([...prompts.flatMap((p) => p.variables.map((v) => v.name)), ...extra])];
+}
+
+/** The fields of a run agreement can be computed on, each with the label columns that belong to it. */
+export function labelPairs(run: Run, docs: Doc[], allRuns: Run[], results: Result[], study: Study | null = null): { fields: ComparableField[]; pairs: { field: string; column: string }[] } {
+  const views = buildDocViews(docs, allRuns, results, run.id);
+  const fields = comparableFields(run, views.values());
+  const known = knownFieldNames(study, allRuns, fields.map((f) => f.key));
+  return { fields, pairs: fields.flatMap((f) => goldColumnsFor(f, docs, known).map((column) => ({ field: f.key, column }))) };
+}
+
+export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: Result[], study: Study | null = null): AgreementRow[] {
   const views = buildDocViews(docs, allRuns, results, run.id);
   const out: AgreementRow[] = [];
   // The fields agreement can be computed on: codebook fields (free text excluded: every answer is its own
   // category), or the numeric scores in plain-text JSON answers. Each with the label columns named after it.
-  const fields = comparableFields(run, views.values());
-  const pairs = fields.flatMap((f) => goldColumnsFor(f.key, docs).map((column) => ({ field: f.key, column })));
+  const { fields, pairs } = labelPairs(run, docs, allRuns, results, study);
   const inRun = new Set(run.docIds);
   const setup = (field: string) => fields.find((f) => f.key === field)!;
   const stats = (xs: string[], ys: string[], f: ComparableField) => agreement(xs, ys, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen });
@@ -227,7 +310,8 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
     }
     out.push({ field, source: 'model', compared_with: column, level: f.level, stats: stats(xs, ys, f), nLabelled });
   }
-  // Human–human baseline: two label columns for the same field (e.g. stance_gold and stance_coder2).
+  // Human–human baseline: two label columns for the same field (e.g. stance_gold and stance_coder2), on the
+  // run's texts (the same texts as the model rows above, in every export).
   for (const field of new Set(pairs.map((p) => p.field))) {
     const cols = pairs.filter((p) => p.field === field).map((p) => p.column);
     const f = setup(field);
@@ -238,7 +322,7 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
         let nLabelled = 0;
         for (const d of docs) {
           const y = normalizeLabel(d.meta[cols[j]], f.yesNo);
-          if (!y) continue;
+          if (!y || !inRun.has(d.id)) continue;
           nLabelled++;
           const x = normalizeLabel(d.meta[cols[i]], f.yesNo);
           if (x) {
@@ -267,7 +351,7 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
     level_of_measurement: a.stats.level,
     n: a.stats.n,
     n_with_label: a.nLabelled,
-    n_left_out_label_not_a_number: a.stats.leftOut.n,
+    n_left_out_not_on_scale: a.stats.leftOut.n,
     ...withCi('percent_agreement', a.stats.percentAgreement, a.stats.ci.percentAgreement),
     ...withCi('cohen_kappa', a.stats.cohenKappa, a.stats.ci.cohenKappa),
     ...withCi('weighted_kappa_linear', a.stats.weightedKappaLinear, a.stats.ci.weightedKappaLinear),
@@ -284,7 +368,8 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
 export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
   return runs.map((r) => {
     const rs = results.filter((x) => x.runId === r.id);
-    const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0);
+    // Tokens: also those of failed attempts that a retry replaced (paid for too).
+    const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0) + (r.replaced?.usage[k] ?? 0);
     return {
       run: r.number,
       label: r.label,
@@ -299,6 +384,7 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       requests_ok: rs.filter((x) => x.status === 'ok').length,
       requests_failed: rs.filter((x) => x.status === 'error').length,
       requests_retried: (r.retries ?? []).reduce((s, x) => s + x.requests, 0),
+      requests_replaced_by_retries: r.replaced?.requests ?? 0,
       provider: r.snapshot.model.provider,
       model_requested: r.snapshot.model.model,
       models_reported: [...new Set(rs.map((x) => x.modelReported).filter(Boolean))].join('; '),

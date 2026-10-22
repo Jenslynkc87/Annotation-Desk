@@ -1,12 +1,11 @@
 import { useMemo, useState } from 'react';
-import { comparableFields } from '../lib/compare';
 import { buildBackup } from '../lib/export/backup';
 import { buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from '../lib/export/packages';
-import { goldColumnsFor } from '../lib/export/tables';
+import { labelPairs } from '../lib/export/tables';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
-import { buildDocViews, runTitle } from '../lib/view';
+import { runTitle } from '../lib/view';
 import { Icon } from './ui';
 
 function exportData(): ExportData {
@@ -19,8 +18,9 @@ export function ExportView() {
   const results = useStore((s) => s.results);
   const docs = useStore((s) => s.docs);
   const withResults = runs.filter((r) => results.some((x) => x.runId === r.id));
-  const [runId, setRunId] = useState(withResults[withResults.length - 1]?.id ?? '');
-  const run = runs.find((r) => r.id === runId);
+  // The run picked, else the latest with results (also once the first results arrive while this tab is open).
+  const [runId, setRunId] = useState('');
+  const run = withResults.find((r) => r.id === runId) ?? withResults[withResults.length - 1];
   const [busy, setBusy] = useState('');
   const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(true);
@@ -36,13 +36,13 @@ export function ExportView() {
     }
   };
 
+  const study = useStore((s) => currentStudy(s))!;
   // The label columns agreement is computed for (as in the exports: codebook fields, or scores in JSON answers).
   const gold = useMemo(() => {
     if (!run) return [];
-    const views = run.snapshot.prompt.outputMode === 'text' ? buildDocViews(docs, runs, results, run.id).values() : [];
-    return comparableFields(run, views).flatMap((f) => goldColumnsFor(f.key, docs).map((c) => `${f.label} ↔ ${c}`));
-  }, [run, docs, runs, results]);
-  const study = currentStudy(getState())!;
+    const { fields, pairs } = labelPairs(run, docs, runs, results, study);
+    return pairs.map((p) => `${fields.find((f) => f.key === p.field)?.label ?? p.field} ↔ ${p.column}`);
+  }, [run, docs, runs, results, study]);
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
 
   return (
@@ -51,7 +51,7 @@ export function ExportView() {
         <div>
           <div className="field" style={{ marginBottom: 6, maxWidth: 640 }}>
             <label htmlFor="exp-run">Run to report</label>
-            <select id="exp-run" className="select" value={runId} onChange={(e) => setRunId(e.target.value)}>
+            <select id="exp-run" className="select" value={run?.id ?? ''} onChange={(e) => setRunId(e.target.value)}>
               {!withResults.length && <option value="">No runs with results yet</option>}
               {[...withResults].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
@@ -125,7 +125,11 @@ export function ExportView() {
             </span>
           </label>
           <label className="check">
-            <input type="checkbox" checked={supp.includeRationales} onChange={(e) => setSupp({ ...supp, includeRationales: e.target.checked })} /> Include model rationales
+            <input type="checkbox" checked={supp.includeRationales} onChange={(e) => setSupp({ ...supp, includeRationales: e.target.checked })} />
+            <span>
+              Include the model’s rationale
+              <div className="hint">The separate rationale field. Fields of your codebook (e.g. explanations) are annotations and always included.</div>
+            </span>
           </label>
           <label className="check">
             <input type="checkbox" checked={supp.includeLogs} onChange={(e) => setSupp({ ...supp, includeLogs: e.target.checked })} />

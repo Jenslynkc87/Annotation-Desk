@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/prompt';
-import { batchPlan, cancelJob, checkBatch, currentStudy, getState, promptFingerprint, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
+import { batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
 import type { Doc } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
@@ -89,8 +89,10 @@ function TextsAndResults() {
         if (d.meta[col] !== val) return false;
       }
       if (statusFilter === 'mismatch') {
-        if (!compareCol || v.status === 'none') return false;
-        if (normalizeLabel(v.values[compareField], compareYesNo) === normalizeLabel(d.meta[compareCol], compareYesNo)) return false;
+        // Only texts with both a model value and a label (as the highlighted cells), not every unlabelled one.
+        const val = normalizeLabel(v.values[compareField], compareYesNo);
+        const gold = normalizeLabel(d.meta[compareCol], compareYesNo);
+        if (!compareCol || v.status === 'none' || v.status === 'error' || !val || !gold || val === gold) return false;
       }
       if (!q) return true;
       return d.docId.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) || Object.values(v.values).some((x) => x.toLowerCase().includes(q));
@@ -149,7 +151,7 @@ function TextsAndResults() {
     const plan = batch && n > 50 ? batchPlan(study, ds) : null;
     const split =
       plan && plan.batches > 1
-        ? `\n\nThis is about ${Math.round(plan.mb)} MB, more than the ${plan.limitMb} MB ${plan.provider} accepts in one batch, so it will be sent as ${plan.batches} batches in the same run (all at batch price; the results are collected together).`
+        ? `\n\nThis is ${plan.bySize ? `about ${Math.round(plan.mb)} MB, more than ${plan.provider} accepts in one batch (${plan.limitMb} MB, of which this app uses at most 95%)` : `${plan.requests.toLocaleString()} requests, more than ${plan.provider} accepts in one batch (${plan.limitRequests.toLocaleString()})`}, so it will be sent as ${plan.batches} batches in the same run (all at batch price; the results are collected together).`
         : '';
     if (n <= 50 && !long) return true;
     return confirm(
@@ -164,24 +166,39 @@ function TextsAndResults() {
   };
 
   const remaining = async () => {
-    const hash = await promptFingerprint(study);
-    const doneIds = new Set(
-      getState()
-        .results.filter((r) => r.status === 'ok' && runs.find((x) => x.id === r.runId)?.snapshot.promptHash === hash)
-        .map((r) => r.docId),
-    );
-    // Texts still waiting in a batch with this prompt are on their way: sending them again would pay twice.
-    const waiting = new Set(runs.filter((r) => r.status === 'submitted' && r.snapshot.promptHash === hash).flatMap((r) => r.docIds));
-    const todo = docs.filter((d) => !doneIds.has(d.id) && !waiting.has(d.id));
-    const inBatch = docs.filter((d) => !doneIds.has(d.id) && waiting.has(d.id)).length;
-    const batchNote = inBatch ? ` ${inBatch.toLocaleString()} ${inBatch === 1 ? `${w.one} is` : `${w.many} are`} still waiting in a batch and left out.` : '';
-    if (!todo.length) return alert(`Every ${w.one} already has a result with the current prompt.${batchNote}`);
-    if (inBatch) toast(batchNote.trim());
-    await runDocs(todo, `Not yet annotated with the current prompt (${todo.length})`, false);
+    // Texts still waiting in a batch with this prompt and model are on their way: sending them again would pay twice.
+    const { todo, waiting } = remainingDocs(study, docs, runs, getState().results);
+    const batchNote = waiting ? `${waiting.toLocaleString()} ${waiting === 1 ? `${w.one} is` : `${w.many} are`} still waiting in a batch and left out.` : '';
+    if (!todo.length) {
+      return alert(waiting ? `Every ${w.one} has a result with the current prompt and model, or is waiting in a batch. ${batchNote}` : `Every ${w.one} already has a result with the current prompt and model.`);
+    }
+    if (waiting) toast(batchNote);
+    await runDocs(todo, `Not yet annotated with the current prompt and model (${todo.length})`, false);
   };
 
   const testDoc = docs.find((d) => selected.has(d.id)) ?? docs[0];
   const busy = !!job || !!submitting;
+  // The progress of a run and its Cancel button, shown whatever else is on the page.
+  const progress = (
+    <>
+      {submitting && !job && <div className="progress-label">{submitting}</div>}
+      {job && (
+        <div>
+          <div className="progress">
+            <div style={{ width: `${(job.done / Math.max(1, job.total)) * 100}%` }} />
+          </div>
+          <div className="progress-label">
+            <span>
+              {job.done} of {job.total} requests{job.failed ? ` · ${job.failed} failed` : ''}
+            </span>
+            <button className="btn small danger" onClick={cancelJob}>
+              <Icon name="stop" size={12} /> Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   return (
     <>
@@ -232,7 +249,7 @@ function TextsAndResults() {
               <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All ${w.many} (${docs.length})`, false)} title={study.options.batch ? `Submit every ${w.one} as a batch` : `Annotate every ${w.one} now`}>
                 All ({docs.length.toLocaleString()})
               </button>
-              <button className="btn" disabled={busy} onClick={remaining} title={`Starts a new run with the ${w.many} that have no usable result for the current prompt. To complete a finished run instead, use Retry failed under Runs & agreement.`}>
+              <button className="btn" disabled={busy} onClick={remaining} title={`Starts a new run with the ${w.many} that have no usable result for the current prompt, model and effort. To complete a finished run instead, use Retry failed under Runs & agreement.`}>
                 Remaining
               </button>
             </div>
@@ -245,22 +262,7 @@ function TextsAndResults() {
           )}
           {showEstimate ? <CostEstimate selected={selected} onClose={() => setShowEstimate(false)} /> : <EstimateLink onClick={() => setShowEstimate(true)} />}
 
-          {submitting && !job && <div className="progress-label">{submitting}</div>}
-          {job && (
-            <div>
-              <div className="progress">
-                <div style={{ width: `${(job.done / Math.max(1, job.total)) * 100}%` }} />
-              </div>
-              <div className="progress-label">
-                <span>
-                  {job.done} of {job.total} requests{job.failed ? ` · ${job.failed} failed` : ''}
-                </span>
-                <button className="btn small danger" onClick={cancelJob}>
-                  <Icon name="stop" size={12} /> Cancel
-                </button>
-              </div>
-            </div>
-          )}
+          {progress}
           {pendingBatches.map((r) => (
             <div className="notice" key={r.id} style={{ marginTop: 10 }}>
               <div className="row">
@@ -339,10 +341,11 @@ function TextsAndResults() {
                     Draw a sample…
                   </button>
                   <div className="menu-sep" />
+                  {busy && <div className="menu-note">A run is in progress: delete {w.many} when it has finished.</div>}
                   <button
                     className="menu-item"
                     style={{ color: 'var(--err)' }}
-                    disabled={!selected.size}
+                    disabled={!selected.size || busy}
                     onClick={() => {
                       close();
                       if (confirm(`Delete ${selected.size} selected ${selected.size === 1 ? w.one : w.many}? Their results stay in past runs but are hidden.`)) {
@@ -356,6 +359,7 @@ function TextsAndResults() {
                   <button
                     className="menu-item"
                     style={{ color: 'var(--err)' }}
+                    disabled={busy}
                     onClick={() => {
                       close();
                       if (confirm(`Delete all ${docs.length} ${w.many} from this study? Runs are kept.`)) void removeDocs(docs.map((d) => d.id));
@@ -470,6 +474,7 @@ function TextsAndResults() {
           </div>
         </div>
       )}
+      {!docs.length && progress}
       {!docs.length && (
         <div className="empty" style={{ paddingBottom: 10 }}>
           <strong>No {w.many} yet</strong>

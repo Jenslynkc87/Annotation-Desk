@@ -55,7 +55,9 @@ describe('full scale and intervals', () => {
   const x = s([1, 2, 3, 3, 2, 1, 5, 2, 3, 1]);
   const y = s([1, 2, 2, 3, 2, 1, 5, 1, 3, 2]);
   it('weighted kappa uses the whole codebook scale (sklearn labels=[1..5])', () => {
-    expect(cohenKappa(zip(x, y), 'quadratic')).toBeCloseTo(0.8387097, 6);
+    // Weights by value: 1 vs 5 is four points apart even when 4 was never used (sklearn without labels= counts
+    // positions among the values seen, 0.8387097, as this app did before October 22, 2026).
+    expect(cohenKappa(zip(x, y), 'quadratic')).toBeCloseTo(0.8920863, 6);
     expect(cohenKappa(zip(x, y), 'quadratic', s([1, 2, 3, 4, 5]))).toBeCloseTo(0.8920863, 6);
     expect(agreement(x, y, 'ordinal', s([1, 2, 3, 4, 5])).weightedKappa).toBeCloseTo(0.8920863, 6);
   });

@@ -53,7 +53,8 @@ describe('plain-text JSON answers annotated more than once', () => {
     expect(cols).toEqual(['race', 'race_explanation', 'gender', 'gender_explanation']);
   });
   it('weighs plain-text scores on the whole scale between the lowest and highest value', () => {
-    const views = ['-3', '-1', '0', '3'].map((x) => ({ run: run, results: [], values: { response: `{"s": ${x}}` }, consistency: {}, rationale: '', status: 'ok' as const }));
+    // (Read from each answer, as a view holds them.)
+    const views = ['-3', '-1', '0', '3'].map((x) => ({ run: run, results: [mkResult(1, { response: `{"s": ${x}}` })], values: { response: `{"s": ${x}}` }, consistency: {}, rationale: '', status: 'ok' as const }));
     expect(comparableFields(run, views)[0].allowed).toEqual(['-3', '-2', '-1', '0', '1', '2', '3']);
   });
 });
@@ -126,7 +127,7 @@ describe('second audit (Oct 2026)', () => {
     expect(rows.map((r) => [r.field, r.compared_with, r.stats.n])).toEqual([['race', 'race_gold', 1]]);
   });
   it('treats a JSON field of scores with a stray "NA" as scores', () => {
-    const views = ['1', '2', '"NA"', '3'].map((x) => ({ run: mkRun(text), results: [], values: { response: `{"s": ${x}}` }, consistency: {}, rationale: '', status: 'ok' as const }));
+    const views = ['1', '2', '"NA"', '3'].map((x) => ({ run: mkRun(text), results: [mkResult(1, { response: `{"s": ${x}}` })], values: { response: `{"s": ${x}}` }, consistency: {}, rationale: '', status: 'ok' as const }));
     const f = comparableFields(mkRun(text), views);
     expect(f.map((x) => [x.key, x.level, x.scaleSeen])).toEqual([['s', 'ordinal', true]]);
   });

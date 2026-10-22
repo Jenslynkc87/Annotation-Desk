@@ -71,11 +71,60 @@ export async function getRun(id: string): Promise<Run | undefined> {
   return (await db()).get('runs', id);
 }
 
-export async function putResult(r: Result, log: ResultLog | null) {
+/**
+ * Store a result and its log. When a retry replaces an earlier, failed attempt stored under the same id, that
+ * attempt's log is kept as `${id}#${attempt}` (with its outcome and token use), so every request sent stays on
+ * record; the earlier result is returned (null if there was none). `r.attempt` is set accordingly.
+ */
+export async function putResult(r: Result, log: ResultLog | null): Promise<Result | null> {
   const tx = (await db()).transaction(['results', 'logs'], 'readwrite');
-  const ops: Promise<unknown>[] = [tx.objectStore('results').put(r)];
-  if (log) ops.push(tx.objectStore('logs').put(log));
-  await Promise.all([...ops, tx.done]);
+  const results = tx.objectStore('results');
+  const logs = tx.objectStore('logs');
+  let replaced: Result | null = null;
+  const prev = await results.get(r.id);
+  // (The same answer stored again, e.g. batch results collected a second time, is not a new attempt.)
+  if (prev && !(prev.requestedAt === r.requestedAt && prev.responseId === r.responseId)) {
+    replaced = prev;
+    const n = prev.attempt ?? 1;
+    r.attempt = n + 1;
+    const prevLog = await logs.get(r.id);
+    await logs.put({
+      id: `${r.id}#${n}`,
+      runId: prev.runId,
+      studyId: prev.studyId,
+      requestPart: prevLog?.requestPart ?? {},
+      response: prevLog?.response ?? null,
+      attempt: n,
+      replaced: {
+        status: prev.status,
+        error: prev.error,
+        parseError: prev.parseError,
+        stopReason: prev.stopReason,
+        usage: prev.usage,
+        requestedAt: prev.requestedAt,
+        completedAt: prev.completedAt,
+      },
+    });
+  } else if (prev?.attempt) r.attempt = prev.attempt;
+  await results.put(r);
+  if (log) await logs.put(log);
+  await tx.done;
+  return replaced;
+}
+
+/** Texts and the study in one transaction: both are saved, or neither (e.g. a drawn sample and its note). */
+export async function putDocsAndStudy(docs: Doc[], study: Study) {
+  const tx = (await db()).transaction(['docs', 'studies'], 'readwrite');
+  await Promise.all([...docs.map((x) => tx.objectStore('docs').put(x)), tx.objectStore('studies').put(study), tx.done]);
+}
+
+export async function getResultsForRun(runId: string): Promise<Result[]> {
+  return (await db()).getAllFromIndex('results', 'byRun', runId);
+}
+
+/** Every run of every study (e.g. to find a batch that a copy of a study also waits for). */
+export async function listAllRuns(): Promise<Run[]> {
+  return (await db()).getAll('runs');
 }
 
 /** Many results or logs in one transaction (used when importing a backup). */
@@ -90,6 +139,18 @@ export async function getLog(id: string): Promise<ResultLog | undefined> {
 
 export async function getLogsForRun(runId: string): Promise<ResultLog[]> {
   return (await db()).getAllFromIndex('logs', 'byRun', runId);
+}
+
+/**
+ * A run's logs a page at a time, in id order, so that a full run (each log holds a whole text) never has to be in
+ * memory at once. Log ids start with the run id, so a page is one key range of the store.
+ */
+export async function* logPagesForRun(runId: string, pageSize = 300): AsyncGenerator<ResultLog[]> {
+  const keys = (await (await db()).getAllKeysFromIndex('logs', 'byRun', runId)).sort();
+  for (let i = 0; i < keys.length; i += pageSize) {
+    const page = keys.slice(i, i + pageSize);
+    yield await (await db()).getAll('logs', IDBKeyRange.bound(page[0], page[page.length - 1]));
+  }
 }
 
 async function deleteByIndex(

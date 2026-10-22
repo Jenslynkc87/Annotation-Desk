@@ -10,8 +10,8 @@ import {
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
-import { guessKeyColumn, matchLabels } from '../lib/import/labels';
-import { addDocs, addLabels, currentStudy, toast, useStore } from '../lib/store';
+import { clearPlan, guessKeyColumn, matchLabels } from '../lib/import/labels';
+import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
 import { isEntries } from '../lib/subject';
 import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
@@ -29,6 +29,8 @@ export function CorpusImport() {
   const [paste, setPaste] = useState(false);
   const [tables, setTables] = useState<ParsedTable[]>([]);
   const [labels, setLabels] = useState<ParsedTable | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const hasMeta = useStore((s) => s.docs.some((d) => Object.keys(d.meta).some((c) => c !== 'file')));
   const inputRef = useRef<HTMLInputElement>(null);
   const labelsRef = useRef<HTMLInputElement>(null);
 
@@ -46,6 +48,8 @@ export function CorpusImport() {
     const files = all.filter((f) => !/\.zip$/i.test(f.name));
     if (zips.length) toast(`${zips.length === 1 ? zips[0].name : `${zips.length} zip files`} can’t be read directly. ${ZIP_NOTE}`, 'error');
     if (!files.length) return;
+    // The study the files are for: if another study is opened while they are being read, nothing is added.
+    const studyId = getState().currentId ?? undefined;
     const texts: NewDoc[] = [];
     const newTables: ParsedTable[] = [];
     const errors: string[] = [];
@@ -61,7 +65,7 @@ export function CorpusImport() {
       else errors.push(`${r.name}: ${r.error}`);
     }
     setBusy('');
-    if (texts.length) await addDocs(texts);
+    if (texts.length) await addDocs(texts, studyId);
     if (newTables.length) setTables(newTables);
     if (errors.length) toast(`Skipped ${errors.length} file(s): ${errors.slice(0, 3).join('; ')}${errors.length > 3 ? '…' : ''}`, 'error');
   };
@@ -134,7 +138,13 @@ export function CorpusImport() {
             {entries ? 'Add your answers from a spreadsheet…' : 'Add labels or metadata from a spreadsheet…'}
           </button>
         )}
+        {hasMeta && (
+          <button className="btn small" onClick={() => setRemoving(true)} title="Remove a column added by mistake (or an outdated one) from every text">
+            Remove a column…
+          </button>
+        )}
       </div>
+      {removing && <RemoveColumnDialog onDone={() => setRemoving(false)} />}
       <input
         ref={labelsRef}
         type="file"
@@ -326,6 +336,7 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
           {p}
         </div>
       ))}
+      <SheetNote table={table} />
       <div className="grid2">
         {!entry && (
           <div className="field">
@@ -415,15 +426,31 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   );
 }
 
+/** Which sheet of a workbook was read, when it has several. */
+function SheetNote({ table }: { table: ParsedTable }) {
+  if (!table.sheets || table.sheets.length < 2) return null;
+  return (
+    <div className="hint" style={{ marginBottom: 10 }}>
+      Read the sheet “{table.sheet}”, the first of {table.sheets.length} ({table.sheets.join(', ')}). To use another sheet, move it to the front in Excel or
+      save it as CSV.
+    </div>
+  );
+}
+
 function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: ParsedTable; onDone: () => void }) {
   const docs = useStore((s) => s.docs);
   const [keyCol, setKeyCol] = useState(() => guessKeyColumn(docs, table));
+  const [keepUnlisted, setKeepUnlisted] = useState(false);
   const m = useMemo(() => matchLabels(docs, table, keyCol), [docs, table, keyCol]);
+  const clear = useMemo(() => clearPlan(docs, m, keepUnlisted), [docs, m, keepUnlisted]);
+  // Texts this sheet doesn't list but that have a value in one of its columns already (kept only if asked).
+  const unlisted = useMemo(() => docs.filter((d) => !m.updates.has(d.id) && m.replaced.some((c) => (d.meta[c] ?? '') !== '')).length, [docs, m]);
+  const removedBy = (c: string) => [...clear.values()].filter((cols) => cols.includes(c)).length;
   const list = (xs: string[]) => `${xs.slice(0, 5).join(', ')}${xs.length > 5 ? ', …' : ''}`;
   const [one, many] = entries ? ['entry', 'entries'] : ['text', 'texts'];
+  const blocked = m.conflicts.length > 0;
   const apply = async () => {
-    await addLabels(m.updates);
-    onDone();
+    if (await addLabels(m.updates, clear)) onDone();
   };
   return (
     <Modal
@@ -432,7 +459,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
       footer={
         <>
           <button className="btn" onClick={onDone}>Cancel</button>
-          <button className="btn primary" disabled={!m.updates.size || !m.columns.length} onClick={apply}>
+          <button className="btn primary" disabled={!m.updates.size || !m.columns.length || blocked} onClick={apply}>
             Add to {m.updates.size.toLocaleString()} {m.updates.size === 1 ? one : many}
           </button>
         </>
@@ -442,15 +469,17 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
         {entries ? (
           <>
             Each row is matched to an entry by its ID; the other columns are added to that entry (e.g. your own answers, to compare with the model). The model
-            does not see these columns: what it is sent was fixed when the entries were added. Empty cells are skipped.
+            does not see these columns: what it is sent was fixed when the entries were added.
           </>
         ) : (
           <>
             Each row is matched to a text by its file name or ID; the other columns are added to that text as labels (e.g. human codes to compare with the
-            model). Texts are not changed, and empty cells are skipped.
+            model). Texts are not changed.
           </>
-        )}
+        )}{' '}
+        A column that is already there is replaced by this sheet’s: a blank cell leaves no value (“NA” keeps a {one} out of the comparison).
       </p>
+      <SheetNote table={table} />
       <div className="field">
         <label>Column with the {entries ? 'ID' : 'file name or ID'}</label>
         <select className="select" value={keyCol} onChange={(e) => setKeyCol(e.target.value)}>
@@ -459,15 +488,83 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
           ))}
         </select>
       </div>
-      <div className={`notice ${m.unmatched.length || m.ambiguous.length ? 'warn' : ''}`}>
+      <div className={`notice ${m.unmatched.length || m.ambiguous.length || blocked || clear.size ? 'warn' : ''}`}>
         <div>
-          <strong>{m.updates.size.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {entries ? 'an entry' : 'a text'}. Columns to add:{' '}
-          {m.columns.length ? m.columns.join(', ') : '(none)'}.
+          <strong>{m.matchedRows.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {m.updates.size.toLocaleString()}{' '}
+          {m.updates.size === 1 ? one : many}. Columns to add: {m.columns.length ? m.columns.join(', ') : '(none)'}.
         </div>
+        {blocked && (
+          <div>
+            <strong>
+              Several rows for the same {one} with different values ({m.conflicts.length}): {list(m.conflicts)}.
+            </strong>{' '}
+            Only one row per {one} can be used, e.g. not one row per coder: put each coder’s labels in a column of their own (race_coder1, race_coder2, …).
+            Nothing is added until the sheet is fixed.
+          </div>
+        )}
+        {m.repeated.length > 0 && <div>Listed more than once with the same values, merged ({m.repeated.length}): {list(m.repeated)}</div>}
         {m.unmatched.length > 0 && <div>Not found ({m.unmatched.length}): {list(m.unmatched)}</div>}
         {m.ambiguous.length > 0 && <div>Matches more than one {one}, skipped ({m.ambiguous.length}): {list(m.ambiguous)}</div>}
-        {m.replaced.length > 0 && <div>Already present, values will be replaced: {m.replaced.join(', ')}</div>}
+        {m.skipped.length > 0 && <div>Not added: the sheet’s {m.skipped.join(', ')} column ({m.skipped.length === 1 ? 'it' : 'they'} would rename the {many}: each keeps the name of its own file).</div>}
+        {m.replaced.length > 0 && (
+          <div>
+            Already present, replaced by this sheet:{' '}
+            {m.replaced.map((c) => {
+              const n = removedBy(c);
+              return `${c}${n ? ` (${n.toLocaleString()} earlier value${n === 1 ? '' : 's'} removed: blank here${keepUnlisted ? '' : ' or not listed'})` : ''}`;
+            }).join(', ')}
+            .
+          </div>
+        )}
       </div>
+      {unlisted > 0 && (
+        <label className="check" style={{ marginTop: 10 }}>
+          <input type="checkbox" checked={keepUnlisted} onChange={(e) => setKeepUnlisted(e.target.checked)} /> Keep the values of the {unlisted.toLocaleString()}{' '}
+          {unlisted === 1 ? one : many} this sheet doesn’t list (e.g. when adding labels in parts)
+        </label>
+      )}
+    </Modal>
+  );
+}
+
+/** Remove a metadata column (e.g. labels added by mistake) from every text; the texts themselves are not changed. */
+function RemoveColumnDialog({ onDone }: { onDone: () => void }) {
+  const docs = useStore((s) => s.docs);
+  const busy = useStore((s) => isBusy(s));
+  // Not the file name: texts are matched and named by it.
+  const cols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))].filter((c) => c !== 'file'), [docs]);
+  const [col, setCol] = useState(cols[0] ?? '');
+  const n = docs.filter((d) => col in d.meta).length;
+  const remove = async () => {
+    if (!confirm(`Remove the column "${col}" from ${n.toLocaleString()} ${n === 1 ? 'text' : 'texts'}? This cannot be undone (add it again from a spreadsheet if needed).`)) return;
+    if (await removeMetaColumn(col)) onDone();
+  };
+  return (
+    <Modal
+      title="Remove a column"
+      onClose={onDone}
+      footer={
+        <>
+          <button className="btn" onClick={onDone}>Cancel</button>
+          <button className="btn danger" disabled={!col || busy} onClick={remove}>
+            Remove “{col}”
+          </button>
+        </>
+      }
+    >
+      <p className="hint" style={{ marginTop: 0 }}>
+        Removes a label or metadata column from every text in this study, e.g. one added by mistake or replaced by a corrected sheet. The texts and the runs are not
+        changed.
+      </p>
+      <div className="field">
+        <label>Column</label>
+        <select className="select" value={col} onChange={(e) => setCol(e.target.value)}>
+          {cols.map((c) => (
+            <option key={c}>{c}</option>
+          ))}
+        </select>
+      </div>
+      <div className="hint">{n.toLocaleString()} {n === 1 ? 'text has' : 'texts have'} a value in this column.</div>
     </Modal>
   );
 }

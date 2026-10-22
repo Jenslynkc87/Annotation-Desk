@@ -11,7 +11,14 @@ const textRun: Run = {
   id: 'r', studyId: 's', number: 1, label: '', createdAt: '', finishedAt: null, mode: 'sync', scope: '', docIds: [], status: 'completed', batch: null, error: null,
   snapshot: { appVersion: 't', model: DEFAULT_MODEL_SETTINGS, options: DEFAULT_RUN_OPTIONS, prompt: { ...DEFAULT_PROMPT, outputMode: 'text' }, promptVersion: 1, promptHash: 'h', outputSchema: null, requestBase: {} },
 };
-const view = (response: string): DocView => ({ run: textRun, results: [], values: { response }, consistency: {}, rationale: '', status: 'ok' });
+const view = (response: string): DocView => ({
+  run: textRun,
+  results: [{ id: 'r:d:1', runId: 'r', studyId: 's', docId: 'd', replicate: 1, status: 'ok', values: { response }, rationale: '', reasoningSummary: '', rawText: response, parseError: null, error: null, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 }, latencyMs: 1, requestedAt: '', completedAt: '', responseId: '', modelReported: '', stopReason: 'end_turn' }],
+  values: { response },
+  consistency: {},
+  rationale: '',
+  status: 'ok',
+});
 
 describe('comparing plain-text runs that answer in JSON', () => {
   const views = [view('{"race": {"reasoning": "x", "negative": 2, "positive": 0}, "note": "hi"}'), view('{"race": {"reasoning": "y", "negative": 1, "positive": 0.5}}')];

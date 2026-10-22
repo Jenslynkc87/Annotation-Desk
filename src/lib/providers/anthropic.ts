@@ -3,6 +3,7 @@ import type {
   BatchLine,
   BatchStatus,
   CallOutcome,
+  ListedBatch,
   ModelInfo,
   ProviderAdapter,
   RequestInputs,
@@ -84,6 +85,16 @@ function toOutcome(msg: Anthropic.Message): CallOutcome {
   };
 }
 
+/**
+ * Leave out what the API no longer takes: `fallbacks` (the refusal fallback of the first version, October 15,
+ * 2026, a beta feature) is still in the frozen settings of runs made then, and would be rejected when their
+ * failed requests are re-sent.
+ */
+function withoutRetiredParams(params: Record<string, unknown>): Record<string, unknown> {
+  const { fallbacks: _f, ...rest } = params;
+  return rest;
+}
+
 export const anthropicAdapter: ProviderAdapter = {
   id: 'anthropic',
   label: 'Anthropic (Claude)',
@@ -150,7 +161,7 @@ export const anthropicAdapter: ProviderAdapter = {
   },
 
   async send(apiKey, base, part, signal) {
-    const params = { ...base, ...part };
+    const params = withoutRetiredParams({ ...base, ...part });
     // Streaming avoids HTTP timeouts on long thinking; we only keep the final message.
     const msg = await client(apiKey).messages.stream(params as unknown as Anthropic.MessageCreateParamsNonStreaming, { signal }).finalMessage();
     return toOutcome(msg);
@@ -161,7 +172,7 @@ export const anthropicAdapter: ProviderAdapter = {
       {
         requests: items.map((it) => ({
           custom_id: it.customId,
-          params: { ...base, ...it.part } as unknown as Anthropic.MessageCreateParamsNonStreaming,
+          params: withoutRetiredParams({ ...base, ...it.part }) as unknown as Anthropic.MessageCreateParamsNonStreaming,
         })),
       },
       UPLOAD,
@@ -179,7 +190,20 @@ export const anthropicAdapter: ProviderAdapter = {
       total,
       completed: c.succeeded,
       failed: c.errored + c.canceled + c.expired,
+      endedAt: b.ended_at ?? undefined,
     };
+  },
+
+  async listRecentBatches(apiKey, sinceIso) {
+    const since = Date.parse(sinceIso) - 120_000;
+    const out: ListedBatch[] = [];
+    // Newest first: stop at the first batch created before the upload began.
+    for await (const b of client(apiKey).messages.batches.list({ limit: 20 })) {
+      if (Date.parse(b.created_at) < since) break;
+      const c = b.request_counts;
+      out.push({ batchId: b.id, createdAt: b.created_at, requests: c.processing + c.succeeded + c.errored + c.canceled + c.expired });
+    }
+    return out;
   },
 
   async fetchBatchResults(apiKey, batchId) {

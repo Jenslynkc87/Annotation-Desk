@@ -13,6 +13,8 @@ export function App() {
   const ready = useStore((s) => s.ready);
   const study = useStore((s) => currentStudy(s));
   const saving = useStore((s) => s.saving);
+  const saveError = useStore((s) => s.saveError);
+  const otherTab = useStore((s) => s.otherTab);
   const nRuns = useStore((s) => s.runs.length);
   const keys = useStore((s) => s.keys);
   const toasts = useStore((s) => s.toasts);
@@ -23,8 +25,9 @@ export function App() {
   const modelsStatus = useStore((s) => s.modelsStatus);
   const modelsError = useStore((s) => s.modelsError);
   const failing = (Object.keys(keys) as (keyof typeof keys)[]).filter((p) => keys[p] && modelsStatus[p] === 'error');
-  // Closing or reloading the tab stops a run that is being sent (or a batch being uploaded): ask first.
-  const busy = useStore((s) => isBusy(s));
+  // Closing or reloading the tab stops a run that is being sent, a batch being uploaded or a backup being
+  // imported, and loses a change not yet saved: ask first.
+  const busy = useStore((s) => isBusy(s) || s.importing || !!s.saveError);
   useEffect(() => {
     if (!busy) return;
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();
@@ -61,14 +64,26 @@ export function App() {
               <span className={`badge ${keyCount ? 'ok' : 'warn'}`}>{keyCount ? `${keyCount} set` : 'none'}</span>
             )}
           </button>
-          <span className="save-status" title="Studies, texts and results are stored in this browser (IndexedDB).">
-            <Icon name="check" size={14} /> {saving ? 'Saving…' : 'Saved in this browser'}
-          </span>
+          {saveError ? (
+            <span className="save-status err" title={`Your latest changes could not be saved: ${saveError}. They are tried again every few seconds.`}>
+              Not saved: storage full?
+            </span>
+          ) : (
+            <span className="save-status" title="Studies, texts and results are stored in this browser (IndexedDB).">
+              <Icon name="check" size={14} /> {saving ? 'Saving…' : 'Saved in this browser'}
+            </span>
+          )}
         </div>
       </header>
 
       <main className="page">
-        {!ready || !study ? (
+        {otherTab ? (
+          <div className="notice warn" style={{ maxWidth: 640, margin: '40px auto' }}>
+            <strong>Annotation Desk is already open in another tab or window of this browser.</strong> It works in one tab at a time, so that the
+            same requests are never sent (and paid for) twice and changes don't overwrite each other. Switch to the other tab, or close it: this tab
+            then opens by itself.
+          </div>
+        ) : !ready || !study ? (
           <div className="empty">Loading…</div>
         ) : (
           <>
@@ -97,7 +112,7 @@ export function App() {
 
       <footer className="footer">
         <span>Annotation Desk v{__APP_VERSION__} · Runs entirely in your browser. API calls go directly to the provider you choose.</span>
-        <span>Data stays in this browser until you export or delete it.</span>
+        <span>Data is stored in this browser, which can clear it (e.g. when the disk is full): keep a study backup (Export).</span>
       </footer>
 
       {keysOpen && <KeysDialog onClose={() => setKeysOpen(false)} />}

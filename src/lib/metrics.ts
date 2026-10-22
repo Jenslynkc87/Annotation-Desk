@@ -17,7 +17,7 @@ export interface Agreement {
   n: number;
   /** The level the statistics were computed at: the one asked for, or nominal when the values aren't numbers. */
   level: Level;
-  /** On a scale: texts left out because a label wasn't a number (e.g. "NA"), and some of those labels. */
+  /** On a scale: texts left out because a label wasn't a number (e.g. "NA") or was outside the codebook scale (e.g. 99), and some of those labels. */
   leftOut: { n: number; values: string[] };
   percentAgreement: number | null;
   cohenKappa: number | null;
@@ -95,7 +95,11 @@ export function percentAgreement(pairs: [string, string][]): number | null {
 
 /**
  * Cohen's kappa. `scale` (e.g. the codebook's allowed values) adds categories nobody used, so that
- * quadratic weights reflect distances on the full scale (as sklearn's `labels=`); plain kappa is unaffected.
+ * weights reflect distances on the full scale (as sklearn's `labels=`); plain kappa is unaffected.
+ * Weights for numbers are the distance between the values over the scale's range, |x − y| / (max − min)
+ * (squared for quadratic): on a whole-number scale such as −3…3 that is the same as counting steps, and a
+ * combined label between two scale points (e.g. 0.5, the median of an even number of annotations) gets
+ * partial credit by its distance instead of becoming an extra step that stretches every other distance.
  */
 export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear' | 'quadratic' = 'none', scale: string[] = []): number | null {
   const n = pairs.length;
@@ -104,7 +108,11 @@ export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear'
   if (cats.length < 2) return null;
   const k = cats.length;
   const idx = new Map(cats.map((c, i) => [c, i]));
-  const w = (i: number, j: number) => (weights === 'none' ? (i === j ? 0 : 1) : weights === 'linear' ? Math.abs(i - j) / (k - 1) : ((i - j) / (k - 1)) ** 2);
+  // Position on the scale: the value itself for numbers, else the category's rank.
+  const at = cats.every(isNum) ? cats.map(Number) : cats.map((_, i) => i);
+  const range = Math.max(...at) - Math.min(...at);
+  const dist = (i: number, j: number) => Math.abs(at[i] - at[j]) / range;
+  const w = (i: number, j: number) => (weights === 'none' ? (i === j ? 0 : 1) : weights === 'linear' ? dist(i, j) : dist(i, j) ** 2);
   const obs = Array.from({ length: k }, () => new Array(k).fill(0));
   const ra = new Array(k).fill(0);
   const rb = new Array(k).fill(0);
@@ -326,14 +334,20 @@ export function agreement(
   }
   // On a scale, a value that isn't a number (e.g. "NA" in a coder's column) is missing, not a category of its
   // own (one such cell would otherwise turn every statistic nominal), as long as most values are numbers.
-  // Those left out are reported. Mostly words (e.g. "2 (moderate)"): compared as categories instead.
+  // So is a number outside the codebook scale (e.g. a missing-value code such as 9 or 99, or a typo such as
+  // 30 for 3), which would otherwise stretch the scale every weight is measured on. Those left out are
+  // reported. Mostly words (e.g. "2 (moderate)"): compared as categories instead.
   const leftOut = { n: 0, values: [] as string[] };
   if (level !== 'nominal') {
-    const numeric = pairs.filter(([x, y]) => isNum(x) && isNum(y));
-    if (numeric.length && numeric.length >= pairs.length / 2 && numeric.length < pairs.length) {
-      leftOut.n = pairs.length - numeric.length;
-      leftOut.values = [...new Set(pairs.flat().filter((v) => !isNum(v)))].slice(0, 5);
-      pairs = numeric;
+    const scaleNums = scaleSeen ? [] : allowed.filter(isNum).map(Number);
+    const lo = scaleNums.length >= 2 ? Math.min(...scaleNums) : -Infinity;
+    const hi = scaleNums.length >= 2 ? Math.max(...scaleNums) : Infinity;
+    const onScale = (v: string) => isNum(v) && Number(v) >= lo - 1e-9 && Number(v) <= hi + 1e-9;
+    const kept = pairs.filter(([x, y]) => onScale(x) && onScale(y));
+    if (kept.length && kept.length >= pairs.length / 2 && kept.length < pairs.length) {
+      leftOut.n = pairs.length - kept.length;
+      leftOut.values = [...new Set(pairs.flat().filter((v) => !onScale(v)))].slice(0, 5);
+      pairs = kept;
     }
   }
   const numeric = level !== 'nominal' && pairs.length > 0 && pairs.every(([x, y]) => isNum(x) && isNum(y));
@@ -343,7 +357,16 @@ export function agreement(
   const confusion: Record<string, Record<string, number>> = {};
   for (const c of categories) confusion[c] = Object.fromEntries(categories.map((d) => [d, 0]));
   for (const [x, y] of pairs) confusion[x][y]++;
-  const scale = numeric ? allowed.filter(isNum) : [];
+  // Plain-text runs (`scaleSeen`): whole-number scores are on every whole number from the lowest to the highest
+  // seen, here or in `allowed`, so the result doesn't depend on which source supplied the range.
+  const seenRange = (): string[] => {
+    const vals = [...allowed.filter(isNum), ...pairs.flat()].map(Number);
+    if (!vals.every(Number.isInteger)) return allowed.filter(isNum);
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    return hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : allowed.filter(isNum);
+  };
+  const scale = numeric ? (scaleSeen ? seenRange() : allowed.filter(isNum)) : [];
   const alphaLevel = numeric ? level : 'nominal';
   const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : scale.map(Number), [...xs, ...ys]) : null;
   const stats = {
@@ -359,7 +382,7 @@ export function agreement(
         }
       : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
-    gwetAC1: (p: [string, string][]) => gwetAC1(p, allowed),
+    gwetAC1: (p: [string, string][]) => gwetAC1(p, numeric ? scale : allowed),
     ...(numeric
       ? {
           withinTolerance: (p: [string, string][]) => withinTolerance(p, tolerance),
@@ -377,7 +400,7 @@ export function agreement(
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
     weightedKappaLinear: numeric ? cohenKappa(pairs, 'linear', scale) : null,
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
-    gwetAC1: gwetAC1(pairs, allowed),
+    gwetAC1: gwetAC1(pairs, numeric ? scale : allowed),
     gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
     ci: withIntervals ? bootstrapCI(pairs, stats) : {},
     spearman: numeric ? spearman(xs, ys) : null,

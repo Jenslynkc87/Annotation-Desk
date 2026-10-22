@@ -40,6 +40,16 @@ export interface BatchStatus {
   total: number;
   completed: number;
   failed: number;
+  /** When the provider finished the batch (ISO time), if it has. */
+  endedAt?: string;
+}
+
+/** A batch as the provider lists it (to find one whose upload got no answer). */
+export interface ListedBatch {
+  batchId: string;
+  createdAt: string;
+  requests: number;
+  inputFileId?: string;
 }
 
 export type BatchLine =
@@ -71,6 +81,8 @@ export interface ProviderAdapter {
   ): Promise<CallOutcome>;
   submitBatch(apiKey: string, base: Record<string, unknown>, items: BatchItem[]): Promise<BatchHandle>;
   checkBatch(apiKey: string, batchId: string): Promise<BatchStatus>;
+  /** Batches created since `sinceIso` (newest first; a couple of minutes' leeway for clock differences). */
+  listRecentBatches(apiKey: string, sinceIso: string): Promise<ListedBatch[]>;
   fetchBatchResults(apiKey: string, batchId: string): Promise<BatchLine[]>;
   cancelBatch(apiKey: string, batchId: string): Promise<void>;
 }
