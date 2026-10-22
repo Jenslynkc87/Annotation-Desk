@@ -1,14 +1,14 @@
 // Builds the downloadable exports: Excel workbook, research repository, supplementary repository.
 import JSZip from 'jszip';
-import { getLogsForRun } from '../db';
+import { logPagesForRun } from '../db';
 import { fixed, fmtStat } from '../metrics';
-import { comparableFields, fieldValue } from '../compare';
+import { combineFields, comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel } from '../prompt';
 import { buildDocViews } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
-import type { Doc, Result, Run, Study } from '../types';
+import type { Doc, Result, ResultLog, Run, Study } from '../types';
 import { dateStamp, nowIso, slug } from '../util';
 import { buildBackup } from './backup';
 import { fillScript, requirementsTxt, SCRIPT_TEMPLATE, scriptValues } from './python';
@@ -78,6 +78,18 @@ function addSheet(wb: Workbook, name: string, rows: Row[], columns?: string[]) {
   });
 }
 
+/**
+ * A sheet name Excel accepts: none of [ ] : * ? / \, at most 31 characters, no apostrophe at either end, and
+ * not the name of another sheet in any capitalization (ExcelJS refuses those, so no report would be made).
+ */
+function sheetName(wb: Workbook, wanted: string): string {
+  const clean = (s: string) => s.replace(/[[\]:*?/\\]/g, '_').slice(0, 31).replace(/^'+|'+$/g, '');
+  const taken = new Set(wb.worksheets.map((ws) => ws.name.toLowerCase()));
+  let name = clean(wanted);
+  for (let k = 2; taken.has(name.toLowerCase()); k++) name = `${clean(wanted).slice(0, 31 - `_${k}`.length)}_${k}`;
+  return name;
+}
+
 export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
@@ -115,7 +127,8 @@ function settingsRows(study: Study, run: Run): Row[] {
     { setting: `Prompt (sent with each ${p.subject === 'entries' ? 'entry' : 'text'})`, value: effectiveTemplate(p.userTemplate, p.subject) },
     { setting: 'System prompt', value: p.system || '(none)' },
     { setting: 'Output', value: p.outputMode === 'structured' ? JSON.stringify(run.snapshot.outputSchema) : 'plain text' },
-    { setting: 'Annotation Desk version', value: run.snapshot.appVersion },
+    { setting: 'Annotation Desk version (run)', value: run.snapshot.appVersion },
+    { setting: 'Annotation Desk version (this export)', value: __APP_VERSION__ },
   ];
 }
 
@@ -123,29 +136,54 @@ function runFolder(run: Run): string {
   return `run-${String(run.number).padStart(2, '0')}${run.label ? '-' + slug(run.label) : ''}`;
 }
 
-async function addRunLogs(zip: JSZip, run: Run, docs: Doc[]) {
-  const logs = await getLogsForRun(run.id);
+/**
+ * The run's requests and responses as JSON Lines, in the study's order of texts, then replicate, then attempt (an
+ * earlier attempt that "Retry failed" replaced comes first, with its outcome). The logs are read a page at a time
+ * and each text's lines become their own Blob: a full run's logs (each holds a whole text) never have to be in
+ * memory at once.
+ */
+async function addRunLogs(zip: JSZip, run: Run, docs: Doc[], results: Result[]) {
   const docById = new Map(docs.map((d) => [d.id, d.docId]));
-  const order = (id: string) => id.split(':');
-  logs.sort((a, b) => (order(a.id)[1] + order(a.id)[2]).localeCompare(order(b.id)[1] + order(b.id)[2]));
-  zip.file(
-    'requests.jsonl',
-    jsonlBlob(
-      logs.map((l) => {
-        const [, docId, rep] = l.id.split(':');
-        return { doc_id: docById.get(docId) ?? docId, replicate: Number(rep), request: { ...run.snapshot.requestBase, ...l.requestPart } };
-      }),
-    ),
-  );
-  zip.file(
-    'responses.jsonl',
-    jsonlBlob(
-      logs.map((l) => {
-        const [, docId, rep] = l.id.split(':');
-        return { doc_id: docById.get(docId) ?? docId, replicate: Number(rep), response: l.response };
-      }),
-    ),
-  );
+  const position = new Map(docs.map((d, i) => [d.id, i]));
+  const attemptOf = new Map(results.filter((r) => r.runId === run.id).map((r) => [r.id, r.attempt ?? 1]));
+  const parts: { doc: string; requests: Blob; responses: Blob }[] = [];
+  // Log ids are `${run.id}:${doc}:${replicate}`, plus `#${attempt}` for a replaced attempt, so in id order a
+  // text's logs come one after the other.
+  const parse = (l: ResultLog) => {
+    const [id, n] = l.id.split('#');
+    const cut = id.lastIndexOf(':');
+    return { l, id, doc: id.slice(run.id.length + 1, cut), replicate: Number(id.slice(cut + 1)), attempt: n ? Number(n) : 0 };
+  };
+  let pending: ReturnType<typeof parse>[] = [];
+  const flush = () => {
+    if (!pending.length) return;
+    // The current attempt's log has no number: it is the result's attempt, i.e. after the replaced ones.
+    for (const x of pending)
+      if (!x.attempt) x.attempt = attemptOf.get(x.id) ?? Math.max(0, ...pending.filter((y) => y.id === x.id).map((y) => y.attempt)) + 1;
+    pending.sort((p, q) => p.replicate - q.replicate || p.attempt - q.attempt);
+    const head = (x: (typeof pending)[number]) => ({ doc_id: docById.get(x.doc) ?? x.doc, replicate: x.replicate, attempt: x.attempt });
+    parts.push({
+      doc: pending[0].doc,
+      requests: jsonlBlob(pending.map((x) => ({ ...head(x), request: { ...run.snapshot.requestBase, ...x.l.requestPart } }))),
+      responses: jsonlBlob(
+        pending.map((x) => ({ ...head(x), ...(x.l.replaced ? { status: x.l.replaced.status, error: x.l.replaced.error } : {}), response: x.l.response })),
+      ),
+    });
+    pending = [];
+  };
+  for await (const page of logPagesForRun(run.id)) {
+    for (const l of page) {
+      const x = parse(l);
+      if (pending.length && pending[0].doc !== x.doc) flush();
+      pending.push(x);
+    }
+  }
+  flush();
+  // Texts deleted from the study since: last.
+  const at = (doc: string) => position.get(doc) ?? docs.length;
+  parts.sort((p, q) => at(p.doc) - at(q.doc));
+  zip.file('requests.jsonl', new Blob(parts.map((p) => p.requests), { type: 'application/jsonl' }));
+  zip.file('responses.jsonl', new Blob(parts.map((p) => p.responses), { type: 'application/jsonl' }));
 }
 
 /** JSON Lines as a Blob, one line per item: the whole file never has to fit in one string (a full run's logs hold every text). */
@@ -208,7 +246,7 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
     const rs = d.results.filter((r) => r.runId === run.id);
     f.file('results_long.csv', toCsv(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true })));
     f.file('results_wide.csv', toCsv(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
-    if (opts.includeLogs) await addRunLogs(f, run, d.docs);
+    if (opts.includeLogs) await addRunLogs(f, run, d.docs, d.results);
     agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results, d.study), run.number));
   }
   if (agr.length) results.file('agreement.csv', toCsv(agr));
@@ -247,7 +285,7 @@ export async function buildSupplementary(d: ExportData, run: Run, opts: Suppleme
   const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
   if (agr.length) res.file('agreement.csv', toCsv(agreementRows(agr, run.number)));
   if (opts.includeTexts) root.folder('data')!.file('corpus.csv', toCsv(corpusRows(runDocs, true)));
-  if (opts.includeLogs) await addRunLogs(root.folder('logs')!, run, runDocs);
+  if (opts.includeLogs) await addRunLogs(root.folder('logs')!, run, runDocs, rs);
   scriptFiles(root.folder('scripts')!, d.study, run, exportedAt);
   root.file('README.md', supplementaryReadme(d, run, meta, agr, opts));
   const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
@@ -370,12 +408,15 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
     .join(' ');
 }
 
+/** The CSVs are written for analysis software, exactly as the values are (not escaped for spreadsheet programs). */
+const CSV_NOTE = 'The CSV files are for analysis software: they keep every value exactly as it is (a value starting with =, +, - or @ is not escaped, so a spreadsheet program may read it as a formula).';
+
 function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof supplementaryMetadata>, agr: ReturnType<typeof agreementForRun>, opts: SupplementaryOptions): string {
   const w = words(run.snapshot.prompt);
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
-    `Supplementary materials for the LLM-based annotation (run #${run.number}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${run.snapshot.appVersion} on ${meta.exported_at.slice(0, 10)}.`,
+    `Supplementary materials for the LLM-based annotation (run #${run.number}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.`,
     '',
     '## Summary',
     '',
@@ -389,6 +430,9 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| ${w.Many} with a usable annotation | ${meta.corpus.n_texts_with_usable_labels} of ${meta.corpus.n_texts_in_run} |`,
     `| Annotations per ${w.one} | ${meta.options.replicates_per_text} |`,
     `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed} |`,
+    ...(meta.requests.replaced_by_retries > 0
+      ? [`| Failed attempts replaced by Retry failed | ${meta.requests.replaced_by_retries} (their tokens are included in the token totals; their logs are kept) |`]
+      : []),
     `| Annotation period | ${meta.requests.first_requested_at ?? '—'} to ${meta.requests.last_completed_at ?? '—'} |`,
     `| Prompt version / hash | v${meta.prompt.version} / \`${meta.prompt.sha256_prefix}\` |`,
     '',
@@ -410,7 +454,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     }
     lines.push(
       '',
-      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). "Of labelled": ${w.many} with a human label; those without a usable model answer are not compared. Rows with a column name under Annotations compare two human label columns (human–human baseline).`,
+      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). "Of labelled": ${w.many} with a human label; those without a usable model answer are not compared. Rows with a column name under Annotations compare two human label columns (human–human baseline), on the same ${w.many} as the model rows (this run’s ${w.many}).`,
       '',
     );
   }
@@ -441,6 +485,8 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
     '| `scripts/requirements.txt` | Python package the script needs (install with `pip install -r requirements.txt`) |',
     '',
+    CSV_NOTE,
+    '',
     '## Reproducing',
     '',
     '```bash',
@@ -461,7 +507,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
   const w = words(d.study.prompt);
   const rows: [string, string][] = [
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
-    ['`study-backup.json`', `Backup (settings, ${w.many}, runs, results; the request/response logs are under \`runs/\`), re-importable via Studies → Import study backup`],
+    ['`study-backup.json`', `Backup (settings, ${w.many}, runs, results; without the request/response logs${opts.includeLogs ? ', which are under `runs/`' : ''}), re-importable via Studies → Import study backup`],
     ['`corpus/corpus.csv`, `corpus.jsonl`', `All ${w.many} with metadata`],
     ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), output schema, codebook'],
     ['`runs/run-NN/run.json`', 'Frozen run configuration (model, settings, prompt, exact shared request body)'],
@@ -476,7 +522,10 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
   );
   if (latest) {
     rows.push([`\`results/results_${runFolder(latest)}.xlsx\``, 'Excel workbook for the latest run']);
-    rows.push(['`scripts/`', 'Python script reproducing the latest run (`annotate.py`) and its template with placeholders']);
+    rows.push([
+      '`scripts/`',
+      `Python script reproducing run #${latest.number} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${runFolder(latest)}/results_long.csv\`)`,
+    ]);
   }
   return [
     `# ${d.study.name}: research repository`,
@@ -492,6 +541,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     '|---|---|',
     ...rows.map(([a, b]) => `| ${a} | ${b} |`),
     '',
+    ...(latest ? [`${CSV_NOTE} To read the results in Excel, open the .xlsx workbook instead.`, ''] : [CSV_NOTE, '']),
     'Token counts: Anthropic reports input tokens excluding cached tokens; OpenAI reports input tokens including cached tokens.',
     '',
   ].join('\n');
@@ -520,20 +570,24 @@ export async function buildComparisonReport(
   tolerance: number,
   /** Optional metadata column (e.g. era): adds a sheet with the same figures per group. */
   groupBy = '',
+  /** Told how far the slow part (the bootstrap intervals) has got, e.g. "field 2 of 5". */
+  onProgress?: (note: string) => void,
 ): Promise<Blob> {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const w = words(runA.snapshot.prompt);
   const viewsA = buildDocViews(docs, runs, results, runA.id);
   const viewsB = buildDocViews(docs, runs, results, runB.id);
-  const keysB = new Set(comparableFields(runB, viewsB.values()).map((f) => f.key));
-  const fields = comparableFields(runA, viewsA.values()).filter((f) => keysB.has(f.key));
+  const fieldsB = new Map(comparableFields(runB, viewsB.values()).map((f) => [f.key, f]));
+  // Plain-text scores: the range seen in either run, so the figures don't depend on which run is first.
+  const fields = comparableFields(runA, viewsA.values()).flatMap((f) => (fieldsB.has(f.key) ? [combineFields(f, fieldsB.get(f.key))] : []));
   const inA = new Set(runA.docIds);
   const both = docs.filter((d) => inA.has(d.id) && runB.docIds.includes(d.id));
   const name = (r: Run) => `${r.snapshot.model.model} (run #${r.number})`;
 
   // Per field: the texts with a usable value in both runs.
-  const compared = fields.map((f) => {
+  const compared = fields.map((f, i) => {
+    onProgress?.(`field ${i + 1} of ${fields.length}`);
     const items: { doc: Doc; x: string; y: string }[] = [];
     for (const d of both) {
       const va = viewsA.get(d.id)!;
@@ -562,7 +616,7 @@ export async function buildComparisonReport(
     level: s.level,
     n_compared: s.n,
     n_texts_in_both_runs: both.length,
-    ...(s.leftOut.n ? { n_left_out_not_a_number: s.leftOut.n } : {}),
+    ...(s.leftOut.n ? { n_left_out_not_on_scale: s.leftOut.n } : {}),
     ...withCi('exact_agreement', s, 'percentAgreement', s.percentAgreement),
     ...(tolerance > 0 ? withCi(tolName, s, 'withinTolerance', s.withinTolerance) : {}),
     ...withCi('differ_2_or_more_points', s, 'largeDifference', s.largeDifference),
@@ -604,50 +658,67 @@ export async function buildComparisonReport(
     }
     return rationale ?? '';
   };
-  const review = compared.flatMap(({ f, items, all }) =>
-    items.map(({ doc, x, y }) => {
-      const numeric = all.meanDifference !== null;
-      const diff = numeric ? Number(y) - Number(x) : null;
+  const isNum = (v: string) => v.trim() !== '' && !Number.isNaN(Number(v));
+  const review = compared.flatMap(({ f, items, all }) => {
+    const numeric = all.meanDifference !== null;
+    // Scores left out of the statistics (n_left_out_not_on_scale): not a number (e.g. "NA") or off the codebook scale.
+    const scale = f.scaleSeen ? [] : f.allowed.filter(isNum).map(Number);
+    const onScale = (v: string) => isNum(v) && (scale.length < 2 || (Number(v) >= Math.min(...scale) && Number(v) <= Math.max(...scale)));
+    return items.map(({ doc, x, y }) => {
+      const leftOut = numeric && all.leftOut.n > 0 && !(onScale(x) && onScale(y));
+      const diff = numeric && !leftOut ? Number(y) - Number(x) : null;
       const mid = all.midpoint;
       const opposite = numeric && mid !== null && ((Number(x) < mid && Number(y) > mid) || (Number(x) > mid && Number(y) < mid));
-      const category =
-        x === y ? (numeric ? (Number(x) === 0 ? 'agree (zero)' : 'agree (non-zero)') : 'agree') : opposite ? 'opposite direction' : diff !== null && Math.abs(diff) >= 2 ? '2+ points' : numeric ? '1 point' : 'differ';
+      const category = leftOut
+        ? (isNum(x) && isNum(y) ? 'not on the scale' : 'not a number')
+        : x === y ? (numeric ? (Number(x) === 0 ? 'agree (zero)' : 'agree (non-zero)') : 'agree') : opposite ? 'opposite direction' : diff !== null && Math.abs(diff) >= 2 ? '2+ points' : numeric ? '1 point' : 'differ';
       return {
-        file: doc.meta.file ?? doc.docId,
-        field: f.label,
-        ...(groupBy ? { [groupBy]: doc.meta[groupBy] ?? '' } : {}),
-        first: numeric ? Number(x) : x,
-        second: numeric ? Number(y) : y,
-        difference: diff,
-        category,
-        first_explanation: reasoningOf(runA, viewsA.get(doc.id)!.values, viewsA.get(doc.id)!.rationale, f.key),
-        second_explanation: reasoningOf(runB, viewsB.get(doc.id)!.values, viewsB.get(doc.id)!.rationale, f.key),
-        // Sort by category, then by this column, to draw a reproducible random selection within a category.
-        random: stableRandom(`${doc.meta.file ?? doc.docId}|${f.key}`),
-        judgment: '',
-        note: '',
+        doc,
+        row: {
+          file: doc.meta.file ?? doc.docId,
+          field: f.label,
+          // A value that isn't a number (left out): as the run wrote it.
+          first: numeric ? (isNum(x) ? Number(x) : fieldValue(runA, viewsA.get(doc.id)!.values, f.key).trim()) : x,
+          second: numeric ? (isNum(y) ? Number(y) : fieldValue(runB, viewsB.get(doc.id)!.values, f.key).trim()) : y,
+          difference: diff,
+          category,
+          first_explanation: reasoningOf(runA, viewsA.get(doc.id)!.values, viewsA.get(doc.id)!.rationale, f.key),
+          second_explanation: reasoningOf(runB, viewsB.get(doc.id)!.values, viewsB.get(doc.id)!.rationale, f.key),
+          // Sort by category, then by this column, to draw a reproducible random selection within a category.
+          random: stableRandom(`${doc.meta.file ?? doc.docId}|${f.key}`),
+          judgment: '',
+          note: '',
+        },
       };
-    }),
-  );
-  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, '1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4 };
-  review.sort((p, q) => rank[p.category] - rank[q.category] || Math.abs(q.difference ?? 0) - Math.abs(p.difference ?? 0));
-  addSheet(wb, 'Review', review);
+    });
+  });
+  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, '1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4, 'not on the scale': 5, 'not a number': 5 };
+  review.sort((p, q) => rank[p.row.category] - rank[q.row.category] || Math.abs(q.row.difference ?? 0) - Math.abs(p.row.difference ?? 0));
 
-  if (groupBy) {
-    // Exploratory: the same figures per group (e.g. per era); small groups give wide intervals.
-    const groups = [...new Set(both.map((d) => d.meta[groupBy] ?? ''))].sort((p, q) => p.localeCompare(q, undefined, { numeric: true }));
-    addSheet(
-      wb,
-      `By ${groupBy}`.replace(/[[\]:*?/\\]/g, '_').slice(0, 31),
-      compared.flatMap(({ f, items }) =>
-        groups.map((g) => {
-          const sub = items.filter((i) => (i.doc.meta[groupBy] ?? '') === g);
-          const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((i) => i.x), sub.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen }));
-          return { field, [groupBy]: g || '(none)', ...rest, n_texts_in_both_runs: both.filter((d) => (d.meta[groupBy] ?? '') === g).length };
-        }),
-      ),
-    );
-  }
+  // Exploratory: the same figures per group (e.g. per era); small groups give wide intervals.
+  const groups = groupBy ? [...new Set(both.map((d) => d.meta[groupBy] ?? ''))].sort((p, q) => p.localeCompare(q, undefined, { numeric: true })) : [];
+  const byGroup = compared.flatMap(({ f, items }, i) => {
+    if (groups.length) onProgress?.(`by ${groupBy}, field ${i + 1} of ${compared.length}`);
+    return groups.map((g) => {
+      const sub = items.filter((x) => (x.doc.meta[groupBy] ?? '') === g);
+      const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((x) => x.x), sub.map((x) => x.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen }));
+      return { g, field, rest: { ...rest, n_texts_in_both_runs: both.filter((d) => (d.meta[groupBy] ?? '') === g).length } };
+    });
+  });
+  // A breakdown column named like one of the report's own columns (e.g. "field" or "level") gets a prefix, so
+  // neither overwrites the other. (Sheet name and notes keep its own name.)
+  const own = new Set([
+    ...review.flatMap((r) => Object.keys(r.row)),
+    ...compared.flatMap(({ f, all }) => Object.keys(summaryRow(f.label, '', all))),
+    ...byGroup.flatMap((r) => Object.keys(r.rest)),
+  ]);
+  const groupCol = own.has(groupBy) ? `group_${groupBy}` : groupBy;
+  addSheet(
+    wb,
+    'Review',
+    review.map(({ doc, row: { file, field, ...rest } }) => ({ file, field, ...(groupBy ? { [groupCol]: doc.meta[groupBy] ?? '' } : {}), ...rest })),
+  );
+  if (groupBy) addSheet(wb, sheetName(wb, `By ${groupBy}`), byGroup.map(({ g, field, rest }) => ({ field, [groupCol]: g || '(none)', ...rest })));
 
   const settings = (r: Run) => ({
     run: `#${r.number}${r.label ? ` (${r.label})` : ''}`,
@@ -667,12 +738,9 @@ export async function buildComparisonReport(
   addSheet(wb, 'Runs', Object.keys(sa).map((k) => ({ setting: k, first: sa[k as keyof typeof sa], second: sb[k as keyof typeof sb] })));
 
   // One confusion table per field (rows: first run, columns: second run); skipped for long numeric scales.
-  const used = new Set<string>();
   for (const { f, all } of compared) {
     if (all.categories.length < 2 || all.categories.length > 15) continue;
-    let sheet = `Table ${f.label}`.replace(/[[\]:*?/\\]/g, '_').slice(0, 31);
-    for (let k = 2; used.has(sheet); k++) sheet = `${sheet.slice(0, 28)}_${k}`;
-    used.add(sheet);
+    const sheet = sheetName(wb, `Table ${f.label}`);
     const corner = 'first \\ second';
     addSheet(
       wb,
@@ -687,10 +755,11 @@ export async function buildComparisonReport(
     { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those annotated in both runs with a usable value for the field.` },
     { note: `Exact agreement: share of ${w.many} with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
     { note: `"At least one non-zero" rows repeat the statistics on ${w.many} where at least one run gave a score other than 0, because shared zeros inflate agreement.` },
-    { note: 'Weighted kappa (linear or quadratic weights over the codebook scale), Gwet\'s AC2 (linear weights) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories. AC1/AC2 stay stable when one score (e.g. 0) dominates, where kappa can drop sharply.' },
+    { note: 'Weighted kappa (linear or quadratic weights by the distance between values over the codebook scale; plain-text runs: over the range of scores seen in either run), Gwet\'s AC2 (linear weights) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories. AC1/AC2 stay stable when one score (e.g. 0) dominates, where kappa can drop sharply.' },
     { note: 'Mean difference = second minus first (positive: the second run scores higher on average). Mean absolute difference: average distance regardless of direction.' },
     { note: `Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of ${w.many}, fixed seed, so the same data gives the same interval).` },
     { note: 'Review sheet: every compared score, opposite directions first, then the largest differences. To draw at random within a category (e.g. 30 opposite-direction cases), sort by category and then by "random", and take the first rows; the numbers never change, so the draw is reproducible. The judgment and note columns are for your own labels.' },
+    ...(review.some((r) => rank[r.row.category] === 5) ? [{ note: 'Review sheet, last rows: scores left out of the statistics (“not a number”, e.g. NA, or “not on the scale”), with the values as the runs gave them.' }] : []),
     ...(groupBy ? [{ note: `"By ${groupBy}" sheet: the same figures per ${groupBy}; exploratory, as small groups give wide intervals.` }] : []),
   ]);
   const out = await wb.xlsx.writeBuffer();
@@ -717,8 +786,8 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
   const ci = s.ci.meanDifference;
   const shift =
     ci && (ci[0] > 0 || ci[1] < 0)
-      ? ` ${b} scored on average ${Math.abs(d).toFixed(2)} points ${d > 0 ? 'higher' : 'lower'} than ${a} (95% CI ${ci[0].toFixed(2)} to ${ci[1].toFixed(2)}).`
-      : ` There was no clear systematic difference between the two (mean difference ${d.toFixed(2)}${ci ? `, 95% CI ${ci[0].toFixed(2)} to ${ci[1].toFixed(2)}` : ''}).`;
+      ? ` ${b} scored on average ${fixed(Math.abs(d), 2)} points ${d > 0 ? 'higher' : 'lower'} than ${a} (95% CI ${fixed(ci[0], 2)} to ${fixed(ci[1], 2)}).`
+      : ` There was no clear systematic difference between the two (mean difference ${fixed(d, 2)}${ci ? `, 95% CI ${fixed(ci[0], 2)} to ${fixed(ci[1], 2)}` : ''}).`;
   return first + serious + shift;
 }
 

@@ -60,16 +60,25 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
 }
 
 /**
- * The same field in two runs (e.g. in a comparison): plain-text scores get the range seen in either run, so the
- * result doesn't depend on which run comes first. Codebook fields keep their own scale.
+ * The same field in two runs (e.g. in a comparison), so the result doesn't depend on which run comes first: the
+ * values of both runs' scales (e.g. two codebooks, 0…3 and −3…3), and for plain-text scores, which have no
+ * codebook, every whole number in the range seen in either run.
  */
 export function combineFields(a: ComparableField, b: ComparableField | undefined): ComparableField {
-  if (!b || !a.scaleSeen || !b.scaleSeen) return a;
-  if (a.level !== 'ordinal' || b.level !== 'ordinal' || !a.allowed.length || !b.allowed.length) return { ...a, level: a.level === b.level ? a.level : 'interval', allowed: [] };
-  const nums = [...a.allowed, ...b.allowed].map(Number);
+  if (!b) return a;
+  const level: ComparableField['level'] = a.level === b.level ? a.level : a.level === 'nominal' || b.level === 'nominal' ? 'nominal' : 'interval';
+  const scaleSeen = !!a.scaleSeen && !!b.scaleSeen;
+  if (level === 'interval' || (!a.allowed.length && !a.scaleSeen) || (!b.allowed.length && !b.scaleSeen)) return { ...a, level, scaleSeen, allowed: [], yesNo: a.yesNo && b.yesNo };
+  if (!a.allowed.length || !b.allowed.length) return { ...a, level, scaleSeen, allowed: [], yesNo: a.yesNo && b.yesNo };
+  const union = [...new Set([...a.allowed, ...b.allowed])];
+  const nums = union.map(Number);
+  if (!nums.every(Number.isFinite)) return { ...a, level, scaleSeen, allowed: union, yesNo: a.yesNo && b.yesNo };
   const lo = Math.min(...nums);
   const hi = Math.max(...nums);
-  return { ...a, allowed: hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [] };
+  // A range with no codebook behind it (plain-text scores) is filled in; codebook values are kept as they are.
+  const filled = (a.scaleSeen || b.scaleSeen) && nums.every(Number.isInteger) && hi - lo <= 100;
+  const allowed = filled ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [...union].sort((x, y) => Number(x) - Number(y));
+  return { ...a, level, scaleSeen, allowed, yesNo: a.yesNo && b.yesNo };
 }
 
 /** A field's value in a run's (aggregated) values, reading inside JSON answers for plain-text runs. */

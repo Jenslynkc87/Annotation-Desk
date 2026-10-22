@@ -9,6 +9,9 @@ export interface SampleOptions {
   /** Leave out texts whose `column` equals `value` (e.g. pilot = yes). */
   exclude: { column: string; value: string } | null;
   seed: number;
+  /** 3 (the default) takes the strata columns in the fixed order of `orderStrata`; 2 takes them in the order
+   *  given (as they were ticked), to redraw a sample recorded with method 2. */
+  method?: 2 | 3;
 }
 
 export interface Stratum {
@@ -31,19 +34,26 @@ const norm = (s: string | undefined) => (s ?? '').trim().toLowerCase();
 const byCode = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Recorded with each draw, so a later reader knows which rules made the sample from the seed. */
-export const SAMPLING_METHOD = 'Annotation Desk sampling method 2';
+export const SAMPLING_METHOD = 'Annotation Desk sampling method 3';
+
+/** The strata columns in the order a draw uses them (method 3): by name, character by character, whatever order
+ *  they were ticked and whatever order the metadata columns were added in. The sample dialog lists them so. */
+export const orderStrata = (strata: string[]) => [...strata].sort(byCode);
 
 /**
  * Proportional allocation (largest remainder), at least one text per stratum when the sample is large
- * enough; within each stratum a seeded shuffle of the texts in file-name order, so the same seed and
- * corpus always give the same sample, whatever the import order and in any browser (method 2; method 1,
- * before October 2026, sorted by the browser's language and ranked remainders before the minimum of one).
+ * enough; within each stratum a seeded shuffle of the texts in file-name order, so the same seed, corpus and
+ * strata columns always give the same sample, whatever the import order, the order the columns were ticked or
+ * the browser (method 3: strata columns ordered by name; method 2, October 2026, took them in the order they
+ * were ticked; method 1, before that, sorted by the browser's language and ranked remainders before the
+ * minimum of one).
  */
 export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResult {
+  const strata = o.method === 2 ? o.strata : orderStrata(o.strata);
   const eligible = docs.filter((d) => !o.exclude || norm(d.meta[o.exclude.column]) !== norm(o.exclude.value));
   const groups = new Map<string, Doc[]>();
   for (const d of eligible) {
-    const key = o.strata.map((c) => d.meta[c]?.trim() || '(none)').join(' · ') || 'all';
+    const key = strata.map((c) => d.meta[c]?.trim() || '(none)').join(' · ') || 'all';
     groups.set(key, [...(groups.get(key) ?? []), d]);
   }
   const keys = [...groups.keys()].sort(byCode);
@@ -84,4 +94,13 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
     ids.push(...items.slice(0, take.get(k)!).map((d) => d.id));
   }
   return { ids, strata: keys.map((k) => ({ key: k, available: n(k), drawn: take.get(k)! })), eligible: eligible.length };
+}
+
+/** How the texts were spread over the strata, for the note saved with a sample: "at least one per stratum" only
+ *  when every stratum got one (it can't when the sample is smaller than the number of strata). */
+export function allocationNote(r: SampleResult, one = 'text'): string {
+  const empty = r.strata.filter((s) => s.drawn === 0).length;
+  return empty
+    ? `proportional allocation; ${empty} of ${r.strata.length} strata received no ${one} because the sample is smaller than the number of strata`
+    : 'proportional allocation, at least one per stratum';
 }

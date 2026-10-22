@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { drawStratifiedSample } from './sample';
+import { allocationNote, drawStratifiedSample, orderStrata, SAMPLING_METHOD } from './sample';
 import type { Doc } from './types';
 
 // 3,080 texts: three eras of different size, two journals, 50 pilot articles.
@@ -41,5 +41,33 @@ describe('stratified sample', () => {
     const s = drawStratifiedSample(small, { ...opts, size: 20, exclude: null });
     expect(s.ids).toContain('rare');
     expect(s.ids).toHaveLength(20);
+  });
+  it('draws the same whatever order the strata boxes were ticked (method 3), and can still redraw method 2', () => {
+    expect(SAMPLING_METHOD).toBe('Annotation Desk sampling method 3');
+    expect(orderStrata(['journal', 'era'])).toEqual(['era', 'journal']);
+    const ticked = drawStratifiedSample(docs, { ...opts, strata: ['journal', 'era'] });
+    expect(ticked.ids).toEqual(r.ids);
+    expect(ticked.strata).toEqual(r.strata);
+    expect(r.strata[0].key).toBe('1960s · J1');
+    // Method 2 took the columns in the order ticked, so the other order drew other texts from the same seed.
+    const old = (strata: string[]) => drawStratifiedSample(docs, { ...opts, strata, method: 2 }).ids;
+    expect(old(['era', 'journal'])).toEqual(r.ids);
+    expect(old(['journal', 'era'])).not.toEqual(r.ids);
+  });
+  it('draws the same whatever order the metadata columns were added in (method 3)', () => {
+    // The same values, but journal added before era (e.g. from two spreadsheets, or a sheet with its columns moved).
+    const swapped = docs.map((d) => ({ ...d, meta: { file: d.meta.file, journal: d.meta.journal, pilot: d.meta.pilot, era: d.meta.era } }));
+    expect(drawStratifiedSample(swapped, opts).ids).toEqual(r.ids);
+    expect(drawStratifiedSample(swapped, { ...opts, strata: ['journal', 'era'] }).ids).toEqual(r.ids);
+  });
+  it('says “at least one per stratum” only when every stratum got a text', () => {
+    expect(allocationNote(r)).toBe('proportional allocation, at least one per stratum');
+    // 60 strata of one text each, sample of 20.
+    const ds = Array.from({ length: 60 }, (_, i) => ({ ...docs[0], id: `g${i}`, meta: { file: `g${i}.md`, era: `e${i % 3}`, journal: `j${i}` } }));
+    const s = drawStratifiedSample(ds, { size: 20, strata: ['era', 'journal'], exclude: null, seed: 3 });
+    expect(s.strata.filter((x) => x.drawn === 0)).toHaveLength(40);
+    expect(allocationNote(s)).toBe('proportional allocation; 40 of 60 strata received no text because the sample is smaller than the number of strata');
+    expect(allocationNote(s, 'entry')).toContain('40 of 60 strata received no entry');
+    expect(allocationNote(drawStratifiedSample(ds, { size: 60, strata: ['era', 'journal'], exclude: null, seed: 3 }))).toContain('at least one per stratum');
   });
 });

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { agreement, fixed, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
 import { combineFields, comparableFields, fieldValue } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
+import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
@@ -391,7 +392,8 @@ function AgreementPanel() {
 
   // (Two label columns need no run fields: their values are compared as they are.)
   const isFreeText = !bothColumns && !!runA && !fields.length;
-  const [reporting, setReporting] = useState(false);
+  // false, or how far the report has got (e.g. "field 2 of 5").
+  const [reporting, setReporting] = useState<string | false>(false);
   const [groupBy, setGroupBy] = useState('');
   // Columns that group texts (e.g. era, journal): a few distinct values, not one per text.
   const groupColumns = useMemo(
@@ -406,10 +408,47 @@ function AgreementPanel() {
     const ra = runOf(srcA);
     const rb = runOf(decode(b));
     if (!ra || !rb) return;
-    setReporting(true);
+    // Named now: the page stays usable while the report is built, so another study may be open when it is done.
+    const file = `${slug(currentStudy(getState())?.name ?? 'study')}_run${ra.number}_vs_run${rb.number}_${dateStamp()}.xlsx`;
+    setReporting('');
+    // Built in a background worker, so the page stays responsive (the intervals take minutes on a full corpus).
+    // The report doesn't use the texts, so they aren't sent. Without workers, it is built right here.
+    const direct = () => buildComparisonReport(ra, rb, docs, runs, results, tolerance, groupBy);
+    const job: ReportJob = { runA: ra, runB: rb, docs: docs.map((d) => ({ ...d, text: '' })), runs, results: results.filter((r) => r.runId === ra.id || r.runId === rb.id), tolerance, groupBy };
+    const build = () =>
+      new Promise<Blob>((resolve, reject) => {
+        const fallback = () => direct().then(resolve, reject);
+        let w: Worker;
+        try {
+          w = new Worker(new URL('../lib/report.worker.ts', import.meta.url), { type: 'module' });
+        } catch {
+          fallback();
+          return;
+        }
+        let started = false;
+        w.onmessage = (e: MessageEvent<ReportMessage>) => {
+          started = true;
+          if ('progress' in e.data) return setReporting(e.data.progress);
+          w.terminate();
+          if ('blob' in e.data) resolve(e.data.blob);
+          else reject(new Error(e.data.error));
+        };
+        // The worker didn't start (e.g. a browser without module workers): build it here. Failed later: say so.
+        w.onerror = (e) => {
+          w.terminate();
+          if (started) reject(new Error(e.message || 'the background worker stopped'));
+          else fallback();
+        };
+        try {
+          w.postMessage(job);
+        } catch {
+          w.terminate();
+          fallback();
+        }
+      });
     try {
-      const blob = await buildComparisonReport(ra, rb, docs, runs, results, tolerance, groupBy);
-      download(`${slug(currentStudy(getState())?.name ?? 'study')}_run${ra.number}_vs_run${rb.number}_${dateStamp()}.xlsx`, blob);
+      const blob = await build();
+      download(file, blob);
     } catch (e) {
       toast(`Report failed: ${errorMessage(e)}`, 'error');
     } finally {
@@ -479,8 +518,8 @@ function AgreementPanel() {
       </div>
       {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && (
         <div className="row" style={{ margin: '2px 0 12px' }}>
-          <button className="btn small" disabled={reporting} onClick={downloadReport} title="All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper">
-            {reporting ? 'Building…' : 'Download comparison report (Excel)'}
+          <button className="btn small" disabled={reporting !== false} onClick={downloadReport} title="All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper">
+            {reporting === false ? 'Download comparison report (Excel)' : `Building…${reporting ? ` ${reporting}` : ''}`}
           </button>
           {groupColumns.length > 0 && (
             <select className="select small" style={{ width: 'auto' }} value={groupBy} onChange={(e) => setGroupBy(e.target.value)} title="Adds a sheet with the same figures per group (exploratory)">

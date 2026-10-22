@@ -1,8 +1,23 @@
 import { useRef, useState } from 'react';
 import { importBackup } from '../lib/export/backup';
-import { createStudy, currentStudy, duplicateStudy, getState, isBusy, refreshStudies, removeStudy, selectStudy, toast, useStore } from '../lib/store';
+import {
+  batchParts,
+  createStudy,
+  currentStudy,
+  duplicateStudy,
+  getState,
+  isBusy,
+  refreshStudies,
+  removeStudy,
+  selectStudy,
+  setImporting,
+  sharedBatches,
+  storageError,
+  toast,
+  useStore,
+} from '../lib/store';
 import { words } from '../lib/subject';
-import { errorMessage, fmtDateTime } from '../lib/util';
+import { fmtDateTime } from '../lib/util';
 import { Icon, Menu, Modal } from './ui';
 
 export function StudyMenu() {
@@ -10,6 +25,7 @@ export function StudyMenu() {
   const current = useStore((s) => currentStudy(s));
   // While a run is being sent or uploaded, the open study must stay open (and in place).
   const busy = useStore((s) => isBusy(s));
+  const importing = useStore((s) => s.importing);
   const fileRef = useRef<HTMLInputElement>(null);
   const w = words({ subject: current?.prompt.subject });
   const [choosing, setChoosing] = useState(false);
@@ -20,14 +36,23 @@ export function StudyMenu() {
 
   const onImport = async (f: File | undefined) => {
     if (!f) return;
+    // (Meanwhile, closing the tab asks first: a partial study would be removed at the next start.)
+    setImporting(true);
     try {
       toast(`Importing ${f.name}…`);
       const s = await importBackup(f);
-      await refreshStudies();
-      await selectStudy(s.id);
-      toast(`Imported "${s.name}".`, 'success');
+      toast(`Imported “${s.name}”.`, 'success');
+      try {
+        await refreshStudies();
+        await selectStudy(s.id);
+      } catch (e) {
+        toast(`The imported study is saved, but could not be opened: ${storageError(e)}`, 'error');
+      }
     } catch (e) {
-      toast(`Import failed: ${errorMessage(e)}`, 'error');
+      // (A full storage often comes with no message at all.)
+      toast(`Import failed: ${storageError(e)}`, 'error');
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -74,22 +99,40 @@ export function StudyMenu() {
             <button className="menu-item" disabled={busy} onClick={() => (close(), void duplicateStudy(true))}>
               Duplicate with {w.many}
             </button>
-            <button className="menu-item" disabled={busy} onClick={() => (close(), fileRef.current?.click())}>
-              Import study backup (.json)…
+            <button className="menu-item" disabled={busy || importing} onClick={() => (close(), fileRef.current?.click())}>
+              {importing ? 'Importing a study backup…' : 'Import study backup (.json)…'}
             </button>
             <div className="menu-sep" />
             <button
               className="menu-item"
               style={{ color: 'var(--err)' }}
               disabled={busy}
-              onClick={() => {
+              onClick={async () => {
                 close();
                 const s = getState();
                 const cur = currentStudy(s);
                 if (!cur) return;
-                const pending = s.runs.filter((r) => r.status === 'submitted').length;
-                const note = pending ? ` ${pending} batch${pending === 1 ? ' is' : 'es are'} still processing and will be cancelled.` : '';
-                if (confirm(`Delete "${cur.name}" with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
+                // Batches still processing are cancelled, except one that a copy of this study (made through a backup)
+                // also waits for: that one is left running for the copy, which collects it.
+                let cancelled = 0;
+                const kept = new Set<string>();
+                const copies = new Set<string>();
+                for (const r of s.runs.filter((x) => x.status === 'submitted')) {
+                  const shared = await sharedBatches(r).catch(() => new Map<string, string>());
+                  for (const p of batchParts(r).filter((x) => x.status === 'submitted')) {
+                    if (shared.has(p.batchId)) {
+                      kept.add(p.batchId);
+                      copies.add(shared.get(p.batchId)!);
+                    } else cancelled++;
+                  }
+                }
+                const left = kept.size;
+                const note =
+                  (cancelled ? ` ${cancelled} batch${cancelled === 1 ? ' is' : 'es are'} still processing and will be cancelled.` : '') +
+                  (left
+                    ? ` ${left === 1 ? 'A batch' : `${left} batches`} still processing ${left === 1 ? 'is' : 'are'} left running: ${[...copies].map((x) => `“${x}”`).join(', ')} (the same study, copied through a backup) also ${copies.size === 1 ? 'waits' : 'wait'} for ${left === 1 ? 'it' : 'them'}.`
+                    : '');
+                if (confirm(`Delete “${cur.name}” with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
                   void removeStudy(cur.id);
                 }
               }}

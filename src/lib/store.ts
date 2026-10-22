@@ -207,7 +207,8 @@ export async function init() {
 }
 
 export async function refreshStudies() {
-  set({ studies: await dbApi.listStudies() });
+  // (A study still marked as being imported is a partial import: never listed, removed at the next start.)
+  set({ studies: (await dbApi.listStudies()).filter((s) => !s.importIncomplete) });
 }
 
 export async function selectStudy(id: string) {
@@ -485,10 +486,9 @@ export async function markSample(column: string, value: string, ids: string[], n
       changed.push({ ...d, meta: rest });
     }
   }
-  const earlier = sampleNotePrefix(column, value);
   const kept = cur.description
     .split('\n')
-    .filter((line) => !line.startsWith(earlier))
+    .filter((line) => !isSampleNote(line, column, value))
     .join('\n')
     .trim();
   const next: Study = { ...structuredClone(cur), description: `${kept ? kept + '\n' : ''}${note}`, updatedAt: nowIso() };
@@ -508,6 +508,13 @@ export async function markSample(column: string, value: string, ids: string[], n
 /** The start of the study note a drawn sample adds (see SampleDialog), so a redraw can replace it. */
 export function sampleNotePrefix(column: string, value: string): string {
   return `Sample ${column} = ${value} (`;
+}
+
+/** A note of a drawn sample of exactly this column = value ("Sample sample = validation (2026-10-22): …"), not of
+ *  another value that starts the same way (e.g. "validation (2)"). */
+function isSampleNote(line: string, column: string, value: string): boolean {
+  const prefix = sampleNotePrefix(column, value);
+  return line.startsWith(prefix) && /^\d{4}-\d{2}-\d{2}\): /.test(line.slice(prefix.length));
 }
 
 export async function removeDocs(ids: string[]) {
@@ -1431,12 +1438,13 @@ export async function cancelBatch(runId: string, opts: { keepShared?: boolean } 
   if (!run?.batch) return '';
   if (uploadingRun === runId) cancelRequested.add(runId);
   const adapter = provider(run.batch.provider);
+  const shared = opts.keepShared ? await sharedBatches(run).catch(() => new Map<string, string>()) : new Map<string, string>();
+  const toCancel = batchParts(run).filter((p) => p.status === 'submitted' && !shared.has(p.batchId));
+  if (!toCancel.length) return '';
   const key = state.keys[run.batch.provider];
   if (!key) return `The batch could not be cancelled: no ${adapter.label} API key is set (API keys, top right).`;
-  const shared = opts.keepShared ? await sharedBatches(run).catch(() => new Map<string, string>()) : new Map<string, string>();
   const failures: string[] = [];
-  for (const p of batchParts(run)) {
-    if (p.status !== 'submitted' || shared.has(p.batchId)) continue;
+  for (const p of toCancel) {
     try {
       await adapter.cancelBatch(key, p.batchId);
     } catch (e) {

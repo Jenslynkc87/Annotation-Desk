@@ -13,6 +13,8 @@ export function splitRequestBase(run: Run) {
     const o = run.snapshot.options;
     if (o.caching) cacheControl = o.cacheTtl === '1h' ? { type: 'ephemeral', ttl: '1h' } : { type: 'ephemeral' };
     delete base.system;
+    // The refusal fallback of the first version (a beta feature) is no longer accepted by the API; the script says so.
+    delete base.fallbacks;
     const oc = base.output_config as Record<string, unknown> | undefined;
     if (oc) {
       delete oc.format;
@@ -65,7 +67,7 @@ export const SCRIPT_TEMPLATE = `"""
 LLM annotation script exported from Annotation Desk {{APP_VERSION}}.
 
 Study:  {{STUDY_NAME}}
-Run:    {{RUN_DESCRIPTION}}
+Run:    {{RUN_DESCRIPTION}}{{FALLBACK_NOTE}}
 
 This script reproduces the requests sent in the run above: the same model,
 prompt, output schema and request settings. Values marked with {{...}} in
@@ -80,7 +82,9 @@ Usage
     python annotate.py corpus.csv --dry-run   # print the first request, send nothing
 
 Outputs: results.csv (one row per text x replicate) and log.jsonl (every
-request and full response, without the API key).
+request and full response, without the API key). Each run starts from the
+first row and overwrites --out; log.jsonl is appended to. To continue an
+interrupted run, pass a CSV of the remaining texts and a new --out.
 
 Note: hosted models can change or be retired, and sampling is not fully
 deterministic, so re-running may not reproduce every label exactly. The
@@ -252,23 +256,39 @@ def as_text(v):
     return str(v)
 
 
+def trim(s):
+    """Strip whitespace as Annotation Desk does (JavaScript's trim; Python's strip() keeps a byte-order mark, U+FEFF)."""
+    return s.strip(" \\t\\n\\v\\f\\r\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a"
+                   "\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff")
+
+
+def reject_constant(name):
+    raise ValueError(name + " is not valid JSON")
+
+
+def read_json(s):
+    """Read JSON as Annotation Desk does: NaN and Infinity, which Python would accept, are not valid JSON."""
+    return json.loads(s, parse_constant=reject_constant)
+
+
 def parse_output(text):
     # As in Annotation Desk: a whole answer in a \`\`\`json fence is read without the fence.
-    fenced = re.match(r"^\`\`\`(?:json)?\\s*([\\s\\S]*?)\\s*\`\`\`$", text.strip())
-    cleaned = fenced.group(1) if fenced else text.strip()
+    fenced = re.match(r"^\`\`\`(?:json)?\\s*([\\s\\S]*?)\\s*\`\`\`$", trim(text))
+    # trim() also inside the fence: JavaScript's \\s includes the byte-order mark, Python's doesn't.
+    cleaned = trim(fenced.group(1)) if fenced else trim(text)
     if OUTPUT_SCHEMA is None:
         # As in Annotation Desk: an answer containing JSON ({"...) that can't be read counts as failed.
         if re.search(r'\\{\\s*"', text):
             try:
-                readable = isinstance(json.loads(cleaned), dict)
-            except json.JSONDecodeError:
+                readable = isinstance(read_json(cleaned), dict)
+            except ValueError:
                 readable = False
             if not readable:
-                return {"response": text.strip()}, "Answer contains JSON that could not be read"
-        return {"response": text.strip()}, ""
+                return {"response": trim(text)}, "Answer contains JSON that could not be read"
+        return {"response": trim(text)}, ""
     try:
-        obj = json.loads(cleaned)
-    except json.JSONDecodeError:
+        obj = read_json(cleaned)
+    except ValueError:
         return {}, "Response was not valid JSON"
     if not isinstance(obj, dict):
         return {}, "Response was not a JSON object"
@@ -286,10 +306,14 @@ def make_client():
         return anthropic.Anthropic(max_retries=4)
     import openai
 
-    return openai.OpenAI(max_retries=4)
+    # 30 minutes rather than the SDK's 10, as on the site: a request that times out is sent again (and paid again).
+    return openai.OpenAI(max_retries=4, timeout=1800)
 
 
 def main():
+    # Print UTF-8 whatever the console's code page (on Windows, output sent to a file would otherwise fail on e.g. "−").
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("corpus", help="CSV file with one text per row")
     ap.add_argument("--id-column", default="doc_id")
@@ -323,7 +347,8 @@ def main():
     # As in Annotation Desk's exports: a field named like one of these columns is written as answer_<name>.
     column_of = {f: "answer_" + f if f in own else f for f in FIELDS}
     columns = [*own[:3], *column_of.values(), *extra, *own[3:]]
-    with open(args.out, "w", newline="", encoding="utf-8") as out, open(args.log, "a", encoding="utf-8") as log:
+    # With a byte-order mark, like Annotation Desk's CSVs, so Excel reads letters such as æøå correctly.
+    with open(args.out, "w", newline="", encoding="utf-8-sig") as out, open(args.log, "a", encoding="utf-8") as log:
         writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         for i, row in enumerate(rows, 1):
@@ -335,23 +360,28 @@ def main():
                 record = {"doc_id": doc_id, "replicate": rep}
                 try:
                     text, summary, model, stop, usage, raw = call_model(client, body)
+                    record["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
                     values, parse_error = parse_output(text)
                     record.update({column_of.get(k, k): v for k, v in values.items()})
                     record.update(usage)
-                    # As in Annotation Desk: a cut-off, refused, empty or unreadable answer counts as failed.
+                    # As in Annotation Desk: a cut-off, refused, empty or unreadable answer counts as failed. A cut-off,
+                    # refused or empty one is reported once, as such, not also as unreadable JSON.
                     incomplete = stop not in ("", "end_turn", "stop_sequence", "completed")
-                    problem = ("Incomplete answer" if text else "Empty response") + f" (stop reason: {stop})"
-                    record.update(status="error" if incomplete or parse_error else "ok", parse_error=parse_error,
-                                  error=problem if incomplete else "",
+                    empty = not trim(text)
+                    problem = ("Empty response" if empty else "Incomplete answer") + f" (stop reason: {stop or 'none'})"
+                    if incomplete or empty:
+                        parse_error = ""
+                    record.update(status="error" if incomplete or empty or parse_error else "ok", parse_error=parse_error,
+                                  error=problem if incomplete or empty else "",
                                   model_reported=model, stop_reason=stop)
-                    log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "request": body, "response": raw,
-                                          "reasoning_summary": summary}, ensure_ascii=False, default=str) + "\\n")
+                    log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "completed_at": record["completed_at"],
+                                          "request": body, "response": raw, "reasoning_summary": summary},
+                                         ensure_ascii=False, default=str) + "\\n")
                 except Exception as e:  # keep going; failed requests are recorded
-                    record.update(status="error", error=str(e))
-                    log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "request": body, "error": str(e)},
-                                         ensure_ascii=False) + "\\n")
+                    record.update(status="error", error=str(e), completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                    log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "completed_at": record["completed_at"],
+                                          "request": body, "error": str(e)}, ensure_ascii=False) + "\\n")
                 record["latency_s"] = round(time.time() - started, 2)
-                record["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
                 writer.writerow(record)
                 out.flush()
             print(f"[{i}/{len(rows)}] {doc_id}", file=sys.stderr)
@@ -366,10 +396,15 @@ export function scriptValues(study: Study, run: Run, exportedAt: string): Record
   const p = run.snapshot.prompt;
   const fields = p.outputMode === 'structured' ? p.variables.map((v) => v.name) : ['response'];
   const provider = run.snapshot.model.provider;
+  const madeWith = run.snapshot.appVersion !== __APP_VERSION__ ? ` with Annotation Desk ${run.snapshot.appVersion}` : '';
   return {
-    APP_VERSION: run.snapshot.appVersion,
+    APP_VERSION: __APP_VERSION__,
     STUDY_NAME: docLine(study.name),
-    RUN_DESCRIPTION: docLine(`#${run.number}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}; exported ${exportedAt}`),
+    RUN_DESCRIPTION: docLine(`#${run.number}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}${madeWith}; exported ${exportedAt}`),
+    FALLBACK_NOTE:
+      provider === 'anthropic' && run.snapshot.requestBase.fallbacks != null
+        ? "\n        The original run used Anthropic's refusal fallback (a beta feature since\n        removed), which this script does not reproduce."
+        : '',
     API_KEY_ENV: provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY',
     PROVIDER: JSON.stringify(provider),
     MODEL: JSON.stringify(run.snapshot.model.model),

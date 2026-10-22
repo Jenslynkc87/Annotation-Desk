@@ -53,10 +53,13 @@ export async function buildBackup(study: Study, docs: Doc[], runs: Run[], result
     async (add) => {
       if (!includeLogs) return;
       for (const r of runs) {
-        // One run's logs at a time, folded into a Blob so the browser can keep them out of memory.
-        const start = parts.length;
-        for (const l of await dbApi.getLogsForRun(r.id)) add(l);
-        parts.splice(start, parts.length - start, new Blob(parts.slice(start)));
+        // A few hundred logs at a time (each holds a whole text), each page folded into a Blob before the next is
+        // read, so the browser can keep them out of memory. (Includes earlier attempts replaced by a retry.)
+        for await (const page of dbApi.logPagesForRun(r.id)) {
+          const start = parts.length;
+          for (const l of page) add(l);
+          parts.splice(start, parts.length - start, new Blob(parts.slice(start)));
+        }
       }
     },
     true,
@@ -94,10 +97,21 @@ class Importer {
 
   async start(b: Pick<StudyBackup, 'format' | 'study'>) {
     if (b?.format !== BACKUP_FORMAT || !b.study) throw new Error('Not an Annotation Desk study backup.');
-    this.study = { ...b.study, id: this.studyId, name: `${b.study.name} (imported)`, updatedAt: nowIso() };
+    // Marked until the whole file has been read: if the page is closed meanwhile, the next start removes it. (A mark
+    // in the backup's own study is replaced by this one, and removed with it.)
+    this.study = { ...b.study, id: this.studyId, name: `${b.study.name} (imported)`, updatedAt: nowIso(), importIncomplete: true };
     await dbApi.putStudy(this.study);
   }
 
+  /** Everything is in: the study is no longer a partial import. */
+  async finish(): Promise<Study> {
+    const study = this.study!;
+    delete study.importIncomplete;
+    await dbApi.putStudy(study);
+    return study;
+  }
+
+  /** `run:doc:replicate`, or `run:doc:replicate#attempt` for an earlier attempt's log: the run and doc are renamed. */
   private newId(r: { runId: string; id: string }): string {
     const [, oldDoc, rep] = r.id.split(':');
     return `${this.runMap.get(r.runId)}:${this.docMap.get(oldDoc) ?? oldDoc}:${rep}`;
@@ -164,7 +178,7 @@ export async function importBackup(file: Blob): Promise<Study> {
       }
       await imp.start(b);
       for (const s of SECTIONS) await imp.add(s, b[s] ?? []);
-      return imp.study!;
+      return await imp.finish();
     }
     // One record per line: write in chunks, so even a very large backup never has to be in memory at once.
     await imp.start(head);
@@ -189,10 +203,10 @@ export async function importBackup(file: Blob): Promise<Study> {
       }
     }
     if (!complete) throw new Error('The backup file is incomplete (it ends too early); nothing was imported.');
-    return imp.study!;
+    return await imp.finish();
   } catch (e) {
-    // Don't leave half a study behind.
-    if (imp.study) await dbApi.deleteStudy(imp.studyId);
+    // Don't leave half a study behind (if even that fails, it is still marked, and the next start removes it).
+    if (imp.study) await dbApi.deleteStudy(imp.studyId).catch(() => undefined);
     throw e;
   }
 }

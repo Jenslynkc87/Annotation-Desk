@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as dbApi from '../db';
+import { init, storageError } from '../store';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type Result, type ResultLog, type Run, type Study } from '../types';
 import { buildBackup, importBackup } from './backup';
 
@@ -37,6 +38,9 @@ async function seed() {
 async function check(imported: Study) {
   expect(imported.id).not.toBe(study.id);
   expect(imported.name).toBe('Study "one" (imported)');
+  // Complete: no longer marked as a partial import, in the database too.
+  expect('importIncomplete' in imported).toBe(false);
+  expect((await dbApi.listStudies()).find((s) => s.id === imported.id)?.importIncomplete).toBeUndefined();
   const data = await dbApi.loadStudyData(imported.id);
   expect(data.docs.map((d) => d.text)).toEqual(docs.map((d) => d.text));
   expect(data.runs).toHaveLength(1);
@@ -65,7 +69,8 @@ describe('study backup', () => {
 
   it('reads older backups written as a single line', async () => {
     await seed();
-    const old = { format: 'annotation-desk-study', version: 1, exportedAt: '', appVersion: 'old', study, docs, runs: [run], results, logs };
+    // (A mark of a partial import in the backup's own study is not carried over.)
+    const old = { format: 'annotation-desk-study', version: 1, exportedAt: '', appVersion: 'old', study: { ...study, importIncomplete: true }, docs, runs: [run], results, logs };
     await check(await importBackup(new Blob([JSON.stringify(old)])));
   });
 
@@ -87,5 +92,96 @@ describe('study backup', () => {
     // Cut exactly at a line break: every line reads fine, but the end is missing.
     await expect(importBackup(new Blob([text.slice(0, text.indexOf('"results":['))]))).rejects.toThrow('incomplete');
     expect((await dbApi.listStudies()).length).toBe(before);
+  });
+
+  it('keeps the logs of earlier attempts replaced by a retry, under the new run and text ids', async () => {
+    const s2: Study = { ...study, id: 's2' };
+    const run2: Run = { ...run, id: 'r2', studyId: 's2' };
+    const base = { ...results[0], id: 'r2:d0:1', runId: 'r2', studyId: 's2' };
+    const logOf = (content: string): ResultLog => ({ id: 'r2:d0:1', runId: 'r2', studyId: 's2', requestPart: { content }, response: { content } });
+    await dbApi.putResult({ ...base, status: 'error', error: 'overloaded', requestedAt: 't1', responseId: '' }, logOf('first'));
+    const retried: Result = { ...base, requestedAt: 't2', responseId: 'id2' };
+    await dbApi.putResult(retried, logOf('second')); // the failed attempt's log is kept as r2:d0:1#1
+    expect(retried.attempt).toBe(2);
+
+    const blob = await buildBackup(s2, docs, [run2], [retried], true);
+    expect(JSON.parse(await blob.text()).logs.map((l: ResultLog) => l.id)).toEqual(['r2:d0:1', 'r2:d0:1#1']);
+    const imported = await importBackup(blob);
+    const data = await dbApi.loadStudyData(imported.id);
+    const r = data.runs[0];
+    const d0 = data.docs.find((d) => d.docId === 'doc_0')!.id;
+    expect(data.results.map((x) => [x.id, x.attempt])).toEqual([[`${r.id}:${d0}:1`, 2]]);
+    const ls = new Map((await dbApi.getLogsForRun(r.id)).map((l) => [l.id, l]));
+    expect([...ls.keys()].sort()).toEqual([`${r.id}:${d0}:1`, `${r.id}:${d0}:1#1`]);
+    expect(ls.get(`${r.id}:${d0}:1`)?.requestPart).toEqual({ content: 'second' });
+    expect(ls.get(`${r.id}:${d0}:1#1`)).toMatchObject({ runId: r.id, studyId: imported.id, attempt: 1, requestPart: { content: 'first' }, replaced: { status: 'error', error: 'overloaded' } });
+  });
+
+  it('reads a run’s logs a page at a time, never all at once', async () => {
+    const many: ResultLog[] = Array.from({ length: 650 }, (_, i) => ({ id: `r3:d${i}:1`, runId: 'r3', studyId: 's3', requestPart: { content: `text ${i}` }, response: null }));
+    await dbApi.putMany('logs', many);
+    const real = dbApi.logPagesForRun;
+    const pages: number[] = [];
+    const paged = vi.spyOn(dbApi, 'logPagesForRun').mockImplementation(async function* (runId, size) {
+      for await (const page of real(runId, size)) {
+        pages.push(page.length);
+        yield page;
+      }
+    });
+    const whole = vi.spyOn(dbApi, 'getLogsForRun');
+    try {
+      const blob = await buildBackup({ ...study, id: 's3' }, [], [{ ...run, id: 'r3', studyId: 's3' }], [], true);
+      expect(pages).toEqual([300, 300, 50]);
+      expect(whole).not.toHaveBeenCalled();
+      expect(JSON.parse(await blob.text()).logs.map((l: ResultLog) => l.id)).toEqual(many.map((l) => l.id).sort());
+    } finally {
+      paged.mockRestore();
+      whole.mockRestore();
+    }
+  });
+
+  it('marks the study until the whole file is in, so an import cut off by closing the page is removed at the next start', async () => {
+    await seed();
+    const text = await (await buildBackup(study, docs, [run], results, true)).text();
+    // A file that stops arriving after the texts and runs, as when the page is closed during the import (the
+    // import never finishes, and never gets to remove what it wrote).
+    const head = new TextEncoder().encode(text.slice(0, text.indexOf('"results":[')));
+    const stalled = { stream: () => new ReadableStream<Uint8Array>({ start: (c) => c.enqueue(head) }) } as unknown as Blob;
+    const before = (await dbApi.listStudies()).map((s) => s.id);
+    void importBackup(stalled);
+    const partial = await vi.waitFor(async () => {
+      const s = (await dbApi.listStudies()).find((x) => !before.includes(x.id));
+      expect(s).toBeDefined();
+      expect((await dbApi.loadStudyData(s!.id)).runs).toHaveLength(1);
+      return s!;
+    });
+    expect(partial).toMatchObject({ name: 'Study "one" (imported)', importIncomplete: true });
+    await init();
+    // Gone, with everything written so far; the complete studies stay.
+    expect((await dbApi.listStudies()).map((s) => s.id).sort()).toEqual(before.sort());
+    expect(await dbApi.loadStudyData(partial.id)).toEqual({ docs: [], runs: [], results: [] });
+  });
+
+  it('reports a full storage as such, and leaves the study marked when even removing it fails', async () => {
+    await seed();
+    const blob = await buildBackup(study, docs, [run], results, true);
+    const before = (await dbApi.listStudies()).map((s) => s.id);
+    // Chrome's QuotaExceededError comes without a message.
+    const put = vi.spyOn(dbApi, 'putMany').mockRejectedValue(new DOMException('', 'QuotaExceededError'));
+    const del = vi.spyOn(dbApi, 'deleteStudy').mockRejectedValue(new Error('the database connection was closed'));
+    let err: unknown;
+    try {
+      err = await importBackup(blob).then(() => null, (e: unknown) => e);
+    } finally {
+      put.mockRestore();
+      del.mockRestore();
+    }
+    // The cause, not the failed clean-up, is what the owner sees ("Import failed: …").
+    expect((err as DOMException).name).toBe('QuotaExceededError');
+    expect(storageError(err)).toMatch(/storage is full/);
+    const left = (await dbApi.listStudies()).filter((s) => !before.includes(s.id));
+    expect(left).toMatchObject([{ name: 'Study "one" (imported)', importIncomplete: true }]);
+    await init();
+    expect((await dbApi.listStudies()).map((s) => s.id).sort()).toEqual(before.sort());
   });
 });

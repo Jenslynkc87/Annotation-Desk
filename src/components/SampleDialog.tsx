@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
-import { drawStratifiedSample, SAMPLING_METHOD } from '../lib/sample';
-import { currentStudy, markSample, useStore } from '../lib/store';
+import { allocationNote, drawStratifiedSample, orderStrata, SAMPLING_METHOD } from '../lib/sample';
+import { currentStudy, markSample, sampleNotePrefix, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import { Modal, NumberField } from './ui';
 
@@ -10,8 +10,9 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
   const columns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const valuesOf = (c: string) => [...new Set(docs.map((d) => d.meta[c] ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  // Columns that group texts (era, journal, …): a few distinct values, not one per text.
-  const groupColumns = columns.filter((c) => c !== 'file' && valuesOf(c).length >= 2 && valuesOf(c).length <= 200);
+  // Columns that group texts (era, journal, …): a few distinct values, not one per text. Listed (and the ticked
+  // strata kept) in the fixed order a draw uses, whatever order they are ticked (sampling method 3).
+  const groupColumns = orderStrata(columns.filter((c) => c !== 'file' && valuesOf(c).length >= 2 && valuesOf(c).length <= 200));
   const [size, setSize] = useState(100);
   const [strata, setStrata] = useState<string[]>([]);
   const [excludeCol, setExcludeCol] = useState('');
@@ -19,10 +20,12 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const [column, setColumn] = useState('sample');
   const [value, setValue] = useState('validation');
   const [seed, setSeed] = useState(() => 1 + Math.floor(Math.random() * 99999));
+  const [marking, setMarking] = useState(false);
   const exclude = excludeCol && excludeVal ? { column: excludeCol, value: excludeVal } : null;
   const r = useMemo(() => drawStratifiedSample(docs, { size, strata, exclude, seed }), [docs, size, strata, excludeCol, excludeVal, seed]);
   const chosen = new Set(r.ids);
-  const already = docs.filter((d) => d.meta[column] === value).length;
+  const emptyGroups = r.strata.filter((s) => s.drawn === 0).length;
+  const already = docs.filter((d) => d.meta[column.trim()] === value.trim()).length;
   // File types (e.g. .md and .txt) in the sample versus the eligible texts, to check the mix is similar.
   const types = useMemo(() => {
     const ext = (f: string | undefined) => (f?.includes('.') ? f.slice(f.lastIndexOf('.') + 1).toLowerCase() : '');
@@ -38,14 +41,17 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   }, [docs, r]);
 
   const apply = async () => {
+    const [col, val] = [column.trim(), value.trim()];
     const date = new Date().toISOString().slice(0, 10);
+    // Starts with sampleNotePrefix, so a redraw for the same column = value replaces this note.
     const note =
-      `Sample ${column} = ${value} (${date}): ${r.ids.length} of ${r.eligible} ${w.many} drawn at random` +
-      (strata.length ? ` within ${strata.join(' × ')} strata (proportional allocation, at least one per stratum)` : '') +
+      `${sampleNotePrefix(col, val)}${date}): ${r.ids.length} of ${r.eligible} ${w.many} drawn at random` +
+      (strata.length ? ` within ${strata.join(' × ')} strata (${allocationNote(r, w.one)})` : '') +
       (exclude ? `, excluding ${exclude.column} = ${exclude.value}` : '') +
       `; seed ${seed} (${SAMPLING_METHOD}).`;
-    await markSample(column.trim(), value.trim(), r.ids, note, seed);
-    onClose();
+    setMarking(true);
+    const ok = await markSample(col, val, r.ids, note, seed).finally(() => setMarking(false));
+    if (ok) onClose();
   };
 
   return (
@@ -56,14 +62,18 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       footer={
         <>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={!r.ids.length || !column.trim() || !value.trim()} onClick={apply}>
+          <button className="btn primary" disabled={marking || !r.ids.length || !column.trim() || !value.trim()} onClick={apply}>
             Mark {r.ids.length} {r.ids.length === 1 ? w.one : w.many} as {column} = {value}
           </button>
         </>
       }
     >
       <p className="hint" style={{ marginTop: 0 }}>
-        Draws {w.many} at random, in proportion to the size of each group, with at least one per group. The same seed always gives the same sample;
+        Draws {w.many} at random, in proportion to the size of each group
+        {emptyGroups
+          ? ` (${emptyGroups} of ${r.strata.length} groups get${emptyGroups === 1 ? 's' : ''} no ${w.one}, as the sample is smaller than the number of groups)`
+          : ', with at least one per group'}
+        . The same seed always gives the same sample;
         the rule and seed are saved with the study. Afterwards, filter the list by {column} = {value}, choose Select → all shown, and run the
         selection.
       </p>
@@ -83,7 +93,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
           {groupColumns.length ? (
             groupColumns.map((c) => (
               <label key={c} className="check">
-                <input type="checkbox" checked={strata.includes(c)} onChange={(e) => setStrata(e.target.checked ? [...strata, c] : strata.filter((x) => x !== c))} />
+                <input type="checkbox" checked={strata.includes(c)} onChange={(e) => setStrata(groupColumns.filter((x) => (x === c ? e.target.checked : strata.includes(x))))} />
                 {c}
               </label>
             ))
