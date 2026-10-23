@@ -10,7 +10,7 @@ let running: Worker | null = null;
  */
 export function computeIntervals(job: IntervalJob, done: (ci: Agreement['ci']) => void): () => void {
   running?.terminate();
-  const direct = () => done(agreement(job.a, job.b, job.level, job.allowed, job.tolerance, { scaleSeen: job.scaleSeen }).ci);
+  const direct = () => done(agreement(job.a, job.b, job.level, job.allowed, job.tolerance, { scaleSeen: job.scaleSeen, range: job.range }).ci);
   let w: Worker;
   try {
     w = new Worker(new URL('./ci.worker.ts', import.meta.url), { type: 'module' });

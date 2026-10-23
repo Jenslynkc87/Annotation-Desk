@@ -11,6 +11,8 @@ export interface Gaps {
   /** Differ by 2 points or more. */
   secondHigherLarge: number;
   secondLowerLarge: number;
+  /** Of those that differ: by a part of a point (e.g. 0.5 or 1.5, from the median of an even number of annotations). */
+  fractional: number;
 }
 
 export interface Agreement {
@@ -19,10 +21,16 @@ export interface Agreement {
   level: Level;
   /**
    * Texts left out, and some of those labels. On a scale: a label that wasn't a number (e.g. "NA") or was outside
-   * the scale (e.g. 99): the codebook's, or for plain-text scores the range of the model's answers (`range`, the
-   * scale's lowest and highest value). With codebook categories: a label that isn't one of them (nor a tie of them).
+   * the scale (e.g. 99): the codebook's, or for plain-text scores the range of the model's answers grown through the
+   * labels next to it (see `agreement`); `range` is the scale's lowest and highest value. With codebook categories
+   * that aren't numbers: a label that isn't one of them (nor a tie of them).
    */
   leftOut: { n: number; values: string[]; range?: [number, number] };
+  /**
+   * Plain-text scores: texts kept although a label lies outside the range of the model's answers (`range`), because it
+   * is next to that range or to another label on the scale (e.g. a −3 when the model answered −2…3); the values, in order.
+   */
+  outsideAnswers?: { n: number; values: string[]; range: [number, number] };
   percentAgreement: number | null;
   cohenKappa: number | null;
   weightedKappa: number | null; // quadratic weights, ordinal/interval only
@@ -199,14 +207,14 @@ function fixedCategories(allowed: string[], numeric: boolean): string[] | null {
 function marginalsOn(cats: string[], pairs: [string, string][], numeric: boolean): number[] | null {
   const idx = new Map(cats.map((c, i) => [c, i]));
   const points = numeric ? cats.map(Number) : [];
+  const at = (v: string) => idx.get(v) ?? (numeric && isNum(v) ? points.findIndex((p) => Math.abs(p - Number(v)) < 1e-9) : -1);
   const pi = new Array<number>(cats.length).fill(0);
   for (const [v, count] of valueCounts(pairs)) {
     const share = count / (2 * pairs.length);
-    const i = idx.get(v) ?? (numeric && isNum(v) ? points.findIndex((p) => Math.abs(p - Number(v)) < 1e-9) : -1);
+    const i = at(v);
     if (i >= 0) {
       pi[i] += share;
-    } else if (numeric) {
-      if (!isNum(v)) return null;
+    } else if (numeric && isNum(v)) {
       const x = Number(v);
       const above = points.findIndex((p) => p > x);
       if (above <= 0) return null; // below the lowest point or above the highest
@@ -214,9 +222,9 @@ function marginalsOn(cats: string[], pairs: [string, string][], numeric: boolean
       pi[above - 1] += (share * (hi - x)) / (hi - lo);
       pi[above] += (share * (x - lo)) / (hi - lo);
     } else {
-      const parts = v.split(' | ');
-      if (parts.length < 2 || !parts.every((p) => idx.has(p))) return null;
-      for (const p of parts) pi[idx.get(p)!] += share / parts.length;
+      const parts = v.split(' | ').map(at);
+      if (parts.length < 2 || parts.some((p) => p < 0)) return null;
+      for (const p of parts) pi[p] += share / parts.length;
     }
   }
   return pi;
@@ -360,12 +368,13 @@ export const oppositeDirection = (p: [string, string][], mid: number) =>
   mean(numPairs(p).map(([x, y]) => ((x < mid && y > mid) || (x > mid && y < mid) ? 1 : 0)));
 
 export function gapCounts(p: [string, string][]): Gaps {
-  const g: Gaps = { same: 0, secondHigherSmall: 0, secondLowerSmall: 0, secondHigherLarge: 0, secondLowerLarge: 0 };
+  const g: Gaps = { same: 0, secondHigherSmall: 0, secondLowerSmall: 0, secondHigherLarge: 0, secondLowerLarge: 0, fractional: 0 };
   for (const [x, y] of numPairs(p)) {
     const d = y - x;
     if (Math.abs(d) < 1e-9) g.same++;
     else if (Math.abs(d) >= 2 - 1e-9) d > 0 ? g.secondHigherLarge++ : g.secondLowerLarge++;
     else d > 0 ? g.secondHigherSmall++ : g.secondLowerSmall++;
+    if (Math.abs(d) >= 1e-9 && Math.abs(d - Math.round(d)) > 1e-9) g.fractional++;
   }
   return g;
 }
@@ -377,10 +386,35 @@ function scaleMidpoint(scale: number[], observed: number[]): number | null {
 }
 
 /**
+ * Plain-text scores: the scale labels may be on, grown from the range of the model's answers. A value whose distance to
+ * the scale is at most `step` (half the range's width, at least 1 point) joins it and extends it, so labels next to the
+ * range (or next to another label on the scale) are kept, e.g. a −3 when the model answered −2…3, while a code far
+ * off (9, 33 or 99) is not.
+ */
+export function grownScale([lo, hi]: [number, number], values: number[]): [number, number] {
+  const step = Math.max(1, (hi - lo) / 2);
+  const sorted = [...new Set(values)].sort((a, b) => a - b);
+  for (const x of sorted) {
+    if (x <= hi) continue;
+    if (x - hi > step + 1e-9) break;
+    hi = x;
+  }
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const x = sorted[i];
+    if (x >= lo) continue;
+    if (lo - x > step + 1e-9) break;
+    lo = x;
+  }
+  return [lo, hi];
+}
+
+/**
  * `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`.
  * `withIntervals` false: leave out the bootstrap intervals (the slow part), e.g. to show the figures first.
- * `scaleSeen`: `allowed` is only the range of the model's answers (no codebook scale), so it sets the weights and
- * the range labels must fall in, but not the scale's midpoint (which decides "opposite direction").
+ * `scaleSeen`: plain-text scores, with no codebook. `range`: the lowest and highest of the model's answers (else the
+ * lowest and highest number in `allowed`, which is then every whole number of that range). The scale is that range
+ * grown through the labels next to it (`grownScale`); it sets the weights and which labels are left out, but not the
+ * scale's midpoint (which decides "opposite direction").
  */
 export function agreement(
   a: string[],
@@ -388,7 +422,7 @@ export function agreement(
   level: Level,
   allowed: string[] = [],
   tolerance = 1,
-  { withIntervals = true, scaleSeen = false }: { withIntervals?: boolean; scaleSeen?: boolean } = {},
+  { withIntervals = true, scaleSeen = false, range }: { withIntervals?: boolean; scaleSeen?: boolean; range?: [number, number] } = {},
 ): Agreement {
   let pairs: [string, string][] = [];
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
@@ -398,56 +432,102 @@ export function agreement(
   // own (one such cell would otherwise turn every statistic nominal), as long as most values are numbers.
   // So is a number outside the scale (e.g. a missing-value code such as 9 or 99, or a typo such as 30 for 3),
   // which would otherwise stretch the scale every weight is measured on: the codebook's scale, or for plain-text
-  // scores (`scaleSeen`) the range of the model's answers. With codebook categories, so is a label that is
-  // neither a category nor a tie of categories ("a | b"). Those left out are reported. Mostly words (e.g.
-  // "2 (moderate)"): compared as categories instead. A missing-value marker such as "NA" or "N/A" that isn't
+  // scores (`scaleSeen`) the range of the model's answers grown through the labels next to it. Codebook values
+  // that are all numbers are a scale at every level, so at the nominal level too a combined label between two of
+  // them (a 1.5 median) is compared, as a disagreement. With codebook categories that aren't numbers, a label that
+  // is neither a category nor a tie of categories ("a | b") is left out. Those left out are reported. Mostly words
+  // (e.g. "2 (moderate)"): compared as categories instead. A missing-value marker such as "NA" or "N/A" that isn't
   // itself a category is always left out (and reported), even where most labels are such markers.
   const leftOut: Agreement['leftOut'] = { n: 0, values: [] };
+  let outsideAnswers: Agreement['outsideAnswers'];
+  const numericCodebook = !scaleSeen && allowed.length > 0 && allowed.every(isNum);
+  const allowedNums = allowed.filter(isNum).map(Number);
+  // Plain-text scores: the range of the model's answers, and the scale grown from it.
+  const seed: [number, number] | null = !scaleSeen
+    ? null
+    : range ?? (allowedNums.length ? [Math.min(...allowedNums), Math.max(...allowedNums)] : null);
+  let block: [number, number] | null = null;
   let fits: ((v: string) => boolean) | null = null;
-  if (level !== 'nominal') {
-    const scaleNums = allowed.filter(isNum).map(Number);
-    const lo = scaleNums.length >= 2 ? Math.min(...scaleNums) : -Infinity;
-    const hi = scaleNums.length >= 2 ? Math.max(...scaleNums) : Infinity;
-    if (scaleNums.length >= 2) leftOut.range = [lo, hi];
+  // Numbers judged on a scale (plain-text scores, a codebook scale, or numeric codes): a number off it is always left out.
+  let onNumbers = false;
+  if (scaleSeen) {
+    if (seed) {
+      const values: number[] = [];
+      for (const [x, y] of pairs) for (const v of [x, y]) if (isNum(v)) values.push(Number(v));
+      block = grownScale(seed, values);
+      leftOut.range = block;
+    }
+    const [lo, hi] = block ?? [-Infinity, Infinity];
     fits = (v: string) => isNum(v) && Number(v) >= lo - 1e-9 && Number(v) <= hi + 1e-9;
+    onNumbers = true;
+  } else if (level !== 'nominal' || numericCodebook) {
+    onNumbers = true;
+    const lo = allowedNums.length >= 2 ? Math.min(...allowedNums) : -Infinity;
+    const hi = allowedNums.length >= 2 ? Math.max(...allowedNums) : Infinity;
+    if (allowedNums.length >= 2) leftOut.range = [lo, hi];
+    const onScale = (v: string) => isNum(v) && Number(v) >= lo - 1e-9 && Number(v) <= hi + 1e-9;
+    // (A tie of scale points, from a majority vote of numeric categories, is a category of its own at the nominal level.)
+    fits = level === 'nominal' ? (v: string) => onScale(v) || (v.includes(' | ') && v.split(' | ').every(onScale)) : onScale;
   } else if (new Set(allowed).size >= 2) {
     const cats = new Set(allowed);
     fits = (v: string) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));
   }
+  let compareAsWords = false;
   if (fits) {
     const onScale = fits;
     const missing = (v: string) => !onScale(v) && isMissingLabel(v);
     const labelled = pairs.filter(([x, y]) => !missing(x) && !missing(y));
     const kept = labelled.filter(([x, y]) => onScale(x) && onScale(y));
-    const use = kept.length && kept.length >= labelled.length / 2 ? kept : labelled;
+    // On a scale, a number off it is always left out (also where most labels are, e.g. a column of 99 codes); only
+    // mostly words are compared as they are. Categories: mostly labels that aren't categories.
+    compareAsWords = onNumbers
+      ? labelled.filter(([x, y]) => !isNum(x) || !isNum(y)).length * 2 > labelled.length
+      : !(kept.length && kept.length >= labelled.length / 2);
+    const use = compareAsWords ? labelled : kept;
     if (use.length < pairs.length) {
       leftOut.n = pairs.length - use.length;
-      leftOut.values = [...new Set(pairs.flat().filter((v) => !onScale(v) && (use === kept || missing(v))))].slice(0, 5);
+      leftOut.values = [...new Set(pairs.flat().filter((v) => !onScale(v) && (!compareAsWords || missing(v))))].slice(0, 5);
       pairs = use;
     }
+    if (seed && !compareAsWords) {
+      const outside = (v: string) => isNum(v) && (Number(v) < seed[0] - 1e-9 || Number(v) > seed[1] + 1e-9);
+      const beyond = pairs.filter(([x, y]) => outside(x) || outside(y));
+      if (beyond.length) {
+        const values = [...new Set(beyond.flat().filter(outside))].sort((x, y) => Number(x) - Number(y));
+        outsideAnswers = { n: beyond.length, values, range: seed };
+      }
+    }
   }
-  const numeric = level !== 'nominal' && pairs.length > 0 && pairs.every(([x, y]) => isNum(x) && isNum(y));
+  const allNumbers = pairs.length > 0 && pairs.every(([x, y]) => isNum(x) && isNum(y));
+  const numeric = level !== 'nominal' && allNumbers;
   const xs = numeric ? pairs.map(([x]) => Number(x)) : [];
   const ys = numeric ? pairs.map(([, y]) => Number(y)) : [];
   const categories = sortCats([...new Set([...allowed, ...pairs.flat()])]);
   const confusion: Record<string, Record<string, number>> = {};
   for (const c of categories) confusion[c] = Object.fromEntries(categories.map((d) => [d, 0]));
   for (const [x, y] of pairs) confusion[x][y]++;
-  // Plain-text runs (`scaleSeen`): whole-number scores are on every whole number of the range of the model's
-  // answers (`allowed`; labels outside it were left out above). Without such a range, the range of the values
-  // here. A combined label between whole numbers (e.g. a 1.5 median) doesn't change the scale.
-  const seenRange = (): string[] => {
-    const own = allowed.filter(isNum).map(Number);
-    const vals = own.length >= 2 ? own : [...own, ...pairs.flat().map(Number)];
-    if (!vals.length || (level !== 'ordinal' && !vals.every(Number.isInteger))) return own.map(String);
+  // Plain-text runs (`scaleSeen`): the scale is every whole number of the grown scale above, so a value never used
+  // still counts in the weights and in Gwet's q, and a value between whole numbers (a 1.5 median, or a 2.5 answer
+  // that made the field interval) is split between them, as on a codebook scale. Without a range, the range of the
+  // values here (whole numbers only).
+  const seenScale = (): string[] => {
+    const vals = block ? [...block, ...allowedNums] : [...allowedNums, ...pairs.flat().map(Number)];
+    const whole = !!block || level === 'ordinal' || allowedNums.length > 0 || vals.every(Number.isInteger);
+    if (!vals.length || !whole) return allowedNums.map(String);
     let lo = Infinity;
     let hi = -Infinity;
     for (const x of vals) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
     [lo, hi] = [Math.floor(lo), Math.ceil(hi)];
-    return hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : own.map(String);
+    return hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : allowedNums.map(String);
   };
-  const scale = numeric ? (scaleSeen ? seenRange() : allowed.filter(isNum)) : [];
-  const alphaLevel = numeric ? level : 'nominal';
+  // The scale's points: for the weights (numbers), and for Gwet's AC1 also at the nominal level when the codebook's
+  // values are numbers (or for plain-text scores): q is their number, a half point is split between its neighbours.
+  const points = allNumbers || (level === 'nominal' && !compareAsWords && (scaleSeen || numericCodebook)) ? (scaleSeen ? seenScale() : allowed.filter(isNum)) : [];
+  const scale = numeric ? points : [];
+  const ac1Scale = numeric || (level === 'nominal' && points.length >= 2) ? points : allowed;
+  const ac1Numeric = ac1Scale === points && points.length > 0;
+  // Nothing left to compare (e.g. every label "NA"): the level asked for, not nominal.
+  const alphaLevel = numeric || !pairs.length ? level : 'nominal';
   const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : scale.map(Number), [...xs, ...ys]) : null;
   const stats = {
     percentAgreement,
@@ -462,7 +542,7 @@ export function agreement(
         }
       : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
-    gwetAC1: (p: [string, string][]) => gwetAC1(p, numeric ? scale : allowed, numeric),
+    gwetAC1: (p: [string, string][]) => gwetAC1(p, ac1Scale, ac1Numeric),
     ...(numeric
       ? {
           withinTolerance: (p: [string, string][]) => withinTolerance(p, tolerance),
@@ -475,12 +555,13 @@ export function agreement(
     n: pairs.length,
     level: alphaLevel,
     leftOut,
+    ...(outsideAnswers ? { outsideAnswers } : {}),
     percentAgreement: percentAgreement(pairs),
     cohenKappa: cohenKappa(pairs),
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
     weightedKappaLinear: numeric ? cohenKappa(pairs, 'linear', scale) : null,
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
-    gwetAC1: gwetAC1(pairs, numeric ? scale : allowed, numeric),
+    gwetAC1: gwetAC1(pairs, ac1Scale, ac1Numeric),
     gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
     ci: withIntervals ? bootstrapCI(pairs, stats) : {},
     spearman: numeric ? spearman(xs, ys) : null,

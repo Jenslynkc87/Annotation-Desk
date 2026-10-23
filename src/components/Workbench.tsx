@@ -44,21 +44,33 @@ export function validFilters(
  */
 export function comparableLabel(field: Variable | undefined, pairs: [string, string][]): (v: string) => boolean {
   let fits: ((v: string) => boolean) | null = null;
+  // (On a scale or numeric codes, as in `agreement`: a number off it is always left out; only mostly words are compared as they are.)
+  let onNumbers = false;
   if (field?.type === 'ordinal' || field?.type === 'number') {
+    onNumbers = true;
     const scale = field.type === 'ordinal' ? field.values.map((x) => toNumber(x)).filter(Number.isFinite) : [];
     const lo = scale.length >= 2 ? Math.min(...scale) : -Infinity;
     const hi = scale.length >= 2 ? Math.max(...scale) : Infinity;
     fits = (v) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
   } else if (field?.type === 'category' || field?.type === 'boolean') {
     const cats = new Set(field.type === 'boolean' ? ['false', 'true'] : field.values.map((x) => normalizeLabel(x)).filter(Boolean));
-    if (cats.size >= 2) fits = (v) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));
+    const codes = [...cats].map(toNumber);
+    if (field.type === 'category' && cats.size >= 2 && codes.every(Number.isFinite)) {
+      // Categories that are all numbers (e.g. codes 1 to 5) are judged on their range, as in `agreement`: a value
+      // between two codes is compared, a number off the range (e.g. 99) is not.
+      const [lo, hi] = [Math.min(...codes), Math.max(...codes)];
+      const inRange = (v: string) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
+      fits = (v) => inRange(v) || (v.includes(' | ') && v.split(' | ').every(inRange));
+      onNumbers = true;
+    } else if (cats.size >= 2) fits = (v) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));
   }
   if (!fits) return (v) => !isMissingLabel(v);
   const onScale = fits;
   const missing = (v: string) => !onScale(v) && isMissingLabel(v);
   const labelled = pairs.filter(([x, y]) => !missing(x) && !missing(y));
   const kept = labelled.filter(([x, y]) => onScale(x) && onScale(y)).length;
-  const strict = kept > 0 && kept >= labelled.length / 2;
+  const isNumber = (v: string) => Number.isFinite(toNumber(v));
+  const strict = onNumbers ? labelled.filter(([x, y]) => !isNumber(x) || !isNumber(y)).length * 2 <= labelled.length : kept > 0 && kept >= labelled.length / 2;
   return (v) => !missing(v) && (!strict || onScale(v));
 }
 
@@ -353,24 +365,30 @@ function TextsAndResults() {
           {showEstimate ? <CostEstimate selected={selected} onClose={() => setShowEstimate(false)} /> : <EstimateLink onClick={() => setShowEstimate(true)} />}
 
           {progress}
-          {pendingBatches.map((r) => (
-            <div className="notice" key={r.id} style={{ marginTop: 10 }}>
-              <div className="row">
-                <span>
-                  Batch run {runTitle(r)} is processing ({r.batch?.lastStatus ?? 'submitted'}).{' '}
-                  {r.batch && batchParts(r).some((p) => p.status === 'submitted' && p.saveFailed)
-                    ? 'Results that arrived could not be saved: free some space, then click Check now.'
-                    : r.batch && keys[r.batch.provider]
-                      ? 'Results appear here automatically while this page is open.'
-                      : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
-                  Unfinished requests expire 24 hours after submission.
-                </span>
-                <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
-                  Check now
-                </button>
+          {pendingBatches.map((r) => {
+            // Batches that ended but whose results could not be saved are not checked again until the owner asks.
+            const waiting = batchParts(r).filter((p) => p.status === 'submitted');
+            const notSaved = waiting.filter((p) => p.saveFailed).length;
+            const running = waiting.filter((p) => !p.saveFailed);
+            return (
+              <div className="notice" key={r.id} style={{ marginTop: 10 }}>
+                <div className="row">
+                  <span>
+                    {running.length ? `Batch run ${runTitle(r)} is processing (${running.map((p) => p.lastStatus).join('; ') || 'submitted'}). ` : `Batch run ${runTitle(r)} has ended. `}
+                    {notSaved
+                      ? `${running.length ? `The results of ${notSaved === 1 ? 'a batch that ended' : `${notSaved} batches that ended`}` : 'Its results'} could not be saved: free some space, then click Check now.`
+                      : r.batch && keys[r.batch.provider]
+                        ? 'Results appear here automatically while this page is open.'
+                        : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
+                    {running.length > 0 && 'Unfinished requests expire 24 hours after submission.'}
+                  </span>
+                  <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
+                    Check now
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           <div className="toolbar">
             <input className="input small" style={{ flex: '1 1 180px', maxWidth: 260 }} placeholder={`Search ${w.many} and results…`} value={query} onChange={(e) => (setQuery(e.target.value), setPage(0))} />

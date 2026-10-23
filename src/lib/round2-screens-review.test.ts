@@ -5,7 +5,7 @@ import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { columnsFieldRun, copyElsewhere, leftOutReason, OTHER_STUDY_HERE } from '../components/RunsView';
 import { comparableLabel } from '../components/Workbench';
-import { agreementForRun } from './export/tables';
+import { agreementForRun, labelValue } from './export/tables';
 import { agreement } from './metrics';
 import { normalizeLabel } from './prompt';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type Run, type Variable } from './types';
@@ -74,11 +74,12 @@ describe('Agreement panel, two label columns: the same figures as the exported h
       const xs: string[] = [];
       const ys: string[] = [];
       for (const d of docs) {
-        const y = normalizeLabel(d.meta[b], m.field.yesNo);
-        const x = normalizeLabel(d.meta[a], m.field.yesNo);
+        // A missing-value marker counts as a blank cell (round three).
+        const y = labelValue(d.meta[b], m.field);
+        const x = labelValue(d.meta[a], m.field);
         if (x && y) (xs.push(x), ys.push(y));
       }
-      const panel = agreement(xs, ys, m.field.level, m.field.allowed, 1, { withIntervals: false, scaleSeen: m.field.scaleSeen });
+      const panel = agreement(xs, ys, m.field.level, m.field.allowed, 1, { withIntervals: false, scaleSeen: m.field.scaleSeen, range: m.field.range });
       const row = agreementForRun(early, docs, runs, results).find((x) => x.source === a && x.compared_with === b)!;
       expect(panel.n).toBe(row.stats.n);
       expect(panel.leftOut.n).toBe(row.stats.leftOut.n);
@@ -94,6 +95,10 @@ describe('Workbench "Disagree with": the texts the Agreement panel counts as dis
     [variable('relevant', 'boolean'), ['yes', 'no', '1', '0', 'true', 'NA', 'unclear'], true],
     // Mostly words on a scale: compared as they are, NA still left out.
     [variable('stance', 'ordinal', scale), ['low', 'high', 'mid', '2', 'NA'], false],
+    // Category codes that are all numbers: judged on their range (round three), so 1.5 and "1 | 2" are compared, 99 not.
+    [variable('frame', 'category', ['1', '2', '3', '4']), ['1', '2', '3', '4', '1.5', '1 | 2', '99', 'NA'], false],
+    // Mostly a 99 code on a scale: still left out (round three), not compared as it is.
+    [variable('stance', 'ordinal', scale), ['99', '99', '99', '99', '99', '1', '2', 'NA'], false],
   ];
   cases.forEach(([v, pool, yesNo], i) => {
     it(`${v.type} case ${i + 1}`, () => {

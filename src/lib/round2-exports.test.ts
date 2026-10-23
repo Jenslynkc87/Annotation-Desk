@@ -63,7 +63,7 @@ describe('methods text: failed requests, texts never sent, prose answers, ties, 
     const results = docs.slice(0, 36).map((d, i) => mkResult(run, d, 1, i === 35 ? null : { stance: 'for' }));
     const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(methods).toContain('1 of 36 requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and was excluded, leaving 1 text without a label.');
-    expect(methods).toContain('64 texts in the run were not sent (the run was cancelled).');
+    expect(methods).toContain('64 texts in the run have no answer recorded (not sent, or the run stopped before an answer arrived; the run was cancelled).');
     expect(methods).toContain('Altogether, 65 of the 100 texts in the run have no label.');
     expect(methods).not.toContain('leaving 65');
     expect(meta.corpus).toMatchObject({ n_texts_in_run: 100, n_texts_with_results: 36, n_texts_with_usable_labels: 35, n_texts_all_requests_failed: 1, n_texts_without_results: 64 });
@@ -144,14 +144,15 @@ describe('methods text: failed requests, texts never sent, prose answers, ties, 
 
 describe('README agreement notes (N117, N118, R5, R25)', () => {
   it('labels left out as not on the scale are shown, and the human–human rows are explained', async () => {
-    const docs = mkDocs(12, (i) => ({ race_gold: i === 2 ? 'NA' : String(i % 3), race_coder2: String((i + (i % 4 === 0 ? 1 : 0)) % 3) }));
+    // (A 9 is off the codebook's scale; an "NA" would be no label at all.)
+    const docs = mkDocs(12, (i) => ({ race_gold: i === 2 ? '9' : String(i % 3), race_coder2: String((i + (i % 4 === 0 ? 1 : 0)) % 3) }));
     const run = mkRun('r1', 1, docs.map((d) => d.id), scalePrompt('race'), { status: 'cancelled' });
     // The last text was never sent.
     const results = docs.slice(0, 11).map((d, i) => mkResult(run, d, 1, { race: String(i % 3) }));
     const { readme } = await supplementary({ study: mkStudy(scalePrompt('race')), docs, runs: [run], results }, run);
-    // Model vs race_gold: 12 labelled, one never answered, one NA left out.
+    // Model vs race_gold: 12 labelled, one never answered, one 9 left out.
     expect(readme).toMatch(/\| race \| model \| race_gold \| 10 \(of 12; 1 not on the scale\) \|/);
-    expect(readme).toContain('pairs with a value that doesn’t fit the field: not a number or outside the scale (the codebook’s), e.g. NA, 9 or 99 (“not on the scale”). Their number is n_left_out_not_on_scale in agreement.csv.');
+    expect(readme).toContain('pairs with a value that doesn’t fit the field: not a number, or outside the scale (the codebook’s), e.g. a word or 99 (“not on the scale”). Their number is n_left_out_not_on_scale in agreement.csv.');
     expect(readme).toContain('on this run’s texts, as the model rows are, also those without a usable model answer');
     expect(readme).toContain('1 text of this run with labels has no result (not sent, or no answer came back): its labels count as labelled and in the human–human rows, but it is not in this package.');
   });
@@ -263,15 +264,15 @@ describe('review of the round-two export fixes', () => {
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled', error });
     const results = docs.slice(0, 6).map((d) => mkResult(run, d, 1, { stance: 'for' }));
     const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('4 texts in the run were not sent (the run was interrupted).');
+    expect(methods).toContain('4 texts in the run have no answer recorded (not sent, or the run stopped before an answer arrived; the run was interrupted).');
     // Cancelled by the owner: still "cancelled".
     const cancelled = { ...run, error: null };
-    expect((await supplementary({ study: mkStudy(stancePrompt), docs, runs: [cancelled], results }, cancelled)).methods).toContain('(the run was cancelled)');
+    expect((await supplementary({ study: mkStudy(stancePrompt), docs, runs: [cancelled], results }, cancelled)).methods).toContain('the run was cancelled).');
   });
 
   it('README: texts never sent are mentioned only when they have labels; a category label left out is "not a category"', async () => {
     // Labels on the first 6 texts only (a validation sample); the run was cancelled after 8 of 20.
-    const docs = mkDocs(20, (i): Record<string, string> => (i < 6 ? { stance_gold: i === 1 ? 'NA' : i % 2 ? 'for' : 'against', stance_coder2: i % 2 ? 'for' : 'against' } : {}));
+    const docs = mkDocs(20, (i): Record<string, string> => (i < 6 ? { stance_gold: i === 1 ? 'neutral' : i % 2 ? 'for' : 'against', stance_coder2: i % 2 ? 'for' : 'against' } : {}));
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled' });
     const results = docs.slice(0, 8).map((d, i) => mkResult(run, d, 1, { stance: i % 2 ? 'for' : 'against' }));
     const { readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);

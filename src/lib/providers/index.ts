@@ -49,12 +49,16 @@ export function describeApiError(e: unknown): string {
 
 function describe(e: unknown): string {
   if (e && typeof e === 'object') {
-    const err = e as { status?: number; message?: string; name?: string; error?: { error?: { message?: string } } };
+    const err = e as { status?: number; message?: string; name?: string; code?: unknown; error?: { message?: unknown; code?: unknown; error?: { message?: string } } };
     if (err.name === 'AbortError' || err.name === 'APIUserAbortError') return 'Cancelled';
-    const inner = err.error?.error?.message;
-    const msg = inner ?? err.message ?? String(e);
+    // Anthropic's error body is { error: { message } }, OpenAI's { message, code }; the SDKs' own message starts with
+    // the status ("429 You exceeded …"), which is said once, below.
+    const inner = err.error?.error?.message ?? (typeof err.error?.message === 'string' ? err.error.message : undefined);
+    const msg = inner ?? (err.status && err.message ? err.message.replace(new RegExp(`^${err.status}\\s+`), '') : err.message) ?? String(e);
     if (err.status === 401) return `Invalid API key (401): ${msg}`;
-    if (err.status === 429) return `Rate limited (429): ${msg}`;
+    // (OpenAI: an exhausted quota or inactive billing is a 429 too, but not a rate limit.)
+    const code = err.code ?? err.error?.code;
+    if (err.status === 429) return `${code === 'insufficient_quota' || code === 'billing_not_active' ? 'Quota or billing problem' : 'Rate limited'} (429): ${msg}`;
     if (err.status) return `HTTP ${err.status}: ${msg}`;
     if (msg.includes('Failed to fetch') || msg.toLowerCase().includes('connection')) {
       return `Network error: ${msg.replace(/[.\s]+$/, '')}. Check your connection or browser extensions blocking the API.`;

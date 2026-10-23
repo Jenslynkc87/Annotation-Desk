@@ -286,7 +286,10 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .toast { background: var(--ink); color: var(--card); padding: 10px 14px; border-radius: 10px; font-size: 13.5px; box-shadow: 0 8px 24px rgba(0,0,0,.2); display: flex; gap: 10px; align-items: flex-start; }
 .toast.error { background: var(--err); color: #fff; }
 .toast.success { background: var(--ok); color: #fff; }
-.toast button { background: none; border: 0; color: inherit; cursor: pointer; opacity: .8; margin-left: auto; }
+/* Long file names wrap and a long list scrolls, so the ✕ always stays in view: a sticky message only goes when it is
+   clicked. The stack itself doesn't scroll: the newest message stays at the bottom, in view, and keeps its shadow. */
+.toast > span { min-width: 0; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.toast button { background: none; border: 0; color: inherit; cursor: pointer; opacity: .8; margin-left: auto; flex: none; }
 
 .export-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
 

@@ -6,7 +6,8 @@ import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabe
 import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
-import { buildDocViews } from '../view';
+import { slug } from '../util';
+import { buildDocViews, replacedAttempts, retriedRequests, runInProgress, type DocView, type RetriedRequests } from '../view';
 
 export type Row = Record<string, string | number | null>;
 
@@ -106,17 +107,26 @@ function readingOrder(row: Row, rawLast: boolean): Row {
   return Object.fromEntries([...front, ...middle, ...back].map((k) => [k, row[k]]));
 }
 
-/** One row per request (text × replicate). */
-export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Result[], opts: { rationale: boolean; reasoning: boolean }): Row[] {
+/** One row per request (text × replicate). `allRuns`: the study's runs, to tell apart runs that share a number. */
+export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Result[], opts: { rationale: boolean; reasoning: boolean }, allRuns: Run[] = runs): Row[] {
   const docById = new Map(docs.map((d) => [d.id, d]));
   const runById = new Map(runs.map((r) => [r.id, r]));
+  const names = new Map(runs.map((r) => [r.id, runName(r, allRuns)]));
   const rows: Row[] = [];
   // Texts no longer in the study go after all present ones, each with its replicates together.
   const pos = (id: string) => docById.get(id)?.order ?? Number.MAX_SAFE_INTEGER;
+  // (Runs that share a number one after the other, in the order given, not mixed text by text.)
+  const runPos = new Map(runs.map((r, i) => [r.id, i]));
   const sorted = [...results].sort((a, b) => {
     const ra = runById.get(a.runId)?.number ?? 0;
     const rb = runById.get(b.runId)?.number ?? 0;
-    return ra - rb || pos(a.docId) - pos(b.docId) || (a.docId < b.docId ? -1 : a.docId > b.docId ? 1 : 0) || a.replicate - b.replicate;
+    return (
+      ra - rb ||
+      (runPos.get(a.runId) ?? 0) - (runPos.get(b.runId) ?? 0) ||
+      pos(a.docId) - pos(b.docId) ||
+      (a.docId < b.docId ? -1 : a.docId > b.docId ? 1 : 0) ||
+      a.replicate - b.replicate
+    );
   });
   // Plain-text runs that answered with JSON: one list of columns for the whole table, over all the answers (so every
   // row has them in the same place, whichever request comes first or failed).
@@ -129,7 +139,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
     const doc = docById.get(r.docId);
     const row: Row = {
       study: study.name,
-      run: run.number,
+      run: names.get(run.id)!,
       run_label: run.label,
       prompt_version: run.snapshot.promptVersion,
       prompt_hash: run.snapshot.promptHash,
@@ -222,6 +232,25 @@ export interface AgreementRow {
 const NOT_LABEL_WORDS = new Set(['explanation', 'explanations', 'reasoning', 'rationale', 'note', 'notes', 'comment', 'comments', 'memo', 'confidence', 'certainty', 'flag', 'flags']);
 /** Words that mark metadata about a text's author, not a label for the text (author_gender for a gender field). */
 const AUTHOR_WORDS = new Set(['author', 'authors']);
+/** Words around a field's name that mark a column of human labels for it (race_gold, human_race, race_coder2). */
+const LABEL_MARKER = /^(gold|human|coder|rater|annotator|pilot)\d*$/;
+
+/**
+ * The fields that label columns' own names point to: race_negative_gold or gold_race_negative → race_negative (the
+ * name without its marker words, when two or more words remain). So such a column belongs to that longer field even
+ * where no prompt or run names it, and is not taken for race.
+ */
+function impliedFields(columns: string[]): string[] {
+  const out = new Set<string>();
+  for (const c of columns) {
+    const words = c.toLowerCase().split('_');
+    let [i, j] = [0, words.length];
+    while (j - i > 1 && LABEL_MARKER.test(words[j - 1])) j--;
+    while (j - i > 1 && LABEL_MARKER.test(words[i])) i++;
+    if ((i > 0 || j < words.length) && j - i >= 2) out.add(words.slice(i, j).join('_'));
+  }
+  return [...out];
+}
 
 /** The rest of a column's name around a field's name ("gold" in race_gold or gold_race); null if not named after it. */
 function nameRest(column: string, field: string): string | null {
@@ -231,6 +260,15 @@ function nameRest(column: string, field: string): string | null {
   if (x.startsWith(`${f}_`)) return x.slice(f.length + 1);
   if (x.endsWith(`_${f}`)) return x.slice(0, -(f.length + 1));
   return null;
+}
+
+/**
+ * A label cell as it is compared and counted: trimmed and lower-cased (`normalizeLabel`), and blank when it is a
+ * missing-value marker such as "NA" that isn't a value of the field (so it counts neither as labelled nor as left out).
+ */
+export function labelValue(raw: string | undefined, f: ComparableField): string {
+  const v = normalizeLabel(raw, f.yesNo);
+  return v && isMissingLabel(v) && !fitsField(v, f) ? '' : v;
 }
 
 /** Does a label fit the field: one of its categories, a yes/no, or a number on its scale? */
@@ -248,23 +286,25 @@ function fitsField(v: string, f: ComparableField): boolean {
 /**
  * Metadata columns that hold human labels for a field: named after it ("sentiment", "sentiment_gold",
  * "human_sentiment", "sentiment_coder2") and, when the field is known, holding mostly its values (blank cells and
- * missing-value markers such as "NA" aside). Not labels, and listed in `skipped` with the reason: coders' notes and
- * ratings named after it (sentiment_explanation, sentiment_note, sentiment_confidence); metadata about the author
- * (author_gender); a column named after a longer field in `knownFields` (gender_role_gold belongs to gender_role,
- * not gender); and a column whose values are mostly not values of the field (e.g. race_old holding words, for a
- * −3…3 scale).
+ * missing-value markers such as "NA" aside) in `valueDocs` (e.g. a run's texts; by default every text). Not labels,
+ * and listed in `skipped` with the reason: coders' notes and ratings named after it (sentiment_explanation,
+ * sentiment_note, sentiment_confidence); metadata about the author (author_gender); a column named after a longer
+ * field in `knownFields`, or one its own name points to (gender_role_gold belongs to gender_role, not gender); and a
+ * column whose values are mostly not values of the field (e.g. race_old holding words, for a −3…3 scale).
  */
 export function labelColumnsFor(
   field: ComparableField | string,
   docs: Doc[],
   knownFields: string[] = [],
+  valueDocs: Doc[] = docs,
 ): { columns: string[]; skipped: { column: string; reason: string }[] } {
   const f = typeof field === 'string' ? null : field;
   const key = typeof field === 'string' ? field : field.key;
-  const longer = knownFields.filter((g) => g.toLowerCase() !== key.toLowerCase() && g.length > key.length);
+  const all = metaColumns(docs);
+  const longer = [...knownFields, ...impliedFields(all)].filter((g) => g.toLowerCase() !== key.toLowerCase() && g.length > key.length);
   const columns: string[] = [];
   const skipped: { column: string; reason: string }[] = [];
-  for (const c of metaColumns(docs)) {
+  for (const c of all) {
     const rest = nameRest(c, key);
     if (rest === null) continue;
     const owner = longer.find((g) => nameRest(c, g) !== null);
@@ -274,7 +314,7 @@ export function labelColumnsFor(
     else if (owner) reason = `belongs to ${owner}`;
     else if (f) {
       // A missing-value marker (e.g. "NA" for an uncoded text) is no label, unless the field has it as a category.
-      const values = docs.map((d) => d.meta[c] ?? '').filter((v) => v.trim() !== '' && (!isMissingLabel(v) || fitsField(v, f)));
+      const values = valueDocs.map((d) => d.meta[c] ?? '').filter((v) => v.trim() !== '' && (!isMissingLabel(v) || fitsField(v, f)));
       if (!values.length) reason = `no labels for ${key}`;
       else if (values.filter((v) => fitsField(v, f)).length < values.length / 2) reason = `mostly not values of ${key}`;
     }
@@ -299,29 +339,29 @@ export function preferredGoldColumn(field: string, columns: string[]): string | 
   );
 }
 
-/** How many JSON answers of each plain-text run `knownFieldNames` reads for their score keys. */
-const JSON_KEYS_SAMPLE = 200;
+/** The keys holding a number in one answer, kept per result (an answer doesn't change), so each is read once. */
+const numberKeysOf = new WeakMap<Result, { raw: string | undefined; keys: string[] }>();
 
-/** The score keys (values mostly numbers) in the JSON answers of plain-text runs, from up to `perRun` answers per run. */
-function jsonScoreKeys(runs: Run[], results: Result[], perRun = JSON_KEYS_SAMPLE): string[] {
+/**
+ * The score keys in the JSON answers of plain-text runs: every key that holds a number in at least one usable answer
+ * (so a score given in few answers, e.g. race_negative only for texts about race, is still found), from every answer.
+ */
+function jsonScoreKeys(runs: Run[], results: Result[]): string[] {
   const textRuns = new Set(runs.filter((r) => r.snapshot.prompt.outputMode === 'text').map((r) => r.id));
   if (!textRuns.size) return [];
-  const read = new Map<string, number>();
-  const counts = new Map<string, { numbers: number; values: number }>();
+  const keys = new Set<string>();
   for (const r of results) {
-    if (r.status !== 'ok' || !textRuns.has(r.runId) || (read.get(r.runId) ?? 0) >= perRun) continue;
-    const flat = flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]);
-    if (!flat) continue;
-    read.set(r.runId, (read.get(r.runId) ?? 0) + 1);
-    for (const [k, v] of Object.entries(flat)) {
-      if (v.trim() === '') continue;
-      const c = counts.get(k) ?? { numbers: 0, values: 0 };
-      c.values++;
-      if (Number.isFinite(toNumber(v))) c.numbers++;
-      counts.set(k, c);
+    if (r.status !== 'ok' || !textRuns.has(r.runId)) continue;
+    const raw = r.values[TEXT_RESPONSE_KEY];
+    let known = numberKeysOf.get(r);
+    if (!known || known.raw !== raw) {
+      const flat = flattenJsonResponse(raw) ?? {};
+      known = { raw, keys: Object.keys(flat).filter((k) => Number.isFinite(toNumber(flat[k]))) };
+      numberKeysOf.set(r, known);
     }
+    for (const k of known.keys) keys.add(k);
   }
-  return [...counts].filter(([, c]) => c.numbers > 0 && c.numbers >= c.values / 2).map(([k]) => k);
+  return [...keys];
 }
 
 /**
@@ -343,15 +383,22 @@ export function labelPairs(
   allRuns: Run[],
   results: Result[],
   study: Study | null = null,
+  views: Map<string, DocView> = buildDocViews(docs, allRuns, results, run.id),
+  fields: ComparableField[] = comparableFields(run, views.values()),
 ): { fields: ComparableField[]; pairs: { field: string; column: string }[]; skipped: { field: string; column: string; reason: string }[] } {
-  const views = buildDocViews(docs, allRuns, results, run.id);
-  const fields = comparableFields(run, views.values());
   const known = knownFieldNames(study, allRuns, fields.map((f) => f.key), results);
-  const found = fields.map((f) => ({ field: f.key, ...labelColumnsFor(f, docs, known) }));
+  // Whether a column holds mostly a field's values is judged on the run's texts, which its agreement is computed on.
+  const inRun = new Set(run.docIds);
+  const runDocs = docs.filter((d) => inRun.has(d.id));
+  const found = fields.map((f) => ({ field: f.key, ...labelColumnsFor(f, docs, known, runDocs) }));
+  // A column of a longer field of this run (gender_role_gold, skipped for gender) is explained by that field's own
+  // entry (a pair, or its reason for leaving the column out), not by "belongs to gender_role".
+  const ofLonger = (field: string, column: string) =>
+    fields.some((g) => g.key.length > field.length && g.key.toLowerCase() !== field.toLowerCase() && nameRest(column, g.key) !== null);
   return {
     fields,
     pairs: found.flatMap(({ field, columns }) => columns.map((column) => ({ field, column }))),
-    skipped: found.flatMap(({ field, skipped }) => skipped.map((x) => ({ field, ...x }))),
+    skipped: found.flatMap(({ field, skipped }) => skipped.filter((x) => !(x.reason.startsWith('belongs to ') && ofLonger(field, x.column))).map((x) => ({ field, ...x }))),
   };
 }
 
@@ -360,17 +407,20 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
   const out: AgreementRow[] = [];
   // The fields agreement can be computed on: codebook fields (free text excluded: every answer is its own
   // category), or the numeric scores in plain-text JSON answers. Each with the label columns named after it.
-  const { fields, pairs } = labelPairs(run, docs, allRuns, results, study);
+  const { fields, pairs } = labelPairs(run, docs, allRuns, results, study, views);
   const inRun = new Set(run.docIds);
   const setup = (field: string) => fields.find((f) => f.key === field)!;
-  const stats = (xs: string[], ys: string[], f: ComparableField) => agreement(xs, ys, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen });
+  // (Plain-text scores: the human–human rows too are on the scale grown from the run's answers, `f.range`, so only
+  // labels far off it depend on the model.)
+  const stats = (xs: string[], ys: string[], f: ComparableField) => agreement(xs, ys, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen, range: f.range });
   for (const { field, column } of pairs) {
     const f = setup(field);
     const xs: string[] = [];
     const ys: string[] = [];
     let nLabelled = 0;
     for (const d of docs) {
-      const y = normalizeLabel(d.meta[column], f.yesNo);
+      // A missing-value marker (e.g. "NA") is a blank cell: not labelled.
+      const y = labelValue(d.meta[column], f);
       if (!y || !inRun.has(d.id)) continue;
       nLabelled++;
       const v = views.get(d.id)!;
@@ -393,10 +443,10 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
         const ys: string[] = [];
         let nLabelled = 0;
         for (const d of docs) {
-          const y = normalizeLabel(d.meta[cols[j]], f.yesNo);
+          const y = labelValue(d.meta[cols[j]], f);
           if (!y || !inRun.has(d.id)) continue;
           nLabelled++;
-          const x = normalizeLabel(d.meta[cols[i]], f.yesNo);
+          const x = labelValue(d.meta[cols[i]], f);
           if (x) {
             xs.push(x);
             ys.push(y);
@@ -408,7 +458,8 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
   return out;
 }
 
-export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
+/** `run`: the run as the tables name it (`runName`). */
+export function agreementRows(rows: AgreementRow[], runNumber: number | string): Row[] {
   const round = (x: number) => Math.round(x * 10000) / 10000;
   const withCi = (name: string, value: number | null, ci: [number, number] | null | undefined): Row => ({
     [name]: value,
@@ -437,16 +488,55 @@ export function agreementRows(rows: AgreementRow[], runNumber: number): Row[] {
   }));
 }
 
+/** Runs that share their number with another one (given twice by versions before October 22, 2026, open in two tabs). */
+export const sharesNumber = (run: Run, runs: Run[]) => runs.some((r) => r.id !== run.id && r.number === run.number);
+
+/** The start of a run's id: tells apart runs that share a number (also in their folder names). */
+export const runIdTag = (run: Run) => slug(run.id.slice(0, 8));
+
+/** A run as the tables name it: its number, or for runs that share one, the number and the start of its id ("5-ab12cd34"). */
+export function runName(run: Run, runs: Run[]): number | string {
+  return sharesNumber(run, runs) ? `${run.number}-${runIdTag(run)}` : run.number;
+}
+
+/**
+ * For a run whose retries a version before October 22, 2026 made: what its counts leave out ('' if nothing), about the
+ * requests sent and the tokens, and both in one. That version recorded the number of requests a retry planned, and
+ * overwrote the failed attempts a retry replaced.
+ */
+export function retryNotes(run: Run, retry: RetriedRequests): { requests: string; tokens: string; both: string } {
+  const version = `Annotation Desk ${run.snapshot.appVersion}, used for the run,`;
+  const n = (k: number) => k.toLocaleString('en-US');
+  // (With other retries, which recorded what they sent, also the total: a lower bound too.)
+  const requests = retry.lowerBound
+    ? `recorded for Retry failed only the number of requests planned (${n(retry.planned)}), not the number sent: counted from the stored answers, ${retry.legacySent ? `at least ${n(retry.legacySent)} ${retry.legacySent === 1 ? 'was' : 'were'} sent` : 'the number sent is not known (no answer to them remains)'}${retry.others ? `; with the run’s other ${retry.others === 1 ? 'retry' : 'retries'}, at least ${n(retry.requests)} in all` : ''}`
+    : '';
+  const tokens = retry.tokensIncomplete
+    ? 'did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries'
+    : '';
+  const both = [requests, tokens].filter(Boolean).join('; it also ');
+  // A retry cut short by the page closing counts the requests answered; those under way then are not known.
+  const cut = retry.interrupted
+    ? `A Retry failed of this run was interrupted (the page was closed while it was sending): it counts the requests answered; up to ${n(run.snapshot.options.concurrency)} more may have been sent without an answer being recorded.`
+    : '';
+  const join = (...parts: string[]) => parts.filter(Boolean).join(' ');
+  return { requests: join(requests && `${version} ${requests}.`, cut), tokens: tokens && `${version} ${tokens}.`, both: join(both && `${version} ${both}.`, cut) };
+}
+
 export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
   return runs.map((r) => {
     const rs = results.filter((x) => x.runId === r.id);
-    // Tokens: also those of failed attempts that a retry replaced (paid for too).
-    const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0) + (r.replaced?.usage[k] ?? 0);
+    // Tokens: also those of failed attempts that a retry replaced (paid for too), also during a retry.
+    const replaced = replacedAttempts(r, rs);
+    const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0) + (replaced?.usage[k] ?? 0);
+    const retry = retriedRequests(r, rs);
+    const notes = retryNotes(r, retry);
     return {
-      run: r.number,
+      run: runName(r, runs),
       label: r.label,
       started_at: r.createdAt,
-      finished_at: r.finishedAt,
+      // (A run still being sent, e.g. by Retry failed, has not finished: an earlier finish time would mislead.)
+      finished_at: runInProgress(r) ? null : r.finishedAt,
       status: r.status,
       mode: r.mode,
       batch_id: (r.batch?.parts ?? (r.batch ? [r.batch] : [])).map((p) => p.batchId).join('; '),
@@ -455,8 +545,9 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       replicates: r.snapshot.options.replicates,
       requests_ok: rs.filter((x) => x.status === 'ok').length,
       requests_failed: rs.filter((x) => x.status === 'error').length,
-      requests_retried: (r.retries ?? []).reduce((s, x) => s + x.requests, 0),
-      requests_replaced_by_retries: r.replaced?.requests ?? 0,
+      // (At least this many, for retries of versions that recorded only the number planned: see notes.)
+      requests_retried: retry.requests,
+      requests_replaced_by_retries: replaced?.requests ?? 0,
       provider: r.snapshot.model.provider,
       model_requested: r.snapshot.model.model,
       // (Of usable answers only: a failed one may come from another model, e.g. the refusal fallback of the first version.)
@@ -475,6 +566,7 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       cache_write_tokens: sum('cacheWriteTokens'),
       app_version: r.snapshot.appVersion,
       error: r.error ?? '',
+      notes: notes.both,
     };
   });
 }
@@ -493,7 +585,8 @@ export function codebookMarkdown(run: Run): string {
   const lines = ['# Codebook', '', 'Fields the model was required to return (enforced with a JSON schema; see `output_schema.json`).', '', '| Field | Column name | Type | Allowed values | Description |', '|---|---|---|---|---|'];
   const esc = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
   if (p.includeRationale) lines.push('| Rationale | rationale | free text | | Brief justification, generated before the labels |');
-  for (const v of p.variables) lines.push(`| ${esc(v.label?.trim() || v.name)} | ${v.name} | ${v.type} | ${esc(v.values.filter((x) => x.trim()).join(', '))} | ${esc(v.description)} |`);
+  // (A field named like one of the tables' own columns, e.g. status, is exported as answer_status.)
+  for (const v of p.variables) lines.push(`| ${esc(v.label?.trim() || v.name)} | ${answerColumn(v.name)} | ${v.type} | ${esc(v.values.filter((x) => x.trim()).join(', '))} | ${esc(v.description)} |`);
   return lines.join('\n') + '\n';
 }
 

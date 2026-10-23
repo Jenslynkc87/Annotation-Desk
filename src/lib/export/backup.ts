@@ -21,6 +21,20 @@ type Section = 'docs' | 'runs' | 'results' | 'logs';
 const SECTIONS: Section[] = ['docs', 'runs', 'results', 'logs'];
 
 /**
+ * A run's results as stored, a page at a time (result ids start with the run id, so a page is one key range). Not
+ * the results the page shows: those are read by today's rules (an answer an older version stored as usable may count
+ * as failed now), which a backup must not write into the records; the study is read by them again when opened.
+ */
+async function* resultPagesForRun(runId: string, pageSize = 2000): AsyncGenerator<Result[]> {
+  const db = await dbApi.db();
+  const keys = (await db.getAllKeysFromIndex('results', 'byRun', runId)).sort();
+  for (let i = 0; i < keys.length; i += pageSize) {
+    const page = keys.slice(i, i + pageSize);
+    yield (await db.getAll('results', IDBKeyRange.bound(page[0], page[page.length - 1]))).filter((r) => r.runId === runId);
+  }
+}
+
+/**
  * The backup as a file. It is one JSON document, written one record per line:
  *
  *   {"format":"annotation-desk-study",…,"study":{…},
@@ -31,9 +45,10 @@ const SECTIONS: Section[] = ['docs', 'runs', 'results', 'logs'];
  *   "runs":[ …
  *
  * so a large study (thousands of long texts, several full runs with their logs) never has to fit in a
- * single string, which browsers cap at about 500 million characters.
+ * single string, which browsers cap at about 500 million characters. The runs' results and logs are read from the
+ * database, as stored.
  */
-export async function buildBackup(study: Study, docs: Doc[], runs: Run[], results: Result[], includeLogs: boolean): Promise<Blob> {
+export async function buildBackup(study: Study, docs: Doc[], runs: Run[], includeLogs: boolean): Promise<Blob> {
   const head = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: nowIso(), appVersion: __APP_VERSION__, study });
   const parts: BlobPart[] = [head.slice(0, -1) + ',\n'];
   const section = async (name: Section, write: (add: (item: unknown) => void) => Promise<void> | void, last: boolean) => {
@@ -47,7 +62,19 @@ export async function buildBackup(study: Study, docs: Doc[], runs: Run[], result
   };
   await section('docs', (add) => docs.forEach(add), false);
   await section('runs', (add) => runs.forEach(add), false);
-  await section('results', (add) => results.forEach(add), false);
+  await section(
+    'results',
+    async (add) => {
+      // (Each page folded into a Blob, as the logs below are.)
+      for (const r of runs)
+        for await (const page of resultPagesForRun(r.id)) {
+          const start = parts.length;
+          page.forEach(add);
+          parts.splice(start, parts.length - start, new Blob(parts.slice(start)));
+        }
+    },
+    false,
+  );
   await section(
     'logs',
     async (add) => {

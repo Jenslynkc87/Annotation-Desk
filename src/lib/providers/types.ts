@@ -50,6 +50,16 @@ export interface ListedBatch {
   createdAt: string;
   requests: number;
   inputFileId?: string;
+  /** OpenAI: its status (e.g. "validating") and the metadata it was created with. */
+  status?: string;
+  metadata?: Record<string, string>;
+}
+
+/** For an upload: metadata to create the batch with (OpenAI; never keys or texts), and a call made as soon as the
+ *  input file has arrived (OpenAI), before the batch is started, so the file is on record if no answer comes. */
+export interface SubmitOptions {
+  metadata?: Record<string, string>;
+  onFile?: (inputFileId: string) => Promise<void>;
 }
 
 export type BatchLine =
@@ -79,7 +89,7 @@ export interface ProviderAdapter {
     part: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<CallOutcome>;
-  submitBatch(apiKey: string, base: Record<string, unknown>, items: BatchItem[]): Promise<BatchHandle>;
+  submitBatch(apiKey: string, base: Record<string, unknown>, items: BatchItem[], opts?: SubmitOptions): Promise<BatchHandle>;
   checkBatch(apiKey: string, batchId: string): Promise<BatchStatus>;
   /** Batches created since `sinceIso` (newest first; a couple of minutes' leeway for clock differences). */
   listRecentBatches(apiKey: string, sinceIso: string): Promise<ListedBatch[]>;

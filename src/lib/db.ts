@@ -77,9 +77,10 @@ export async function getRun(id: string): Promise<Run | undefined> {
  * Store a result and its log. When a retry replaces an earlier, failed attempt stored under the same id, that
  * attempt's log is kept as `${id}#${attempt}` (with its outcome and token use), so every request sent stays on
  * record, and its token use is added to `r.replacedUsage`; the earlier result is returned (null if there was none).
- * `r.attempt` is set accordingly.
+ * `r.attempt` is set accordingly. `asToday`: reads the earlier attempt by today's rules (an answer an older version
+ * stored as "ok" may count as failed now), so its log says why it was replaced.
  */
-export async function putResult(r: Result, log: ResultLog | null): Promise<Result | null> {
+export async function putResult(r: Result, log: ResultLog | null, asToday?: (prev: Result) => void): Promise<Result | null> {
   const tx = (await db()).transaction(['results', 'logs'], 'readwrite');
   const results = tx.objectStore('results');
   const logs = tx.objectStore('logs');
@@ -93,6 +94,8 @@ export async function putResult(r: Result, log: ResultLog | null): Promise<Resul
     const before = prev.replacedUsage;
     r.replacedUsage = Object.fromEntries(Object.entries(prev.usage).map(([k, v]) => [k, v + (before?.[k as keyof typeof before] ?? 0)])) as Result['usage'];
     const prevLog = await logs.get(r.id);
+    const seen = { ...prev };
+    asToday?.(seen);
     await logs.put({
       id: `${r.id}#${n}`,
       runId: prev.runId,
@@ -100,10 +103,12 @@ export async function putResult(r: Result, log: ResultLog | null): Promise<Resul
       requestPart: prevLog?.requestPart ?? {},
       response: prevLog?.response ?? null,
       attempt: n,
+      // (Settings of the run not sent with that request, e.g. the retired `fallbacks`, stay on record.)
+      ...(prevLog?.omitted ? { omitted: prevLog.omitted } : {}),
       replaced: {
-        status: prev.status,
-        error: prev.error,
-        parseError: prev.parseError,
+        status: seen.status,
+        error: seen.error,
+        parseError: seen.parseError,
         stopReason: prev.stopReason,
         usage: prev.usage,
         requestedAt: prev.requestedAt,

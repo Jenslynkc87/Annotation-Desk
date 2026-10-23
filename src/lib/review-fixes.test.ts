@@ -93,14 +93,16 @@ describe('plain-text JSON scores', () => {
     const b = { ...a, allowed: ['0', '1', '2', '3'] };
     expect(combineFields(a, b).allowed).toEqual(combineFields(b, a).allowed);
     expect(combineFields(a, b).allowed).toEqual(['-1', '0', '1', '2', '3']);
-    // And inside agreement: the same result in either order; a label outside one run's range alone is left out.
+    // And inside agreement: the same result in either order. (Third round: a label outside the range of the model's
+    // answers is kept and reported, not left out.)
     const x = ['-1', '0', '1', '1', '0', '-1', '1', '0', '1', '0', '-1', '1'];
     const y = ['3', '0', '1', '2', '0', '-1', '1', '0', '1', '0', '-1', '2'];
     expect(agreement(x, y, 'ordinal', combineFields(a, b).allowed, 1, { scaleSeen: true }).weightedKappaLinear).toBeCloseTo(
       agreement(x, y, 'ordinal', combineFields(b, a).allowed, 1, { scaleSeen: true }).weightedKappaLinear!,
       10,
     );
-    expect(agreement(x, y, 'ordinal', a.allowed, 1, { scaleSeen: true }).leftOut).toEqual({ n: 3, values: ['3', '2'], range: [-1, 1] });
+    const one = agreement(x, y, 'ordinal', a.allowed, 1, { scaleSeen: true });
+    expect([one.leftOut.n, one.outsideAnswers?.n]).toEqual([0, 3]);
   });
 });
 
@@ -329,9 +331,11 @@ describe('the early stop (second round)', () => {
     expect(await run(40, () => { throw new Error('Connection error.'); })).toBeLessThanOrEqual(most);
     expect(await run(40, () => { throw Object.assign(apiError(429, 'You exceeded your current quota'), { code: 'insufficient_quota' }); })).toBeLessThanOrEqual(most);
   });
-  it('goes on past texts the provider rejects one by one (flagged), and past 400s in a retry', async () => {
+  it('goes on past texts the provider rejects one by one (flagged), and past 400s in a retry that differ by text', async () => {
     expect(await run(12, () => { throw Object.assign(apiError(400, 'Invalid prompt: your prompt was flagged as potentially violating our usage policy'), { code: 'invalid_prompt' }); })).toBe(12);
-    expect(await run(12, () => { throw apiError(400, 'something about this request'); }, true)).toBe(12);
+    // (Third round: a 400 counts the same in a retry as in a first run; only one that repeats for different texts stops it.)
+    let i = 0;
+    expect(await run(12, () => { throw apiError(400, `something about request ${i++}`); }, true)).toBe(12);
   });
 });
 

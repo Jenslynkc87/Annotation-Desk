@@ -12,6 +12,11 @@ export interface ComparableField {
   allowed: string[];
   /** Plain-text runs: `allowed` is the range of values seen, not a codebook scale (see `agreement`). */
   scaleSeen?: boolean;
+  /**
+   * Plain-text runs: the lowest and highest of the model's single answers, whole or not, from which `agreement`
+   * grows the scale that labels are compared on (`allowed` holds its whole numbers for whole-number scores).
+   */
+  range?: [number, number];
   yesNo: boolean;
 }
 
@@ -62,30 +67,37 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       let hi = -Infinity;
       for (const x of nums) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
       const allowed = ordinal && hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [];
-      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, yesNo: false };
+      const range: [number, number] = [lo, hi];
+      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, range, yesNo: false };
     });
 }
 
 /**
  * The same field in two runs (e.g. in a comparison), so the result doesn't depend on which run comes first: the
  * values of both runs' scales (e.g. two codebooks, 0…3 and −3…3), and for plain-text scores, which have no
- * codebook, every whole number in the range seen in either run.
+ * codebook, every whole number in the range seen in either run (and that range, from the lowest to the highest
+ * answer of either run).
  */
 export function combineFields(a: ComparableField, b: ComparableField | undefined): ComparableField {
   if (!b) return a;
   const level: ComparableField['level'] = a.level === b.level ? a.level : a.level === 'nominal' || b.level === 'nominal' ? 'nominal' : 'interval';
   const scaleSeen = !!a.scaleSeen && !!b.scaleSeen;
-  if (level === 'interval' || (!a.allowed.length && !a.scaleSeen) || (!b.allowed.length && !b.scaleSeen)) return { ...a, level, scaleSeen, allowed: [], yesNo: a.yesNo && b.yesNo };
-  if (!a.allowed.length || !b.allowed.length) return { ...a, level, scaleSeen, allowed: [], yesNo: a.yesNo && b.yesNo };
+  const ranges = [a.range, b.range].filter((r): r is [number, number] => !!r);
+  const range: [number, number] | undefined =
+    scaleSeen && ranges.length ? [Math.min(...ranges.map((r) => r[0])), Math.max(...ranges.map((r) => r[1]))] : undefined;
+  const { range: _range, ...rest } = a;
+  const base = { ...rest, level, scaleSeen, ...(range ? { range } : {}), yesNo: a.yesNo && b.yesNo };
+  if (level === 'interval' || (!a.allowed.length && !a.scaleSeen) || (!b.allowed.length && !b.scaleSeen)) return { ...base, allowed: [] };
+  if (!a.allowed.length || !b.allowed.length) return { ...base, allowed: [] };
   const union = [...new Set([...a.allowed, ...b.allowed])];
   const nums = union.map(Number);
-  if (!nums.every(Number.isFinite)) return { ...a, level, scaleSeen, allowed: union, yesNo: a.yesNo && b.yesNo };
+  if (!nums.every(Number.isFinite)) return { ...base, allowed: union };
   const lo = Math.min(...nums);
   const hi = Math.max(...nums);
   // A range with no codebook behind it (plain-text scores) is filled in; codebook values are kept as they are.
   const filled = (a.scaleSeen || b.scaleSeen) && nums.every(Number.isInteger) && hi - lo <= 100;
   const allowed = filled ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [...union].sort((x, y) => Number(x) - Number(y));
-  return { ...a, level, scaleSeen, allowed, yesNo: a.yesNo && b.yesNo };
+  return { ...base, allowed };
 }
 
 /** A field's value in a run's (aggregated) values, reading inside JSON answers for plain-text runs. */

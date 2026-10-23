@@ -131,6 +131,112 @@ function explanationSource(key: string, combined: Record<string, string>, answer
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
 
+/**
+ * Failed attempts that retries replaced, and their token use: from the results (each keeps its earlier attempts'),
+ * so also those of a retry still under way; else the run's own record (runs of October 22, 2026).
+ */
+export function replacedAttempts(run: Run, results: Result[]): Run['replaced'] {
+  let requests = 0;
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+  for (const r of results) {
+    if (r.runId !== run.id) continue;
+    requests += Math.max(0, (r.attempt ?? 1) - 1);
+    for (const k of Object.keys(usage) as (keyof typeof usage)[]) usage[k] += r.replacedUsage?.[k] ?? 0;
+  }
+  return requests ? { requests, usage } : run.replaced?.requests ? run.replaced : undefined;
+}
+
+/** A run still being sent, or waiting for its batch: an export of it shows the results so far. */
+export const runInProgress = (run: Run) => run.status === 'running' || run.status === 'submitted';
+
+/** An immediate "Retry failed" of the run is being sent (the run is "running" until it ends). */
+export const retryInProgress = (run: Run) => run.status === 'running' && run.resumeStatus !== undefined;
+
+/** A "Retry failed" of the run not finished yet: being sent, or its batch not back yet (a batch run waits for one
+ *  only after its first batches ended). */
+export const retryUnderWay = (run: Run) => retryInProgress(run) || (run.status === 'submitted' && !!run.retries?.length);
+
+/**
+ * Build ids of versions before October 22, 2026 (the published one among them) are a bare version such as "0.1.0";
+ * later ones add the commit ("0.1.0+3f2a9c1 (2026-10-22)").
+ */
+const BARE_VERSION = /^\d+\.\d+\.\d+$/;
+
+export interface RetryCount {
+  at: string;
+  asBatch: boolean;
+  /** Requests sent (see `retryCounts`). */
+  requests: number;
+  /** A retry by a version that recorded only the number planned: that number (`requests` is then a lower bound). */
+  planned?: number;
+  /** Such a retry, whose replaced attempts that version did not keep (their token use is missing). */
+  unrecorded?: boolean;
+  /** The page closed while it was being sent: `requests` are those answered (a few more may have gone out). */
+  interrupted?: boolean;
+}
+
+/**
+ * What each "Retry failed" of a run sent. Versions before October 22, 2026 (bare build id) recorded the number
+ * planned, also when the retry was stopped early (60 for 5 sent): for their individual requests, the answers stored
+ * from the retry's start until the next retry are counted. That is a lower bound, since those versions overwrote an
+ * attempt a retry replaced (and a later retry may have replaced this one's). A batch went up whole, so its number
+ * stands. An immediate retry still being sent: its answers so far.
+ */
+export function retryCounts(run: Run, results: Result[]): RetryCount[] {
+  const entries = [...(run.retries ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+  const legacy = BARE_VERSION.test(run.snapshot.appVersion);
+  const mine = results.filter((r) => r.runId === run.id);
+  const within = (i: number) => mine.filter((r) => r.requestedAt >= entries[i].at && (i + 1 >= entries.length || r.requestedAt < entries[i + 1].at));
+  return entries.map((e, i) => {
+    const asBatch = !!e.asBatch;
+    if (legacy && !e.counted) {
+      // (Results that record no earlier attempt: whatever they replaced, that version didn't keep.)
+      const found = within(i);
+      const unrecorded = found.some((r) => (r.attempt ?? 1) < 2) || (!asBatch && found.length < e.requests);
+      // (Never more than it planned.)
+      const sent = Math.min(found.length, e.requests);
+      return asBatch ? { at: e.at, asBatch, requests: e.requests, unrecorded } : { at: e.at, asBatch, requests: sent, planned: e.requests, unrecorded };
+    }
+    if (!asBatch && i === entries.length - 1 && retryInProgress(run)) return { at: e.at, asBatch, requests: within(i).length };
+    return { at: e.at, asBatch, requests: e.requests, ...(e.interrupted ? { interrupted: true } : {}) };
+  });
+}
+
+export interface RetriedRequests {
+  /** Requests "Retry failed" sent in all (at least this many when `lowerBound`). */
+  requests: number;
+  /** Retries by a version that recorded only the number planned, and fewer answers to them are stored. */
+  lowerBound: boolean;
+  /** Retries by such a version, the number they planned, and the requests counted for them (from the stored answers). */
+  legacy: number;
+  planned: number;
+  legacySent: number;
+  /** Retries recorded as sent (by later versions, or a batch). */
+  others: number;
+  /** Those retries replaced attempts that version didn't keep: the run's token counts may be too low. */
+  tokensIncomplete: boolean;
+  asBatch: 'all' | 'none' | 'some';
+  /** A retry was interrupted by the page closing: `requests` is then at least this many too. */
+  interrupted: boolean;
+}
+
+/** The requests a run's retries sent, for the exports (see `retryCounts`). */
+export function retriedRequests(run: Run, results: Result[]): RetriedRequests {
+  const counts = retryCounts(run, results);
+  const legacy = counts.filter((c) => c.planned !== undefined);
+  return {
+    requests: counts.reduce((s, c) => s + c.requests, 0),
+    lowerBound: legacy.some((c) => c.requests < c.planned!),
+    legacy: legacy.length,
+    planned: legacy.reduce((s, c) => s + c.planned!, 0),
+    legacySent: legacy.reduce((s, c) => s + c.requests, 0),
+    others: counts.length - legacy.length,
+    tokensIncomplete: counts.some((c) => c.unrecorded),
+    asBatch: counts.every((c) => c.asBatch) ? 'all' : counts.every((c) => !c.asBatch) ? 'none' : 'some',
+    interrupted: counts.some((c) => c.interrupted),
+  };
+}
+
 /** A run's token use: its results, plus failed attempts that a retry replaced (`replaced`), which were paid for too. */
 export function runTokens(results: Result[], runId: string, replaced?: Run['replaced']) {
   let input = replaced?.usage.inputTokens ?? 0;

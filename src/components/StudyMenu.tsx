@@ -14,6 +14,7 @@ import {
   sharedBatches,
   storageError,
   toast,
+  unknownUpload,
   useStore,
 } from '../lib/store';
 import { words } from '../lib/subject';
@@ -129,10 +130,15 @@ export function StudyMenu() {
                   }
                 }
                 const left = kept.size;
+                // Batch uploads of unknown outcome may have reached the provider: looked up there and cancelled if found.
+                const unsure = s.runs.filter((r) => unknownUpload(r)).map((r) => `#${r.number}`);
                 const note =
                   (cancelled ? ` ${cancelled} batch${cancelled === 1 ? ' is' : 'es are'} still processing and will be cancelled. ${copyElsewhere(cancelled)}` : '') +
                   (left
                     ? ` ${left === 1 ? 'A batch' : `${left} batches`} still processing ${left === 1 ? 'is' : 'are'} left running: ${quoted([...copies])} (${OTHER_STUDY_HERE}) also ${copies.size === 1 ? 'waits' : 'wait'} for ${left === 1 ? 'it' : 'them'}.`
+                    : '') +
+                  (unsure.length
+                    ? ` A batch upload of run${unsure.length === 1 ? '' : 's'} ${unsure.join(', ')} may have reached the provider: ${unsure.length === 1 ? 'it is' : 'they are'} looked up there first and cancelled if found.`
                     : '');
                 if (confirm(`Delete “${cur.name}” with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
                   void removeStudy(cur.id);

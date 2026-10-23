@@ -18,10 +18,12 @@ describe('pasted tables', () => {
     const t = parsePastedTable('American presidents\nGeorge Washington\nJohn Adams\n');
     expect([t.columns, t.rows.length, t.problems]).toEqual([['American presidents'], 2, []]);
   });
-  it('keeps the columns in place when the first header cell is blank', () => {
+  it('keeps the columns in place when the first header cell is blank (named after its place, or left out when empty)', () => {
     const t = parsePastedTable('\n\tname\tborn\n1\tBohr\t1885\n2\tBlixen\t1885\n\n');
-    expect(t.columns).toEqual(['name', 'born']);
-    expect(t.rows[1]).toEqual({ name: 'Blixen', born: '1885' });
+    expect(t.columns).toEqual(['column_1', 'name', 'born']);
+    expect(t.rows[1]).toEqual({ column_1: '2', name: 'Blixen', born: '1885' });
+    const u = parsePastedTable('\tname\tborn\n\tBohr\t1885\n\tBlixen\t1885\n');
+    expect([u.columns, u.rows[1], u.problems]).toEqual([['name', 'born'], { name: 'Blixen', born: '1885' }, []]);
   });
   it('takes a last row ending in an empty cell without a warning', () => {
     const t = parsePastedTable('name\tmy_rating\nBohr\t2\nBlixen\t\n');

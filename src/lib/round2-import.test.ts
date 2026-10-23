@@ -142,10 +142,11 @@ describe('label sheets', () => {
     const rows = [{ file: 'smith', race_coder: '1' }, { file: 'smith', race_coder: '2' }, { file: 'pasted', race_coder: '1' }, { file: 'pasted', race_coder: '2' }];
     const m = matchLabels(docs, { name: 'coders.csv', columns: ['file', 'race_coder'], rows }, 'file');
     expect([m.conflicts, m.sameName]).toEqual([['smith', 'pasted'], []]);
-    // A second art_1 (from art_1.txt, stored as art_1_2) is one.
+    // A second art_1 (from art_1.txt, stored as art_1_2) is one, but rows that name art_1.md by its own file name are
+    // meant for it alone (round 3): an ordinary conflict, not a same-name one.
     const twice = [doc('a', 'art_1', {}, 'art_1.md'), doc('b', 'art_1_2', {}, 'art_1.txt')];
     const n = matchLabels(twice, { name: 'x.csv', columns: ['id', 'race_coder'], rows: [{ id: 'art_1.md', race_coder: '1' }, { id: 'art_1.md', race_coder: '2' }] }, 'id');
-    expect(n.sameName).toEqual([{ key: 'art_1.md', ids: ['art_1', 'art_1_2'] }]);
+    expect([n.sameName, n.conflicts]).toEqual([[], ['art_1.md']]);
   });
 });
 

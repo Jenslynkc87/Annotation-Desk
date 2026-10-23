@@ -161,7 +161,7 @@ export const openaiAdapter: ProviderAdapter = {
     return toOutcome(r as unknown as ResponseLike);
   },
 
-  async submitBatch(apiKey, base, items) {
+  async submitBatch(apiKey, base, items, opts) {
     const c = client(apiKey);
     const jsonl = items
       .map((it) => JSON.stringify({ custom_id: it.customId, method: 'POST', url: '/v1/responses', body: { ...base, ...it.part } }))
@@ -179,12 +179,15 @@ export const openaiAdapter: ProviderAdapter = {
       // No file, so no batch: nothing was started.
       throw Object.assign(e instanceof Error ? e : new Error(String(e)), { notCreated: true });
     }
+    // On record before the batch is started: a batch started without an answer is found by its input file.
+    await opts?.onFile?.(file.id).catch(() => undefined);
     try {
       const batch = await c.batches.create(
         {
           input_file_id: file.id,
           endpoint: '/v1/responses',
           completion_window: '24h',
+          ...(opts?.metadata ? { metadata: opts.metadata } : {}),
         },
         ONCE,
       );
@@ -216,7 +219,14 @@ export const openaiAdapter: ProviderAdapter = {
     // Newest first: stop at the first batch created before the upload began.
     for await (const b of client(apiKey).batches.list({ limit: 20 })) {
       if (b.created_at * 1000 < since) break;
-      out.push({ batchId: b.id, createdAt: new Date(b.created_at * 1000).toISOString(), requests: b.request_counts?.total ?? 0, inputFileId: b.input_file_id });
+      out.push({
+        batchId: b.id,
+        createdAt: new Date(b.created_at * 1000).toISOString(),
+        requests: b.request_counts?.total ?? 0,
+        inputFileId: b.input_file_id,
+        status: b.status,
+        metadata: (b.metadata ?? undefined) as Record<string, string> | undefined,
+      });
     }
     return out;
   },

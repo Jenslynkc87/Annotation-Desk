@@ -5,7 +5,7 @@ import { fixed, fmtStat } from '../metrics';
 import { combineFields, comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY } from '../prompt';
-import { buildDocViews } from '../view';
+import { buildDocViews, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, type RetriedRequests } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
@@ -19,9 +19,15 @@ import {
   codebookMarkdown,
   corpusRows,
   dropRedundantId,
+  labelPairs,
+  labelValue,
   resultsLong,
   resultsWide,
+  retryNotes,
+  runIdTag,
+  runName,
   runSummaryRows,
+  sharesNumber,
   toCsv,
   type Row,
 } from './tables';
@@ -95,25 +101,29 @@ export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean;
   const wb = new ExcelJS.Workbook();
   const add = (name: string, rows: Row[]) => addSheet(wb, name, rows);
   add('Results', dropRedundantId(resultsWide(run, d.docs, d.runs, d.results, opts)));
-  add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }));
+  add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }, d.runs));
   const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
-  if (agr.length) add('Agreement', agreementRows(agr, run.number));
-  add('Settings', settingsRows(d.study, run));
+  if (agr.length) add('Agreement', agreementRows(agr, runName(run, d.runs)));
+  add('Settings', settingsRows(d.study, run, d.runs));
   add('All runs', runSummaryRows(d.runs, d.results));
   const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
-function settingsRows(study: Study, run: Run): Row[] {
+function settingsRows(study: Study, run: Run, runs: Run[]): Row[] {
   const m = run.snapshot.model;
   const o = run.snapshot.options;
   const p = run.snapshot.prompt;
   return [
     { setting: 'Study', value: study.name },
     ...(study.description.trim() ? [{ setting: 'Study notes (e.g. how samples were drawn)', value: study.description.trim() }] : []),
-    { setting: 'Run', value: `#${run.number}${run.label ? ` (${run.label})` : ''}` },
+    { setting: 'Run', value: `#${runName(run, runs)}${run.label ? ` (${run.label})` : ''}` },
     { setting: 'Started', value: run.createdAt },
-    { setting: 'Finished', value: run.finishedAt ?? (runInProgress(run) ? 'not finished when exported (the results so far)' : null) },
+    // (During Retry failed the run keeps its earlier finish time, which is no longer when it finished.)
+    {
+      setting: 'Finished',
+      value: runInProgress(run) ? `not finished when exported (${retryInProgress(run) ? 'Retry failed was still sending; ' : ''}the results so far)` : run.finishedAt,
+    },
     { setting: 'Provider', value: m.provider },
     { setting: 'Model', value: m.model },
     { setting: 'Effort / reasoning', value: m.effort || 'model default' },
@@ -135,17 +145,13 @@ function settingsRows(study: Study, run: Run): Row[] {
 const runFolderBase = (r: Run) => `run-${String(r.number).padStart(2, '0')}${r.label ? '-' + slug(r.label) : ''}`;
 
 /**
- * Each run's folder in the research repository: run-NN[-label], plus the start of the run's id where two runs would
- * get the same name (runs that earlier versions gave the same number, in two tabs), so neither overwrites the other.
+ * Each run's folder in the research repository: run-NN[-label], plus the start of the run's id for runs that share a
+ * number (earlier versions gave some the same number, in two tabs), as in the tables' run column (`runName`), so
+ * neither overwrites the other.
  */
 function runFolders(runs: Run[]): Map<string, string> {
-  const count = new Map<string, number>();
-  for (const r of runs) count.set(runFolderBase(r), (count.get(runFolderBase(r)) ?? 0) + 1);
-  return new Map(runs.map((r) => [r.id, count.get(runFolderBase(r))! > 1 ? `${runFolderBase(r)}-${slug(r.id.slice(0, 8))}` : runFolderBase(r)]));
+  return new Map(runs.map((r) => [r.id, sharesNumber(r, runs) ? `${runFolderBase(r)}-${runIdTag(r)}` : runFolderBase(r)]));
 }
-
-/** A run still being sent, or waiting for its batch: an export of it shows the results so far. */
-export const runInProgress = (run: Run) => run.status === 'running' || run.status === 'submitted';
 
 /**
  * A logged request as it was sent: the run's shared settings plus the request's own part. Runs made with the first
@@ -189,7 +195,8 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[], results: Result[]) 
     for (const x of pending)
       if (!x.attempt) x.attempt = attemptOf.get(x.id) ?? Math.max(0, ...pending.filter((y) => y.id === x.id).map((y) => y.attempt)) + 1;
     pending.sort((p, q) => p.replicate - q.replicate || p.attempt - q.attempt);
-    const head = (x: (typeof pending)[number]) => ({ doc_id: docById.get(x.doc) ?? x.doc, replicate: x.replicate, attempt: x.attempt });
+    // (A text deleted from the study since is marked as in the CSVs.)
+    const head = (x: (typeof pending)[number]) => ({ doc_id: docById.get(x.doc) ?? `(deleted ${x.doc})`, replicate: x.replicate, attempt: x.attempt });
     parts.push({
       doc: pending[0].doc,
       requests: jsonlBlob(pending.map((x) => ({ ...head(x), request: requestAsSent(run, x.l, x.attempt) }))),
@@ -247,8 +254,9 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
 
   root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
   // Without the request/response logs: they are under runs/ already, and each holds the full text again, which
-  // would make the zip too large to build in the browser for a full corpus. (Export → Study backup has them.)
-  root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, d.results, false));
+  // would make the zip too large to build in the browser for a full corpus. (Export → Study backup has them.) The
+  // results as stored, read from the database.
+  root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, false));
   const corpus = root.folder('corpus')!;
   corpus.file('corpus.csv', toCsv(corpusRows(d.docs, true)));
   corpus.file('corpus.jsonl', jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
@@ -273,10 +281,10 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
     const f = runsDir.folder(folders.get(run.id)!)!;
     f.file('run.json', JSON.stringify(run, null, 2));
     const rs = d.results.filter((r) => r.runId === run.id);
-    f.file('results_long.csv', toCsv(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true })));
+    f.file('results_long.csv', toCsv(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
     f.file('results_wide.csv', toCsv(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
     if (opts.includeLogs) await addRunLogs(f, run, d.docs, d.results);
-    agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results, d.study), run.number));
+    agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results, d.study), runName(run, d.runs)));
   }
   if (agr.length) results.file('agreement.csv', toCsv(agr));
 
@@ -309,10 +317,10 @@ export async function buildSupplementary(d: ExportData, run: Run, opts: Suppleme
   promptFiles(root.folder('prompt')!, run);
   const res = root.folder('results')!;
   res.file('results.csv', toCsv(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
-  res.file('results_by_replicate.csv', toCsv(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false })));
+  res.file('results_by_replicate.csv', toCsv(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
   const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
-  if (agr.length) res.file('agreement.csv', toCsv(agreementRows(agr, run.number)));
+  if (agr.length) res.file('agreement.csv', toCsv(agreementRows(agr, runName(run, d.runs))));
   if (opts.includeTexts) root.folder('data')!.file('corpus.csv', toCsv(corpusRows(runDocs, true)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs')!, run, runDocs, rs);
   scriptFiles(root.folder('scripts')!, d.study, run, exportedAt);
@@ -328,8 +336,11 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   const present = new Set(d.docs.map((x) => x.id));
   const started = rs.map((r) => r.requestedAt).sort();
   const times = rs.map((r) => r.completedAt).sort();
-  const replaced = run.replaced?.usage;
-  const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0) + (replaced?.[k] ?? 0);
+  // Failed attempts that "Retry failed" replaced: from the results, so also those of a retry still being sent.
+  const replaced = replacedAttempts(run, rs);
+  const sum = (k: keyof Result['usage']) => rs.reduce((s, x) => s + x.usage[k], 0) + (replaced?.usage[k] ?? 0);
+  const retry = retriedRequests(run, rs);
+  const notes = retryNotes(run, retry);
   const m = run.snapshot.model;
   const ok = rs.filter((r) => r.status === 'ok');
   // A text has a usable label if it has a usable answer; in a plain-text run whose answers give scores as JSON,
@@ -340,11 +351,17 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   const hasScores = (id: string) => !scoreKeys.length || scoreKeys.some((k) => fieldValue(run, views.get(id)?.values ?? {}, k) !== '');
   const usable = answered.filter(hasScores);
   // The run's texts without a label, by cause (with the texts answered without scores, they add up to the
-  // difference): every request failed, or no result at all (never sent: the run was cancelled, stopped or isn't
-  // finished; or no answer came back for them).
+  // difference): every request failed, or no result at all (not sent, or no answer recorded: the run was cancelled,
+  // stopped or isn't finished, possibly with requests under way; or no answer came back for them).
   const inRun = run.docIds.filter((id) => present.has(id));
   const withResults = new Set(rs.map((r) => r.docId));
   const okDocs = new Set(answered);
+  // With several annotations per text: texts with results for only some of them (a run stopped part way through a
+  // text), and how many of their requests have no result.
+  const reps = run.snapshot.options.replicates;
+  const perText = new Map<string, number>();
+  for (const r of rs) perText.set(r.docId, (perText.get(r.docId) ?? 0) + 1);
+  const partly = inRun.filter((id) => withResults.has(id) && perText.get(id)! < reps);
   // Plain-text runs whose answers give scores as JSON: ok answers without them (e.g. in prose). With several answers
   // per text, such an answer is left out when they are combined, like a failed one, but it still counts as ok.
   const withoutScores = scoreKeys.length ? ok.filter((r) => !flattenJsonResponse(r.values[TEXT_RESPONSE_KEY])).length : 0;
@@ -366,9 +383,12 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       mode: run.mode === 'batch' ? 'batch API' : 'immediate requests',
       batch_id: run.batch ? (run.batch.parts ?? [run.batch]).map((p) => p.batchId).join('; ') : null,
       started_at: run.createdAt,
-      finished_at: run.finishedAt,
+      // (Null while the run is being sent, also during Retry failed, when the run still has its earlier finish time.)
+      finished_at: runInProgress(run) ? null : run.finishedAt,
       // "running" or "submitted": the run was not finished when exported, and this describes the results so far.
       status_when_exported: run.status,
+      // (A Retry failed still being sent, or its batch not back yet: the counts are those so far.)
+      ...(retryUnderWay(run) ? { retry_in_progress: true } : {}),
     },
     model: {
       provider: m.provider,
@@ -391,6 +411,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       ...(scoreKeys.length ? { n_texts_answer_without_scores: answered.length - usable.length } : {}),
       n_texts_all_requests_failed: inRun.filter((id) => withResults.has(id) && !okDocs.has(id)).length,
       n_texts_without_results: inRun.filter((id) => !withResults.has(id)).length,
+      ...(reps > 1 ? { n_texts_partly_annotated: partly.length } : {}),
       ...(voted.length ? { n_texts_with_tied_votes: tied } : {}),
       // Annotated (sent, with a result), then deleted from the study: not in results.csv or the agreement figures.
       n_texts_removed_from_study_since: run.docIds.filter((id) => !present.has(id) && withResults.has(id)).length,
@@ -401,8 +422,13 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       failed: rs.filter((r) => r.status === 'error').length,
       parse_errors: rs.filter((r) => r.parseError).length,
       ...(scoreKeys.length ? { answers_without_scores: withoutScores } : {}),
+      // Requests of the partly annotated texts with no result (not sent, or no answer recorded).
+      ...(reps > 1 ? { without_result_for_partly_annotated_texts: partly.reduce((s, id) => s + reps - perText.get(id)!, 0) } : {}),
+      // Requests "Retry failed" sent again (at least this many when retried_note says so).
+      retried: retry.requests,
+      ...(notes.requests ? { retried_note: notes.requests } : {}),
       // Failed attempts that "Retry failed" replaced: not in the totals above, but in the tokens and the logs.
-      replaced_by_retries: run.replaced?.requests ?? 0,
+      replaced_by_retries: replaced?.requests ?? 0,
       first_requested_at: started[0] ?? null,
       last_completed_at: times[times.length - 1] ?? null,
     },
@@ -412,6 +438,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       reasoning: sum('reasoningTokens'),
       cache_read: sum('cacheReadTokens'),
       cache_write: sum('cacheWriteTokens'),
+      ...(notes.tokens ? { note: notes.tokens } : {}),
     },
   };
 }
@@ -424,15 +451,13 @@ function isTie(values: string[]): boolean {
   return [...counts.values()].filter((c) => c === max).length > 1;
 }
 
-function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>): string {
+function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>, retry: RetriedRequests): string {
   const m = run.snapshot.model;
   const { total, failed } = meta.requests;
   const c = meta.corpus;
   const noScores = c.n_texts_answer_without_scores ?? 0;
   const withoutScores = meta.requests.answers_without_scores ?? 0;
   const removed = c.n_texts_removed_from_study_since;
-  const retried = (run.retries ?? []).reduce((s, x) => s + x.requests, 0);
-  const retriedAs = run.mode !== 'batch' ? '' : (run.retries ?? []).every((x) => x.asBatch) ? ' in a new batch' : (run.retries ?? []).every((x) => !x.asBatch) ? ' as individual requests' : '';
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
   const reps = run.snapshot.options.replicates;
   const dates = [meta.requests.first_requested_at, meta.requests.last_completed_at].filter(Boolean).map((x) => x!.slice(0, 10));
@@ -448,24 +473,62 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   const n = (k: number) => k.toLocaleString('en-US');
   const items = (k: number) => `${n(k)} ${k === 1 ? w.one : w.many}`;
   const was = (k: number) => (k === 1 ? 'was' : 'were');
+  const have = (k: number) => (k === 1 ? 'has' : 'have');
+  const inProgress = runInProgress(run);
   // A tied majority vote keeps both labels ("a | b"): it matches no single label, so it counts as a disagreement.
   const tied = Object.entries(c.n_texts_with_tied_votes ?? {}).filter(([, k]) => k > 0);
   const label = (name: string) => run.snapshot.prompt.variables.find((v) => v.name === name)?.label?.trim() || name;
   const ties = c.n_texts_with_tied_votes
     ? ` A tied vote is kept as both labels (e.g. “a | b”) and counts as a disagreement in the agreement figures${tied.length ? ` (${tied.map(([f, k], i) => `${i ? n(k) : items(k)} for ${label(f)}`).join(', ')})` : '; no vote was tied'}.`
     : '';
+  // Texts with results for only some of their annotations (e.g. the run stopped part way through them): their labels
+  // combine fewer answers. Only an immediate run that stopped can have sent requests without recording an answer.
+  const partly = c.n_texts_partly_annotated ?? 0;
+  const missing = meta.requests.without_result_for_partly_annotated_texts ?? 0;
+  // A run left "running" by a closed or reloaded page is stored as cancelled, with an error saying it was interrupted.
+  const stopped = run.status === 'cancelled' ? (/^Interrupted\b/.test(run.error ?? '') ? 'interrupted' : 'cancelled') : run.status === 'failed' ? 'stopped' : '';
+  const noAnswer = inProgress
+    ? 'no result yet'
+    : stopped && run.mode !== 'batch'
+      ? 'no answer recorded (not sent, or the run stopped before an answer arrived)'
+      : 'no result';
+  const annotated = partly
+    ? `Each ${w.one} was to be annotated ${reps} times, but for ${items(partly)}, ${n(missing)} of ${partly === 1 ? 'its' : 'their'} annotations ${have(missing)} ${noAnswer}, so ${partly === 1 ? 'its labels combine' : 'their labels combine'} fewer answers`
+    : `Each ${w.one} was annotated ${reps} times`;
   // The run's texts without a label, by cause; the total once at the end when there is more than one cause.
   const allFailed = c.n_texts_all_requests_failed;
   const notSent = c.n_texts_without_results;
   const unlabelled = c.n_texts_in_run - c.n_texts_with_usable_labels;
-  // A run left "running" by a closed or reloaded page is stored as cancelled, with an error saying it was interrupted.
-  const stopped = run.status === 'cancelled' ? (/^Interrupted\b/.test(run.error ?? '') ? 'interrupted' : 'cancelled') : run.status === 'failed' ? 'stopped' : '';
-  const notSentText = runInProgress(run)
+  // (Requests under way when an immediate run stopped may have been sent: no answer was recorded for them.)
+  const notSentText = inProgress
     ? `${items(notSent)} in the run had no result yet (the run was not finished when this was exported).`
     : stopped
-      ? `${items(notSent)} in the run ${run.mode === 'batch' ? `${notSent === 1 ? 'has' : 'have'} no result` : `${was(notSent)} not sent`} (the run was ${stopped}).`
+      ? run.mode === 'batch'
+        ? `${items(notSent)} in the run ${have(notSent)} no result (the run was ${stopped}).`
+        : `${items(notSent)} in the run ${have(notSent)} no answer recorded (not sent, or the run stopped before an answer arrived; the run was ${stopped}).`
       : `No answer was received for ${items(notSent)} in the run.`;
   const causes = [allFailed, noScores, notSent].filter((k) => k > 0).length;
+  const failedText = failed
+    ? `${n(failed)} of ${n(total)} request${total === 1 ? '' : 's'} did not return a usable annotation (an API error, a refusal or an answer that could not be read) and ${was(failed)} excluded${allFailed ? `, leaving ${items(allFailed)} without a label` : ''}`
+    : '';
+  // "Retry failed" first, then what failed after it (the counts above are those after every retry; with a retry still
+  // under way, those so far). Retries by versions that recorded only the number planned: the requests counted from
+  // the stored answers, a lower bound.
+  const k = retry.requests;
+  const retrying = retryUnderWay(run);
+  const retriedAs =
+    run.mode !== 'batch' ? '' : retry.asBatch === 'all' ? ' in a new batch' : retry.asBatch === 'none' ? ' as individual requests' : ', individually or in a new batch';
+  const howMany = !retry.lowerBound && !retry.interrupted ? `${n(k)} request${k === 1 ? '' : 's'}` : k ? `At least ${n(k)} request${k === 1 ? '' : 's'}` : 'Requests';
+  const planned = `the app version used for the run recorded only the number planned for the ${retry.legacy === 1 ? 'retry' : 'retries'} made with it, ${n(retry.planned)}`;
+  const legacyNote =
+    (retry.lowerBound ? (k ? ` (counted from the stored answers: ${planned})` : ` (how many is not known: ${planned}, and no answer to them is stored)`) : '') +
+    (retry.interrupted ? ' (a retry was interrupted by the page closing: requests under way then got no recorded answer and are not counted)' : '');
+  const retryText =
+    retrying && !k && !retry.lowerBound
+      ? `Requests without a usable answer (failed, or not sent before the run was stopped) were being sent again with identical settings${retriedAs} when this was exported`
+      : k || retry.lowerBound
+        ? `${howMany} without a usable answer (failed, or not sent before the run was stopped) ${k === 1 ? 'was' : 'were'} sent again with identical settings${retriedAs}${legacyNote}${retrying ? ', and the retry was still under way when this was exported' : ''}`
+        : '';
   return [
     `${w.Many} (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
     isEntries(run.snapshot.prompt)
@@ -476,12 +539,10 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
       : 'The model returned free-text responses.',
     reps > 1
       ? run.snapshot.prompt.outputMode === 'structured'
-        ? `Each ${w.one} was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.${ties}`
-        : `Each ${w.one} was annotated ${reps} times; numbers in the answers were combined by the median, other values by majority vote.`
+        ? `${annotated}; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.${ties}`
+        : `${annotated}; numbers in the answers were combined by the median, other values by majority vote.`
       : '',
-    failed
-      ? `${n(failed)} of ${n(total)} request${total === 1 ? '' : 's'} did not return a usable annotation (an API error, a refusal or an answer that could not be read) and ${was(failed)} excluded${allFailed ? `, leaving ${items(allFailed)} without a label` : ''}.`
-      : '',
+    retryText ? `${retryText}${failedText ? `; ${retrying ? 'so far' : 'after this'}, ${failedText}` : ''}.` : failedText ? `${failedText}.` : '',
     // Answers without scores: with several per text, left out when combining (n of the ok answers); a text with no
     // answer that has scores is excluded.
     reps > 1 && withoutScores
@@ -493,9 +554,6 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
     causes > 1 ? `Altogether, ${n(unlabelled)} of the ${items(c.n_texts_in_run)} in the run have no label.` : '',
     removed
       ? `${n(removed)} annotated ${removed === 1 ? w.one : w.many} ${was(removed)} later removed from the study; ${removed === 1 ? 'it is' : 'they are'} not included in N or the agreement figures (${removed === 1 ? 'its' : 'their'} requests remain in the request and token totals and in the per-request results).`
-      : '',
-    retried
-      ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer (failed, or not sent before the run was stopped) ${retried === 1 ? 'was' : 'were'} then sent with identical settings${retriedAs}.`
       : '',
     `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${cached ? ' with prompt caching' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
   ]
@@ -511,14 +569,21 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   const items = (k: number) => `${k.toLocaleString('en-US')} ${k === 1 ? w.one : w.many}`;
   const withoutScores = meta.requests.answers_without_scores ?? 0;
   const removed = meta.corpus.n_texts_removed_from_study_since;
+  const retry = retriedRequests(run, d.results.filter((r) => r.runId === run.id));
+  // Retries by a version that recorded only the number planned, or didn't keep the attempts a retry replaced.
+  const notes = retryNotes(run, retry);
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
-    `Supplementary materials for the LLM-based annotation (run #${run.number}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.`,
+    `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.`,
     '',
     ...(runInProgress(run)
-      ? [`**This run was not finished when these materials were exported** (${run.status === 'submitted' ? 'its batch was still being processed' : 'it was still running'}): they describe the results so far.`, '']
+      ? [
+          `**This run was not finished when these materials were exported** (${run.status === 'submitted' ? 'its batch was still being processed' : retryInProgress(run) ? 'Retry failed was still sending requests' : 'it was still running'}): they describe the results so far.`,
+          '',
+        ]
       : []),
+    ...(notes.both ? [notes.both, ''] : []),
     '## Summary',
     '',
     '| | |',
@@ -547,22 +612,27 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
       '| Field | Annotations | Compared with | N compared (of labelled) | % agreement | Cohen\'s κ | Krippendorff\'s α | Gwet\'s AC1 |',
       '|---|---|---|---|---|---|---|---|',
     );
+    // Categories with a numeric codebook (e.g. codes 1 to 5) are judged on its range, like a scale (see `agreement`).
+    const notCategory = (s: Agreement) => s.level === 'nominal' && !s.leftOut.range;
     for (const a of agr) {
       const s = a.stats;
       lines.push(
-        `| ${a.field} | ${a.source === 'model' ? 'model' : a.source} | ${a.compared_with} | ${s.n} (of ${a.nLabelled}${s.leftOut.n ? `; ${s.leftOut.n} ${s.level === 'nominal' ? 'not a category' : 'not on the scale'}` : ''}) | ${s.percentAgreement === null ? '—' : (s.percentAgreement * 100).toFixed(1) + '%' + ci(s.ci.percentAgreement, true)} | ${fmtStat(s.cohenKappa)}${ci(s.ci.cohenKappa)} | ${fmtStat(s.krippendorffAlpha)}${ci(s.ci.krippendorffAlpha)} (${s.level}) | ${fmtStat(s.gwetAC1)}${ci(s.ci.gwetAC1)} |`,
+        `| ${a.field} | ${a.source === 'model' ? 'model' : a.source} | ${a.compared_with} | ${s.n} (of ${a.nLabelled}${s.leftOut.n ? `; ${s.leftOut.n} ${notCategory(s) ? 'not a category' : 'not on the scale'}` : ''}) | ${s.percentAgreement === null ? '—' : (s.percentAgreement * 100).toFixed(1) + '%' + ci(s.ci.percentAgreement, true)} | ${fmtStat(s.cohenKappa)}${ci(s.ci.cohenKappa)} | ${fmtStat(s.krippendorffAlpha)}${ci(s.ci.krippendorffAlpha)} (${s.level}) | ${fmtStat(s.gwetAC1)}${ci(s.ci.gwetAC1)} |`,
       );
     }
     // The run's texts with no result (not sent, or no answer came back) that have a label in a compared column: they
-    // count as labelled (and in the human–human rows), but results.csv and data/corpus.csv leave them out.
+    // count as labelled (and in the human–human rows), but results.csv and data/corpus.csv leave them out. (A
+    // missing-value marker such as "NA" is no label, as in the figures.)
     const sentIds = new Set(d.results.filter((r) => r.runId === run.id).map((r) => r.docId));
     const inRunIds = new Set(run.docIds);
-    const labelCols = [...new Set(agr.flatMap((a) => (a.source === 'model' ? [a.compared_with] : [a.source, a.compared_with])))];
-    const labelledNoResult = d.docs.filter((x) => inRunIds.has(x.id) && !sentIds.has(x.id) && labelCols.some((c) => (x.meta[c] ?? '').trim() !== '')).length;
+    const { fields, pairs } = labelPairs(run, d.docs, d.runs, d.results, d.study);
+    const fieldOf = new Map(fields.map((f) => [f.key, f]));
+    const hasLabel = (x: Doc) => pairs.some((p) => labelValue(x.meta[p.column], fieldOf.get(p.field)!) !== '');
+    const labelledNoResult = d.docs.filter((x) => inRunIds.has(x.id) && !sentIds.has(x.id) && hasLabel(x)).length;
     const humanRows = agr.some((a) => a.source !== 'model');
     lines.push(
       '',
-      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column. Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number or outside the scale (${run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers, the range of the model’s scores' : 'the codebook’s'}), e.g. NA, 9 or 99 (“not on the scale”)${agr.some((a) => a.level === 'nominal') ? ', or not one of the codebook’s categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
+      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column (a missing-value marker such as NA counts as no value). Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number, or outside the scale (${run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers, far outside the range of the model’s scores' : 'the codebook’s'}), e.g. a word or 99 (“not on the scale”)${agr.some((a) => notCategory(a.stats)) ? ', or not one of the codebook’s categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
         (humanRows
           ? ` Rows with a column name under Annotations compare two human label columns (human–human baseline) on this run’s ${w.many}, as the model rows are, also those without a usable model answer.`
           : '') +
@@ -575,7 +645,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   lines.push(
     '## Methods text (draft)',
     '',
-    '> ' + methodsParagraph(run, meta),
+    '> ' + methodsParagraph(run, meta, retry),
     '',
     'Edit as needed; check every detail against `metadata.json`.',
     '',
@@ -638,11 +708,12 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     rows.push([`\`results/results_${folders.get(latest.id)}.xlsx\``, 'Excel workbook for the latest run']);
     rows.push([
       '`scripts/`',
-      `Python script reproducing run #${latest.number} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${folders.get(latest.id)}/results_long.csv\`)`,
+      `Python script reproducing run #${runName(latest, d.runs)} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${folders.get(latest.id)}/results_long.csv\`)`,
     ]);
   }
-  // Runs that share a number (given by earlier versions in two tabs): their folders end in the start of the run's id.
-  const shared = d.runs.filter((r) => folders.get(r.id) !== runFolderBase(r));
+  // Runs that share a number (given by earlier versions in two tabs): their folders and run names end in the start of
+  // the run's id.
+  const shared = d.runs.filter((r) => sharesNumber(r, d.runs));
   return [
     `# ${d.study.name}: research repository`,
     '',
@@ -658,7 +729,10 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ...rows.map(([a, b]) => `| ${a} | ${b} |`),
     '',
     ...(shared.length
-      ? [`Some runs share a number (${[...new Set(shared.map((r) => `#${r.number}`))].join(', ')}; given twice by an earlier version when the app was open in two tabs): each one’s folder ends in the start of its id (\`id\` in its run.json).`, '']
+      ? [
+          `Some runs share a number (${[...new Set(shared.map((r) => `#${r.number}`))].join(', ')}; given twice by an earlier version when the app was open in two tabs): each one’s folder, and its name in the tables’ \`run\` column (e.g. ${runName(shared[0], d.runs)}), ends in the start of its id (\`id\` in its run.json).`,
+          '',
+        ]
       : []),
     ...(latest ? [`${CSV_NOTE} To read the results in Excel, open the .xlsx workbook instead.`, ''] : [CSV_NOTE, '']),
     'Token counts: Anthropic reports input tokens excluding cached tokens; OpenAI reports input tokens including cached tokens.',
@@ -705,14 +779,14 @@ export async function buildComparisonReport(
   const sent = (views: typeof viewsA, run: Run) => new Set(run.docIds.filter((id) => views.has(id) && views.get(id)!.status !== 'none'));
   const [sentA, sentB] = [sent(viewsA, runA), sent(viewsB, runB)];
   const both = docs.filter((d) => sentA.has(d.id) && sentB.has(d.id));
-  const name = (r: Run) => `${r.snapshot.model.model} (run #${r.number})`;
+  const name = (r: Run) => `${r.snapshot.model.model} (run #${runName(r, runs)})`;
   // For the Notes: a run with texts it never sent (cancelled, stopped or not finished); they are not compared.
   const unsentNote = (run: Run, sentSet: Set<string>) => {
     const own = new Set(run.docIds);
     const total = docs.filter((d) => own.has(d.id)).length;
     const missing = total - sentSet.size;
     return missing > 0
-      ? [{ note: `Run #${run.number} has no result for ${missing.toLocaleString('en-US')} of its ${total.toLocaleString('en-US')} ${w.many} (e.g. the run was cancelled, stopped or not finished); they are not compared.` }]
+      ? [{ note: `Run #${runName(run, runs)} has no result for ${missing.toLocaleString('en-US')} of its ${total.toLocaleString('en-US')} ${w.many} (e.g. the run was cancelled, stopped or not finished); they are not compared.` }]
       : [];
   };
 
@@ -727,12 +801,12 @@ export async function buildComparisonReport(
       const y = normalizeLabel(fieldValue(runB, vb.values, f.key), f.yesNo);
       if (x && y) items.push({ doc: d, x, y });
     }
-    const all = agreement(items.map((i) => i.x), items.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen });
+    const all = agreement(items.map((i) => i.x), items.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen, range: f.range });
     // Shared zeros ("no evaluation" from both runs) inflate agreement: also report texts where at least one run is non-zero.
     const zeroOnScale = all.meanDifference !== null && (f.allowed.includes('0') || items.some((i) => i.x === '0' || i.y === '0'));
     const nz = items.filter((i) => i.x !== '0' || i.y !== '0');
     // Only when some texts got 0 from both runs; otherwise the row would repeat the one above.
-    const nonZero = zeroOnScale && nz.length < items.length ? agreement(nz.map((i) => i.x), nz.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen }) : null;
+    const nonZero = zeroOnScale && nz.length < items.length ? agreement(nz.map((i) => i.x), nz.map((i) => i.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen, range: f.range }) : null;
     return { f, items, all, nonZero };
   });
 
@@ -791,9 +865,10 @@ export async function buildComparisonReport(
   const isNum = (v: string) => v.trim() !== '' && !Number.isNaN(Number(v));
   const review = compared.flatMap(({ f, items, all }) => {
     const numeric = all.meanDifference !== null;
-    // Scores left out of the statistics (n_left_out_not_on_scale): not a number (e.g. "NA") or off the codebook scale.
-    const scale = f.scaleSeen ? [] : f.allowed.filter(isNum).map(Number);
-    const onScale = (v: string) => isNum(v) && (scale.length < 2 || (Number(v) >= Math.min(...scale) && Number(v) <= Math.max(...scale)));
+    // Scores left out of the statistics (n_left_out_not_on_scale): not a number (e.g. "NA") or off the scale they were
+    // measured on (the codebook's; for plain-text scores, the range of the answers as the statistics grew it).
+    const range = all.leftOut.range;
+    const onScale = (v: string) => isNum(v) && (!range || (Number(v) >= range[0] - 1e-9 && Number(v) <= range[1] + 1e-9));
     return items.map(({ doc, x, y }) => {
       const leftOut = numeric && all.leftOut.n > 0 && !(onScale(x) && onScale(y));
       const diff = numeric && !leftOut ? Number(y) - Number(x) : null;
@@ -837,7 +912,7 @@ export async function buildComparisonReport(
     if (groups.length) onProgress?.(`by ${groupBy}, field ${i + 1} of ${compared.length}`);
     return groups.map((g) => {
       const sub = items.filter((x) => (x.doc.meta[groupBy] ?? '') === g);
-      const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((x) => x.x), sub.map((x) => x.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen }));
+      const { field, texts: _t, ...rest } = summaryRow(f.label, '', agreement(sub.map((x) => x.x), sub.map((x) => x.y), f.level, f.allowed, tolerance, { scaleSeen: f.scaleSeen, range: f.range }));
       return { g, field, rest: { ...rest, n_texts_in_both_runs: both.filter((d) => (d.meta[groupBy] ?? '') === g).length } };
     });
   });
@@ -856,8 +931,12 @@ export async function buildComparisonReport(
   );
   if (groupBy) addSheet(wb, sheetName(wb, `By ${groupBy}`), byGroup.map(({ g, field, rest }) => ({ field, [groupCol]: g || '(none)', ...rest })));
 
-  const settings = (r: Run) => ({
-    run: `#${r.number}${r.label ? ` (${r.label})` : ''}`,
+  // The run's texts still in the study, as in the Notes, and those of them with a result (usable or failed).
+  const present = new Set(docs.map((d) => d.id));
+  const removedSince = (r: Run) => r.docIds.filter((id) => !present.has(id)).length;
+  const removed = removedSince(runA) + removedSince(runB) > 0;
+  const settings = (r: Run): Record<string, string> => ({
+    run: `#${runName(r, runs)}${r.label ? ` (${r.label})` : ''}`,
     provider: r.snapshot.model.provider,
     model: r.snapshot.model.model,
     model_reported_by_api: [...new Set(results.filter((x) => x.runId === r.id && x.status === 'ok').map((x) => x.modelReported).filter(Boolean))].join(', '),
@@ -866,12 +945,15 @@ export async function buildComparisonReport(
     prompt_version: `v${r.snapshot.promptVersion} (${r.snapshot.promptHash})`,
     mode: r.mode === 'batch' ? 'batch API' : 'immediate requests',
     started: r.createdAt,
-    texts: String(r.docIds.length),
+    texts_in_run: String(r.docIds.length - removedSince(r)),
+    texts_with_results: String((r === runA ? sentA : sentB).size),
+    ...(removed ? { texts_removed_from_study_since: String(removedSince(r)) } : {}),
     annotations_per_text: String(r.snapshot.options.replicates),
+    app_version: r.snapshot.appVersion,
   });
   const sa = settings(runA);
   const sb = settings(runB);
-  addSheet(wb, 'Runs', Object.keys(sa).map((k) => ({ setting: k, first: sa[k as keyof typeof sa], second: sb[k as keyof typeof sb] })));
+  addSheet(wb, 'Runs', Object.keys(sa).map((k) => ({ setting: k, first: sa[k], second: sb[k] })));
 
   // One confusion table per field (rows: first run, columns: second run); skipped for long numeric scales.
   for (const { f, all } of compared) {
@@ -888,6 +970,7 @@ export async function buildComparisonReport(
   }
 
   addSheet(wb, 'Notes', [
+    { note: `Exported from Annotation Desk ${__APP_VERSION__} on ${nowIso().slice(0, 10)}${runA.snapshot.appVersion === runB.snapshot.appVersion ? `; both runs were made with ${runA.snapshot.appVersion}` : `; the runs were made with ${runA.snapshot.appVersion} and ${runB.snapshot.appVersion}`}.` },
     { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those annotated in both runs with a usable value for the field.` },
     ...unsentNote(runA, sentA),
     ...unsentNote(runB, sentB),

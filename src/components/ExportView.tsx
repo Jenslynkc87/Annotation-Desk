@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { buildBackup } from '../lib/export/backup';
-import { buildExcel, buildResearchRepo, buildSupplementary, runInProgress, type ExportData } from '../lib/export/packages';
-import { labelPairs } from '../lib/export/tables';
+import { buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from '../lib/export/packages';
+import { labelPairs, runName } from '../lib/export/tables';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
-import { runTitle } from '../lib/view';
+import { retryInProgress, runInProgress } from '../lib/view';
 import { Icon } from './ui';
 
 function exportData(): ExportData {
@@ -55,14 +55,16 @@ export function ExportView() {
       skipped: [...notUsed.values()],
     };
   }, [run, docs, runs, results, study]);
-  // A run still being sent: how far it has got.
+  // A run still being sent: how far it has got (texts with a usable answer; during Retry failed every text may have a
+  // result already, failed ones among them).
   const progress = useMemo(() => {
     if (!run || !runInProgress(run)) return null;
     const present = new Set(docs.map((d) => d.id));
-    const answered = new Set(results.filter((x) => x.runId === run.id).map((x) => x.docId));
+    const usable = new Set(results.filter((x) => x.runId === run.id && x.status === 'ok').map((x) => x.docId));
     const own = run.docIds.filter((id) => present.has(id));
-    return { done: own.filter((id) => answered.has(id)).length, total: own.length };
+    return { done: own.filter((id) => usable.has(id)).length, total: own.length };
   }, [run, docs, results]);
+  const job = useStore((s) => s.job);
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
 
   return (
@@ -75,16 +77,19 @@ export function ExportView() {
               {!withResults.length && <option value="">No runs with results yet</option>}
               {[...withResults].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
-                  Run {runTitle(r)} · {r.scope} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model} · {fmtDateTime(r.createdAt)}
+                  Run #{runName(r, runs)}
+                  {r.label ? ` · ${r.label}` : ''} · {r.scope} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model} · {fmtDateTime(r.createdAt)}
                   {runInProgress(r) ? ' · still running' : ''}
                 </option>
               ))}
             </select>
           </div>
-          {progress && (
+          {progress && run && (
             <div className="notice warn" style={{ marginBottom: 8, maxWidth: 640 }}>
-              This run is not finished yet ({progress.done.toLocaleString('en-US')} of {progress.total.toLocaleString('en-US')} {w.many} have results so far). Excel and
-              the supplementary package show the results so far, and say that the run was not finished.
+              {retryInProgress(run) ? 'Retry failed is still sending requests in this run' : run.status === 'submitted' ? 'This run’s batch is still being processed' : 'This run is not finished yet'} (
+              {retryInProgress(run) && job?.runId === run.id && `${job.done.toLocaleString('en-US')} of ${job.total.toLocaleString('en-US')} requests done; `}
+              {progress.done.toLocaleString('en-US')} of {progress.total.toLocaleString('en-US')} {w.many} have a usable answer so far). Excel and the supplementary package
+              show the results so far, and say that the run was not finished.
             </div>
           )}
           <div className="hint">
@@ -107,7 +112,7 @@ export function ExportView() {
             onClick={() =>
               go('excel', async () => {
                 const blob = await buildExcel(exportData(), run!, { text: false, rationale: true });
-                download(`${slug(study.name)}_run${run!.number}_${dateStamp()}.xlsx`, blob);
+                download(`${slug(study.name)}_run${runName(run!, runs)}_${dateStamp()}.xlsx`, blob);
               })
             }
           >
@@ -193,7 +198,8 @@ export function ExportView() {
             onClick={() =>
               go('backup', async () => {
                 const d = exportData();
-                const b = await buildBackup(d.study, d.docs, d.runs, d.results, true);
+                // (The results as stored: read from the database, not as this page reads them by today's rules.)
+                const b = await buildBackup(d.study, d.docs, d.runs, true);
                 download(`${slug(d.study.name)}_backup_${dateStamp()}.json`, b);
               })
             }

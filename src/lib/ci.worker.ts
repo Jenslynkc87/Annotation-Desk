@@ -9,9 +9,11 @@ export interface IntervalJob {
   allowed: string[];
   tolerance: number;
   scaleSeen?: boolean;
+  /** Plain-text scores: the range of the model's answers (see `agreement`). */
+  range?: [number, number];
 }
 
 self.onmessage = (e: MessageEvent<IntervalJob>) => {
-  const { a, b, level, allowed, tolerance, scaleSeen } = e.data;
-  self.postMessage(agreement(a, b, level, allowed, tolerance, { scaleSeen }).ci);
+  const { a, b, level, allowed, tolerance, scaleSeen, range } = e.data;
+  self.postMessage(agreement(a, b, level, allowed, tolerance, { scaleSeen, range }).ci);
 };

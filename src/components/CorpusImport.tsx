@@ -5,12 +5,13 @@ import {
   describeRow,
   guessIdColumn,
   guessTextColumn,
+  notUtf8,
   parseFile,
   parsePastedTable,
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
-import { clearPlan, guessKeyColumn, matchLabels, modelAnswerColumns } from '../lib/import/labels';
+import { clearPlan, guessKeyColumn, isResultsTableColumn, matchLabels, modelAnswerColumns } from '../lib/import/labels';
 import { templatePlaceholders } from '../lib/prompt';
 import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
 import { isEntries, words } from '../lib/subject';
@@ -45,6 +46,15 @@ function useOnce(): [boolean, (f: () => Promise<unknown>) => Promise<void>] {
   return [busy, once];
 }
 
+/**
+ * Whether a dialog appeared less than half a second ago: the second click of a double click on the previous dialog's
+ * button (e.g. Import, with another table waiting) lands on this one's, and must not import what was never seen.
+ */
+function useJustShown(): () => boolean {
+  const [shownAt] = useState(() => performance.now());
+  return () => performance.now() - shownAt < 500;
+}
+
 const TABLE_EXTENSIONS = '.csv,.tsv,.xlsx,.xls,.ods,.json,.jsonl';
 
 export function CorpusImport() {
@@ -73,7 +83,7 @@ export function CorpusImport() {
   const handleFiles = async (all: File[]) => {
     const zips = all.filter((f) => /\.zip$/i.test(f.name));
     const files = all.filter((f) => !/\.zip$/i.test(f.name));
-    if (zips.length) toast(`${zips.length === 1 ? zips[0].name : `${zips.length} zip files`} can’t be read directly. ${ZIP_NOTE}`, 'error');
+    if (zips.length) toast(`${zips.map((f) => f.name).join(', ')} can’t be read directly. ${ZIP_NOTE}`, 'error');
     if (!files.length) return;
     // The study the files are for: if another study is opened while they are being read, nothing is added.
     const studyId = getState().currentId ?? undefined;
@@ -97,19 +107,12 @@ export function CorpusImport() {
     if (texts.length) await addDocs(texts, studyId);
     if (newTables.length) setTables(newTables);
     if (errors.size) {
-      // Kept until dismissed, so the files can be fixed one by one: each reason once (the most common first), with up
-      // to 10 of its files' names.
+      // Kept until dismissed, so the files can be fixed one by one: each reason once (the most common first), with
+      // the names of all its files.
       const groups = [...errors].sort((a, b) => b[1].length - a[1].length);
       const n = groups.reduce((k, [, names]) => k + names.length, 0);
-      const parts = groups
-        .slice(0, 3)
-        .map(([reason, names]) => `${names.slice(0, 10).join(', ')}${names.length > 10 ? ` and ${(names.length - 10).toLocaleString()} more` : ''}: ${reason}`);
-      const others = groups.slice(3).reduce((k, [, names]) => k + names.length, 0);
-      toast(
-        `Skipped ${n.toLocaleString()} file${n === 1 ? '' : 's'}. ${parts.join(' ')}${others ? ` And ${others.toLocaleString()} more for other reasons.` : ''}`,
-        'error',
-        true,
-      );
+      const parts = groups.map(([reason, names]) => `${names.join(', ')}: ${reason === notUtf8(1) ? notUtf8(names.length) : reason}`);
+      toast(`Skipped ${n.toLocaleString()} file${n === 1 ? '' : 's'}. ${parts.join(' ')}`, 'error', true);
     }
   };
 
@@ -209,15 +212,17 @@ export function CorpusImport() {
         />
       )}
       {labels && <LabelsDialog entries={entries} table={labels} onDone={() => setLabels(null)} />}
-      {tables.length > 0 && (
+      {/* The next table waits while a sheet is being added as labels (otherwise its dialog, on top, could replace that sheet unseen). */}
+      {tables.length > 0 && !labels && (
         <TableDialog
           key={`${tables.length}:${tables[0].name}`}
           entries={entries}
           table={tables[0]}
-          onDone={() => setTables((t) => t.slice(1))}
-          onUseAsLabels={() => {
-            setLabels(tables[0]);
-            setTables((t) => t.slice(1));
+          // Only this table leaves the queue (e.g. not the next one, when its import ends after it was closed).
+          onDone={(table) => setTables((t) => (t[0] === table ? t.slice(1) : t))}
+          onUseAsLabels={(table) => {
+            setLabels(table);
+            setTables((t) => (t[0] === table ? t.slice(1) : t));
           }}
         />
       )}
@@ -236,24 +241,26 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
   const add = () =>
     once(async () => {
       const docs = items.map((t, i) => ({ docId: items.length === 1 ? prefix : `${prefix}_${i + 1}`, text: t, meta: {}, source: 'pasted' }));
-      await addDocs(docs);
-      onClose();
+      // (Not saved, e.g. storage full: the dialog stays open with what was pasted.)
+      if (await addDocs(docs)) onClose();
     });
+  // While the texts are being saved, closing wouldn't stop it.
+  const close = () => !adding && onClose();
   return (
     <Modal
       title={tableOnly ? 'Paste entries' : 'Paste text'}
-      onClose={onClose}
-      confirmEscape={text.trim() ? 'Close without adding what you pasted?' : undefined}
+      onClose={close}
+      confirmEscape={text.trim() && !adding ? 'Close without adding what you pasted?' : undefined}
       footer={
         <>
-          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={close} disabled={adding}>Cancel</button>
           {asTable ? (
             <button className="btn primary" disabled={!table?.rows.length || !table.columns.length} onClick={() => table && onTable(table)}>
               Continue with {table?.rows.length.toLocaleString() ?? 0} row{table?.rows.length === 1 ? '' : 's'}…
             </button>
           ) : (
             <button className="btn primary" disabled={!items.length || adding} onClick={add}>
-              Add {items.length || ''} text{items.length === 1 ? '' : 's'}
+              {adding ? 'Adding…' : `Add ${items.length || ''} text${items.length === 1 ? '' : 's'}`}
             </button>
           )}
         </>
@@ -311,7 +318,17 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
   );
 }
 
-function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boolean; table: ParsedTable; onDone: () => void; onUseAsLabels: () => void }) {
+function TableDialog({
+  entries,
+  table,
+  onDone,
+  onUseAsLabels,
+}: {
+  entries: boolean;
+  table: ParsedTable;
+  onDone: (table: ParsedTable) => void;
+  onUseAsLabels: (table: ParsedTable) => void;
+}) {
   const docs = useStore((s) => s.docs);
   // A metadata or label sheet dropped here would otherwise become one junk "text" per row.
   const matched = useMemo(() => (docs.length ? matchLabels(docs, table, guessKeyColumn(docs, table)).updates.size : 0), [docs, table]);
@@ -337,7 +354,9 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   const seen = new Set<string>();
   const repeated = ids.filter((x) => seen.has(x) || (seen.add(x), false));
   const [adding, once] = useOnce();
+  const justShown = useJustShown();
   const add = () =>
+    !justShown() &&
     once(async () => {
       const docs = rows.map((r, i) => {
         return {
@@ -347,18 +366,20 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
           source: table.name,
         };
       });
-      await addDocs(docs);
-      onDone();
+      // (Not saved, e.g. storage full: the dialog stays open, so the table isn't lost from the queue.)
+      if (await addDocs(docs)) onDone(table);
     });
+  // While the rows are being saved, closing wouldn't stop it: Cancel waits.
+  const close = () => !adding && onDone(table);
   return (
     <Modal
       title={entry ? `Add entries: ${table.name}` : `Import table: ${table.name}`}
-      onClose={onDone}
+      onClose={close}
       footer={
         <>
-          <button className="btn" onClick={onDone}>Cancel</button>
+          <button className="btn" onClick={close} disabled={adding}>Cancel</button>
           <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !rows.length || adding} onClick={add}>
-            Import {rows.length.toLocaleString()} {entry ? 'entries' : 'texts'}
+            {adding ? 'Importing…' : `Import ${rows.length.toLocaleString()} ${entry ? 'entries' : 'texts'}`}
           </button>
         </>
       }
@@ -367,7 +388,7 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
         <div className="notice warn" style={{ marginBottom: 12 }}>
           {matched.toLocaleString()} of {table.rows.length.toLocaleString()} rows match {entry ? 'entries' : 'texts'} already in this study by name or ID. If this file holds
           labels or metadata for those {entry ? 'entries' : 'texts'}, add it as columns instead of importing them again.{' '}
-          <button className="btn small" onClick={onUseAsLabels}>
+          <button className="btn small" disabled={adding} onClick={() => onUseAsLabels(table)}>
             Add as labels or metadata instead
           </button>
         </div>
@@ -501,7 +522,8 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
     [docs, m],
   );
   // A results file exported from this app: its answer columns are the model's, not human labels.
-  const modelCols = useMemo(() => modelAnswerColumns(table, runs, results), [table, runs, results]);
+  const modelCols = useMemo(() => modelAnswerColumns(table, runs, results, m.updates), [table, runs, results, m]);
+  const answerCols = modelCols.filter((c) => !isResultsTableColumn(c));
   const removedBy = (c: string) => [...clear.values()].filter((cols) => cols.includes(c)).length;
   const inPrompt = useMemo(() => promptColumns(prompt, runs), [prompt, runs]);
   const emptied = m.replaced.filter((c) => inPrompt.has(c) && removedBy(c) > 0);
@@ -509,22 +531,26 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
   const [one, many] = entries ? ['entry', 'entries'] : ['text', 'texts'];
   const blocked = m.conflicts.length > 0 || modelCols.length > 0;
   // Several rows for texts that the study has twice under one name (John Smith, John Smith_2) need other advice.
-  const sameName = m.sameName.filter((x) => m.conflicts.includes(x.key) || m.repeated.includes(x.key));
+  const sameName = m.sameName;
   const otherConflicts = m.conflicts.filter((k) => !sameName.some((x) => x.key === k));
   const [adding, once] = useOnce();
+  const justShown = useJustShown();
   const apply = () =>
+    !justShown() &&
     once(async () => {
       if (await addLabels(m.updates, clear)) onDone();
     });
+  // While the values are being saved, closing wouldn't stop it: Cancel waits.
+  const close = () => !adding && onDone();
   return (
     <Modal
       title={`${entries ? 'Add answers' : 'Add labels'}: ${table.name}`}
-      onClose={onDone}
+      onClose={close}
       footer={
         <>
-          <button className="btn" onClick={onDone}>Cancel</button>
+          <button className="btn" onClick={close} disabled={adding}>Cancel</button>
           <button className="btn primary" disabled={!m.updates.size || !m.columns.length || blocked || adding} onClick={apply}>
-            Add to {m.updates.size.toLocaleString()} {m.updates.size === 1 ? one : many}
+            {adding ? 'Adding…' : `Add to ${m.updates.size.toLocaleString()} ${m.updates.size === 1 ? one : many}`}
           </button>
         </>
       }
@@ -546,10 +572,10 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
       </p>
       {modelCols.length > 0 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
-          <strong>This is a results file exported from Annotation Desk.</strong> Its columns {list(modelCols)} hold the model’s answers, which are already in this
+          <strong>This is a results file exported from Annotation Desk.</strong> Its columns {list(answerCols)} hold the model’s answers, which are already in this
           study (under <em>Runs &amp; agreement</em>); added here, they would count as {entries ? 'your own answers' : 'human labels'}. To add{' '}
           {entries ? 'your answers' : 'human labels'}, use a sheet with only your own columns (the {entries ? 'ID' : 'file name or ID'} and your{' '}
-          {entries ? 'answers' : 'labels'}), or delete these columns from this sheet and add it again.
+          {entries ? 'answers' : 'labels'}), or delete the {modelCols.length > answerCols.length ? 'model’s and the run’s' : 'model’s'} columns from this sheet ({modelCols.join(', ')}) and add it again.
         </div>
       )}
       {table.problems?.map((p) => (
@@ -571,28 +597,31 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
           <strong>{m.matchedRows.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {m.matchedTexts.toLocaleString()}{' '}
           {m.matchedTexts === 1 ? one : many}. Columns to add: {m.columns.length ? m.columns.join(', ') : '(none)'}.
         </div>
-        {m.conflicts.length > 0 && (
+        {otherConflicts.length > 0 && (
           <div>
             <strong>
-              Several rows for the same {one} with different values ({m.conflicts.length}): {list(m.conflicts)}.
+              Several rows for the same {one} with different values ({otherConflicts.length}): {list(otherConflicts)}.
             </strong>{' '}
-            {otherConflicts.length > 0 && (
-              <>
-                Only one row per {one} can be used, e.g. not one row per coder: put each coder’s labels in a column of their own (race_coder1, race_coder2, …).{' '}
-              </>
-            )}
+            Only one row per {one} can be used, e.g. not one row per coder: put each coder’s labels in a column of their own (race_coder1, race_coder2, …).
             Nothing is added until the sheet is fixed.
           </div>
         )}
         {sameName.length > 0 && (
           <div>
-            This study has more than one {one} called {list(sameName.map((x) => `“${x.key}”`))}: they were stored as{' '}
-            {sameName.slice(0, 5).map((x) => x.ids.join(', ')).join('; ')}
-            {sameName.length > 5 ? '; …' : ''}. Rows are matched by {entries ? 'ID' : 'file name or ID'}, so every row with that name went to
-            the first. In the sheet, give each row the ID its {one} has here (e.g. {sameName[0].ids[1]}).
+            <strong>
+              This study has more than one {one} called {list(sameName.map((x) => `“${x.key}”`))}, and the sheet lists {sameName.length === 1 ? 'that name' : 'those names'}{' '}
+              more than once.
+            </strong>{' '}
+            They were stored as {sameName.slice(0, 5).map((x) => x.ids.join(', ')).join('; ')}
+            {sameName.length > 5 ? '; …' : ''}. Rows are matched by {entries ? 'ID' : 'file name or ID'}, so every row with that name would go to the
+            first. Nothing is added until each row has the ID its {one} has here (e.g. {sameName[0].ids[1]}).
           </div>
         )}
-        {m.repeated.length > 0 && <div>Listed more than once with the same values, merged ({m.repeated.length}): {list(m.repeated)}</div>}
+        {m.repeated.length > 0 && (
+          <div>
+            Listed more than once, with no value that differs, so the rows are merged ({m.repeated.length}): {list(m.repeated)}
+          </div>
+        )}
         {m.unmatched.length > 0 && <div>Not found ({m.unmatched.length}): {list(m.unmatched)}</div>}
         {m.ambiguous.length > 0 && (
           <div>

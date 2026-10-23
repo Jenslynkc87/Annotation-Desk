@@ -9,7 +9,8 @@ import { currentStudy, dismissToast, isBusy, updateStudy, useStore } from './lib
 
 type Tab = 'workbench' | 'runs' | 'export';
 
-export function App() {
+/** `openHere` asks for the app when another tab runs it (see lib/tabLock.ts); undefined without Web Locks. */
+export function App({ openHere }: { openHere?: () => Promise<boolean> }) {
   const ready = useStore((s) => s.ready);
   const study = useStore((s) => currentStudy(s));
   const saving = useStore((s) => s.saving);
@@ -78,11 +79,7 @@ export function App() {
 
       <main className="page">
         {otherTab ? (
-          <div className="notice warn" style={{ maxWidth: 640, margin: '40px auto' }}>
-            <strong>Annotation Desk is already open in another tab or window of this browser.</strong> It works in one tab at a time, so that the
-            same requests are never sent (and paid for) twice and changes don't overwrite each other. Switch to the other tab, or close it: this tab
-            then opens by itself.
-          </div>
+          <OtherTabNotice openHere={openHere} />
         ) : !ready || !study ? (
           <div className="empty">Loading…</div>
         ) : (
@@ -126,5 +123,25 @@ export function App() {
         ))}
       </div>
     </>
+  );
+}
+
+/** Another tab or window runs the app. This tab asks again when the user comes back to it, or clicks Open here. */
+function OtherTabNotice({ openHere }: { openHere?: () => Promise<boolean> }) {
+  const [stillOpen, setStillOpen] = useState(false);
+  return (
+    <div className="notice warn" style={{ maxWidth: 640, margin: '40px auto' }}>
+      <strong>Annotation Desk is already open in another tab or window of this browser.</strong> It works in one tab at a time, so that the
+      same requests are never sent (and paid for) twice and changes don’t overwrite each other. Switch to the other tab, or close it: this tab
+      then opens when you come back to it, or when you click Open here.
+      {openHere && (
+        <div className="row" style={{ marginTop: 10 }}>
+          <button className="btn" onClick={async () => setStillOpen(!(await openHere()))}>
+            Open here
+          </button>
+          {stillOpen && <span>It is still open in another tab or window: close it there first.</span>}
+        </div>
+      )}
+    </div>
   );
 }

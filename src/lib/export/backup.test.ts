@@ -57,7 +57,7 @@ async function check(imported: Study) {
 describe('study backup', () => {
   it('round-trips a study written one record per line', async () => {
     await seed();
-    const blob = await buildBackup(study, docs, [run], results, true);
+    const blob = await buildBackup(study, docs, [run], true);
     const text = await blob.text();
     // Still one valid JSON document, with everything in it.
     const parsed = JSON.parse(text);
@@ -75,7 +75,7 @@ describe('study backup', () => {
   });
 
   it('writes empty sections and no logs when asked', async () => {
-    const blob = await buildBackup(study, [], [], [], false);
+    const blob = await buildBackup(study, [], [], false);
     const parsed = JSON.parse(await blob.text());
     expect(parsed).toMatchObject({ docs: [], runs: [], results: [], logs: [] });
     const imported = await importBackup(blob);
@@ -86,7 +86,7 @@ describe('study backup', () => {
     await expect(importBackup(new Blob(['{"hello": 1}']))).rejects.toThrow('Not an Annotation Desk study backup');
     await expect(importBackup(new Blob(['not json']))).rejects.toThrow('not valid JSON');
     const before = (await dbApi.listStudies()).length;
-    const text = await (await buildBackup(study, docs, [run], results, true)).text();
+    const text = await (await buildBackup(study, docs, [run], true)).text();
     const cut = text.slice(0, text.indexOf('"results":[') + 20);
     await expect(importBackup(new Blob([cut]))).rejects.toThrow();
     // Cut exactly at a line break: every line reads fine, but the end is missing.
@@ -104,7 +104,7 @@ describe('study backup', () => {
     await dbApi.putResult(retried, logOf('second')); // the failed attempt's log is kept as r2:d0:1#1
     expect(retried.attempt).toBe(2);
 
-    const blob = await buildBackup(s2, docs, [run2], [retried], true);
+    const blob = await buildBackup(s2, docs, [run2], true);
     expect(JSON.parse(await blob.text()).logs.map((l: ResultLog) => l.id)).toEqual(['r2:d0:1', 'r2:d0:1#1']);
     const imported = await importBackup(blob);
     const data = await dbApi.loadStudyData(imported.id);
@@ -130,7 +130,7 @@ describe('study backup', () => {
     });
     const whole = vi.spyOn(dbApi, 'getLogsForRun');
     try {
-      const blob = await buildBackup({ ...study, id: 's3' }, [], [{ ...run, id: 'r3', studyId: 's3' }], [], true);
+      const blob = await buildBackup({ ...study, id: 's3' }, [], [{ ...run, id: 'r3', studyId: 's3' }], true);
       expect(pages).toEqual([300, 300, 50]);
       expect(whole).not.toHaveBeenCalled();
       expect(JSON.parse(await blob.text()).logs.map((l: ResultLog) => l.id)).toEqual(many.map((l) => l.id).sort());
@@ -142,7 +142,7 @@ describe('study backup', () => {
 
   it('marks the study until the whole file is in, so an import cut off by closing the page is removed at the next start', async () => {
     await seed();
-    const text = await (await buildBackup(study, docs, [run], results, true)).text();
+    const text = await (await buildBackup(study, docs, [run], true)).text();
     // A file that stops arriving after the texts and runs, as when the page is closed during the import (the
     // import never finishes, and never gets to remove what it wrote).
     const head = new TextEncoder().encode(text.slice(0, text.indexOf('"results":[')));
@@ -164,7 +164,7 @@ describe('study backup', () => {
 
   it('reports a full storage as such, and leaves the study marked when even removing it fails', async () => {
     await seed();
-    const blob = await buildBackup(study, docs, [run], results, true);
+    const blob = await buildBackup(study, docs, [run], true);
     const before = (await dbApi.listStudies()).map((s) => s.id);
     // Chrome's QuotaExceededError comes without a message.
     const put = vi.spyOn(dbApi, 'putMany').mockRejectedValue(new DOMException('', 'QuotaExceededError'));

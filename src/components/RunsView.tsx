@@ -1,16 +1,32 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { agreement, fixed, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
 import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
-import { effectiveTemplate, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
-import { cachingLabel, goldColumnsFor, knownFieldNames, labelPairs, preferredGoldColumn } from '../lib/export/tables';
-import { batchParts, cancelBatch, checkBatch, currentStudy, deleteRunById, getState, isBusy, renameRun, retryableCount, retryFailed, sharedBatches, toast, useStore } from '../lib/store';
+import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
+import { cachingLabel, knownFieldNames, labelPairs, labelValue, preferredGoldColumn, runName } from '../lib/export/tables';
+import {
+  batchParts,
+  cancelBatch,
+  cancelUnknownUpload,
+  checkBatch,
+  currentStudy,
+  deleteRunById,
+  getState,
+  isBusy,
+  renameRun,
+  retryableCount,
+  retryFailed,
+  sharedBatches,
+  toast,
+  unknownUpload,
+  useStore,
+} from '../lib/store';
 import type { Doc, Result, Run, Study } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
-import { buildDocViews, runTitle, runTokens } from '../lib/view';
+import { buildDocViews, replacedAttempts, retryCounts, runTitle, runTokens, type DocView } from '../lib/view';
 import { Modal } from './ui';
 
 const STATUS_BADGE: Record<Run['status'], string> = {
@@ -63,7 +79,8 @@ export function RunsView() {
               </thead>
               <tbody>
                 {sorted.map((r) => {
-                  const t = runTokens(results, r.id, r.replaced);
+                  // (With the attempts a retry still under way has replaced so far.)
+                  const t = runTokens(results, r.id, replacedAttempts(r, results));
                   const retry = retryableCount(r, results, docs);
                   return (
                     <tr key={r.id}>
@@ -116,9 +133,11 @@ export function RunsView() {
                               title="Re-send the failed (or never sent) requests in this run, with the same frozen settings; new answers replace the failed ones"
                               onClick={() => {
                                 // Batch runs retry as a new batch (half price, results later); others right away (full price).
+                                // A run with a batch upload of unknown outcome is not asked here: Retry failed first looks
+                                // for that batch (free), and asks before sending anything again if it isn't found.
                                 const asBatch = r.mode === 'batch';
                                 const what = `${retry.toLocaleString()} request${retry === 1 ? '' : 's'} in run #${r.number}`;
-                                if (asBatch && !confirm(`Re-send ${what} as a new batch (half price; results usually within an hour, collected into the same run)?`)) return;
+                                if (asBatch && !r.batch?.uploadUnknown && !confirm(`Re-send ${what} as a new batch (half price; results usually within an hour, collected into the same run)?`)) return;
                                 if (!asBatch && retry > 50 && !confirm(`Re-send ${what} now (immediate requests, full price)?`)) return;
                                 void retryFailed(r.id);
                               }}
@@ -159,11 +178,20 @@ export function RunsView() {
                                     ? ` Its batch is left running for ${quoted([...new Set(shared.values())])} (${OTHER_STUDY_HERE}), which collects it.`
                                     : ` The batch is still running at the provider and will be cancelled. ${copyElsewhere()}`
                                   : '';
-                              if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending} This cannot be undone.`)) return;
+                              // A batch upload of unknown outcome may have reached the provider: looked up there and cancelled
+                              // if found (deleting the run also lets Remaining send these requests again).
+                              const unknown = unknownUpload(r);
+                              const unsure = unknown
+                                ? ` A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'}) may have reached the provider: it is looked up there first and cancelled if found.`
+                                : '';
+                              if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending}${unsure} This cannot be undone.`)) return;
                               // A batch that could not be cancelled would go on (and be charged) with nowhere to deliver its results: ask.
                               const why = r.status === 'submitted' ? await cancelBatch(r.id, { keepShared: true }) : '';
                               if (why && !confirm(`${why}\n\nDelete run #${r.number} anyway? A batch still running at the provider may be charged, and its results can't be collected here.`)) return;
+                              const look = unknown ? await cancelUnknownUpload(r) : { problem: '', cancelled: '' };
+                              if (look.problem && !confirm(`${look.problem} Deleting the run also lets Remaining send these requests again.\n\nDelete run #${r.number} anyway?`)) return;
                               await deleteRunById(r.id);
+                              if (look.cancelled) toast(`The batch of that upload (${look.cancelled}) had reached the provider and was cancelled.`);
                             }}
                           >
                             Delete
@@ -201,7 +229,12 @@ export function RunsView() {
             {inspect.retries?.length ? (
               <>
                 <dt>Retries</dt>
-                <dd>{inspect.retries.map((x) => `${x.requests} request${x.requests === 1 ? '' : 's'} re-sent ${fmtDateTime(x.at)}`).join('; ')}</dd>
+                <dd>
+                  {/* Retries by the published version recorded the number planned, and an interrupted retry those answered: counted from the stored answers. */}
+                  {retryCounts(inspect, results)
+                    .map((x) => `${x.interrupted || (x.planned !== undefined && x.requests < x.planned) ? 'at least ' : ''}${x.requests.toLocaleString('en-US')} request${x.requests === 1 ? '' : 's'} re-sent ${fmtDateTime(x.at)}`)
+                    .join('; ')}
+                </dd>
               </>
             ) : null}
             <dt>App version</dt>
@@ -256,13 +289,28 @@ const namedAfter = (column: string, field: string) => {
   return c === f || c.startsWith(`${f}_`) || c.endsWith(`_${f}`);
 };
 
-/** The field names a run could have: its codebook's, or the keys in its plain-text JSON answers. */
+/** The field names a run could have: its codebook's, or the score keys in its plain-text JSON answers (each answer read once). */
 function fieldNamesOf(run: Run, results: Result[]): string[] {
-  const p = run.snapshot.prompt;
-  if (p.outputMode === 'structured') return p.variables.map((v) => v.name);
-  const keys = new Set<string>();
-  for (const r of results) if (r.runId === run.id && r.status === 'ok') for (const k of Object.keys(flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]) ?? {})) keys.add(k);
-  return [...keys];
+  return knownFieldNames(null, [run], [], results);
+}
+
+/**
+ * A run's results, combined values and fields, kept while its results and the texts stay the same: while another
+ * run is going, the Agreement panel doesn't read a finished run's answers again each time results come in.
+ */
+type RunData = { docs: Doc[]; list: Result[]; views: Map<string, DocView>; fields?: ComparableField[] };
+const runCache = new WeakMap<Run, RunData>();
+function runData(run: Run, docs: Doc[], results: Result[]): RunData {
+  const list = results.filter((r) => r.runId === run.id);
+  const c = runCache.get(run);
+  if (c && c.docs === docs && c.list.length === list.length && c.list.every((r, i) => r === list[i])) return c;
+  const fresh: RunData = { docs, list, views: buildDocViews(docs, [run], list, run.id) };
+  runCache.set(run, fresh);
+  return fresh;
+}
+function runFields(run: Run, docs: Doc[], results: Result[]): ComparableField[] {
+  const c = runData(run, docs, results);
+  return (c.fields ??= comparableFields(run, c.views.values()));
 }
 
 /**
@@ -281,7 +329,7 @@ export function columnsFieldRun(
   for (const run of [...runs].reverse()) {
     // A quick look at the names first, so only a run that may have the field is read in full.
     if (!fieldNamesOf(run, results).some((n) => namedAfter(colA, n) && namedAfter(colB, n))) continue;
-    const { fields, pairs } = labelPairs(run, docs, runs, results, study);
+    const { fields, pairs } = labelPairs(run, docs, runs, results, study, runData(run, docs, results).views, runFields(run, docs, results));
     const has = (key: string, col: string) => pairs.some((x) => x.field === key && x.column === col);
     const field = fields.find((x) => has(x.key, colA) && has(x.key, colB));
     if (field) return { run, fields, field };
@@ -291,8 +339,9 @@ export function columnsFieldRun(
 
 /**
  * The Field menu's choice in effect. For two label columns, a field picked applies to the pair it was picked for
- * only: a new pair starts from the field its columns belong to (`columnsField`), or none. Otherwise the pick (if
- * any) applies, else the first field.
+ * only: a new pair starts from the field its columns belong to (`columnsField`), or none. A run and a label column
+ * that belongs to one of its fields (`columnField`, its key, as in the exports): the same, starting from that field.
+ * Otherwise the pick (if any) applies, else the first field.
  */
 export function chosenField(
   pick: { pair: string; key: string } | null,
@@ -300,17 +349,53 @@ export function chosenField(
   bothColumns: boolean,
   fields: ComparableField[],
   columnsField: ComparableField | undefined,
+  columnField?: string,
 ): ComparableField | undefined {
-  if (!bothColumns) return fields.find((x) => x.key === pick?.key) ?? fields[0];
+  if (!bothColumns) {
+    if (!columnField) return fields.find((x) => x.key === pick?.key) ?? fields[0];
+    const key = pick?.pair === pair ? pick.key : columnField;
+    return fields.find((x) => x.key === key) ?? fields.find((x) => x.key === columnField) ?? fields[0];
+  }
   const key = pick?.pair === pair ? pick.key : '';
   return key === NO_FIELD ? undefined : (fields.find((x) => x.key === key) ?? columnsField);
 }
 
-/** Why labels were left out of the comparison, e.g. "a label isn’t a number or is outside the scale (−3 to 3)". */
-export function leftOutReason(level: Level, range?: [number, number]): string {
+const signed = (x: number) => (x < 0 ? `−${-x}` : String(x));
+
+/**
+ * Why labels were left out of the comparison, e.g. "a label isn’t a number or is outside the scale (−3 to 3)".
+ * `seen`: scores in plain-text answers, whose scale is the range of the model's answers grown through the labels
+ * next to it (`agreement`).
+ */
+export function leftOutReason(level: Level, range?: [number, number], seen = false): string {
   if (level === 'nominal') return 'a label isn’t one of the field’s values';
-  const num = (x: number) => (x < 0 ? `−${-x}` : String(x));
-  return `a label isn’t a number or is outside the scale${range ? ` (${num(range[0])} to ${num(range[1])})` : ''}`;
+  const r = range ? `${signed(range[0])} to ${signed(range[1])}` : '';
+  return seen
+    ? `a label isn’t a number or lies far outside the model’s answers (the scale${r ? `, ${r},` : ''} takes in the labels next to them)`
+    : `a label isn’t a number or is outside the scale${r ? ` (${r})` : ''}`;
+}
+
+/** Plain-text scores: labels kept although outside the range of the model's answers, e.g. "−3 (12 texts)". */
+export function outsideAnswersNote(o: NonNullable<Agreement['outsideAnswers']>, w: { one: string; many: string }): string {
+  return `Labels outside the range of the model’s answers (${signed(o.range[0])} to ${signed(o.range[1])}) were kept: ${o.values.map((v) => signed(Number(v))).join(', ')} (${o.n.toLocaleString('en-US')} ${o.n === 1 ? w.one : w.many}).`;
+}
+
+/**
+ * `value`, following changes at most once every `ms` (the last change always comes through). Results arrive every
+ * quarter of a second during a run; the Agreement panel reads every answer again on each, which would hold up the page.
+ */
+function useThrottled<T>(value: T, ms: number): T {
+  const [shown, setShown] = useState(value);
+  const last = useRef(0);
+  useEffect(() => {
+    if (shown === value) return;
+    const t = setTimeout(() => {
+      last.current = Date.now();
+      setShown(value);
+    }, Math.max(0, last.current + ms - Date.now()));
+    return () => clearTimeout(t);
+  }, [value, shown, ms]);
+  return shown;
 }
 
 function AgreementPanel() {
@@ -318,15 +403,17 @@ function AgreementPanel() {
   const w = words({ subject: study.prompt.subject });
   const runs = useStore((s) => s.runs);
   const docs = useStore((s) => s.docs);
-  const results = useStore((s) => s.results);
+  const liveResults = useStore((s) => s.results);
+  const results = useThrottled(liveResults, 1000);
   const metaCols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const latest = runs[runs.length - 1];
   const [aPicked, setA] = useState(encode({ kind: 'run', id: latest.id }));
-  // Pre-select a label column only when it belongs to a field (e.g. sentiment ↔ sentiment_gold), the clearest first.
+  // Pre-select a label column only when it belongs to a field (e.g. sentiment ↔ sentiment_gold), the clearest first,
+  // as the exports pair them.
   const [bPicked, setB] = useState(() => {
-    const fs = comparableFields(latest, buildDocViews(docs, runs, results, latest.id).values());
+    const { fields: fs, pairs } = labelPairs(latest, docs, runs, results, study);
     const first = fs[0];
-    const col = first ? preferredGoldColumn(first.key, goldColumnsFor(first, docs, knownFieldNames(study, runs, fs.map((x) => x.key), results))) : undefined;
+    const col = first ? preferredGoldColumn(first.key, pairs.filter((p) => p.field === first.key).map((p) => p.column)) : undefined;
     return col ? encode({ kind: 'meta', col }) : '';
   });
   // A run or column picked here may be gone since (deleted, or another study opened): fall back to the latest run
@@ -353,19 +440,33 @@ function AgreementPanel() {
   // from the run their field was found in, else the latest run).
   const runA = runOf(srcA) ?? runOf(srcB) ?? (bothColumns ? (columnsMatch?.run ?? latest) : undefined);
   const runB = runOf(srcA) ? runOf(srcB) : undefined;
+  // Each run's results and combined values (the same objects while they don't change), for its fields, its label
+  // columns and the figures.
+  const dataA = useMemo(() => (runA ? runData(runA, docs, results) : null), [runA, docs, results]);
+  const dataB = useMemo(() => (runB && runB !== runA ? runData(runB, docs, results) : null), [runA, runB, docs, results]);
+  const viewsA = dataA?.views ?? null;
+  const viewsB = dataB?.views ?? null;
   // Fields agreement can be computed on (codebook fields, or the numeric scores in JSON answers). Two runs:
   // plain-text scores get the range seen in either run, so it doesn't matter which side is which.
-  const fieldsA = useMemo(
-    () => (!runA ? [] : columnsMatch?.run === runA ? columnsMatch.fields : comparableFields(runA, buildDocViews(docs, runs, results, runA.id).values())),
-    [runA, columnsMatch, docs, runs, results],
+  const ownFieldsA = useMemo(
+    () => (!runA || !viewsA ? [] : columnsMatch?.run === runA ? columnsMatch.fields : runFields(runA, docs, results)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runA, viewsA, columnsMatch],
   );
-  const fieldsB = useMemo(() => (runB && runB !== runA ? comparableFields(runB, buildDocViews(docs, runs, results, runB.id).values()) : []), [runA, runB, docs, runs, results]);
-  const fields = useMemo(() => fieldsA.map((x) => combineFields(x, fieldsB.find((y) => y.key === x.key))), [fieldsA, fieldsB]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const fieldsB = useMemo(() => (runB && viewsB ? runFields(runB, docs, results) : []), [runB, viewsB]);
+  const fields = useMemo(() => ownFieldsA.map((x) => combineFields(x, fieldsB.find((y) => y.key === x.key))), [ownFieldsA, fieldsB]);
   const columnsField = bothColumns && columnsMatch ? fields.find((x) => x.key === columnsMatch.field.key) : undefined;
+  // A run and a label column: the field the column belongs to (race_gold → race), as the exports pair them.
+  const column = srcB?.kind === 'meta' ? srcB.col : srcA?.kind === 'meta' ? srcA.col : '';
+  const columnField = useMemo(
+    () => (bothColumns || !column || !runA || !viewsA ? undefined : labelPairs(runA, docs, runs, results, study, viewsA, ownFieldsA).pairs.find((x) => x.column === column)?.field),
+    [bothColumns, column, runA, viewsA, ownFieldsA, docs, runs, results, study],
+  );
   // A field picked in the menu, with the pair of sources it was picked for (see `chosenField`).
   const pair = `${a}\u0001${b}`;
   const [fieldPick, setFieldPick] = useState<{ pair: string; key: string } | null>(null);
-  const cf = chosenField(fieldPick, pair, bothColumns, fields, columnsField);
+  const cf = chosenField(fieldPick, pair, bothColumns, fields, columnsField, columnField);
   const f = cf?.key ?? '';
   const autoLevel: Level = cf?.level ?? 'nominal';
   // A level picked by hand, for the pair of sources it was picked for (a new pair starts from its field's level).
@@ -380,17 +481,20 @@ function AgreementPanel() {
     const out = new Map<string, string>();
     if (!src) return out;
     if (src.kind === 'meta') {
-      for (const d of docs) out.set(d.id, normalizeLabel(d.meta[src.col], yesNo));
+      // A missing-value marker such as "NA" is a blank cell (not a label), unless it is a value of the field. With
+      // no field (two label columns compared as they are), the cells are taken as they are.
+      for (const d of docs) out.set(d.id, cf ? labelValue(d.meta[src.col], cf) : normalizeLabel(d.meta[src.col]));
       return out;
     }
     const run = runOf(src);
     if (!run) return out;
+    // (Either side's run is run A or run B.)
+    const data = run === runA ? dataA : dataB;
+    if (!data) return out;
     if (src.kind === 'run') {
-      const views = buildDocViews(docs, runs, results, src.id);
-      for (const [id, v] of views) if (v.status !== 'none') out.set(id, normalizeLabel(fieldValue(run, v.values, f), yesNo));
+      for (const [id, v] of data.views) if (v.status !== 'none') out.set(id, normalizeLabel(fieldValue(run, v.values, f), yesNo));
     } else {
-      for (const r of results)
-        if (r.runId === src.runId && r.replicate === src.rep && r.status === 'ok') out.set(r.docId, normalizeLabel(fieldValue(run, r.values, f), yesNo));
+      for (const r of data.list) if (r.replicate === src.rep && r.status === 'ok') out.set(r.docId, normalizeLabel(fieldValue(run, r.values, f), yesNo));
     }
     return out;
   };
@@ -415,10 +519,10 @@ function AgreementPanel() {
       }
     }
     // The figures at once; the 95% intervals (several seconds on a full corpus) follow from a background worker.
-    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, { withIntervals: false, scaleSeen: cf?.scaleSeen }), nLabelled, xs, ys };
-  }, [a, b, cf, level, yesNo, tolerance, docs, runs, results]);
+    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, { withIntervals: false, scaleSeen: cf?.scaleSeen, range: cf?.range }), nLabelled, xs, ys };
+  }, [a, b, cf, level, yesNo, tolerance, docs, runs, dataA, dataB]);
   // What the intervals depend on: unchanged when results arrive for other runs (e.g. while a run is going).
-  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance, scaleSeen: cf?.scaleSeen }), [xs, ys, level, cf, tolerance]);
+  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance, scaleSeen: cf?.scaleSeen, range: cf?.range }), [xs, ys, level, cf, tolerance]);
   const jobKey = useMemo(() => JSON.stringify(job), [job]);
   const [intervals, setIntervals] = useState<{ key: string; ci: Agreement['ci'] } | null>(null);
   useEffect(() => {
@@ -435,6 +539,10 @@ function AgreementPanel() {
   const stats: Agreement = intervals?.key === jobKey ? { ...figures, ci: intervals.ci } : figures;
   const ciPending = figures.n >= 10 && intervals?.key !== jobKey;
   const ciText = (ci: [number, number] | null | undefined, pct = false) => (ciPending ? 'computing 95% CI…' : formatCi(ci, pct));
+  // (A codebook scale of numbers applies at the nominal level too: then the reason is the scale's.)
+  const leftOutText =
+    `${fmtInt(stats.leftOut.n)} ${stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because ` +
+    `${leftOutReason(stats.leftOut.range ? 'interval' : level, stats.leftOut.range, !!cf?.scaleSeen)}: ${stats.leftOut.values.map((v) => `“${v}”`).join(', ')}${stats.leftOut.values.length === 5 ? ', …' : ''}.`;
 
   const sourceOptions = (allowMeta: boolean) => (
     <>
@@ -490,12 +598,14 @@ function AgreementPanel() {
     const rb = runOf(decode(b));
     if (!ra || !rb) return;
     // Named now: the page stays usable while the report is built, so another study may be open when it is done.
-    const file = `${slug(currentStudy(getState())?.name ?? 'study')}_run${ra.number}_vs_run${rb.number}_${dateStamp()}.xlsx`;
+    const file = `${slug(currentStudy(getState())?.name ?? 'study')}_run${runName(ra, runs)}_vs_run${runName(rb, runs)}_${dateStamp()}.xlsx`;
     setReporting('');
     // Built in a background worker, so the page stays responsive (the intervals take minutes on a full corpus).
     // The report doesn't use the texts, so they aren't sent. Without workers, it is built right here.
-    const direct = () => buildComparisonReport(ra, rb, docs, runs, results, tolerance, groupBy);
-    const job: ReportJob = { runA: ra, runB: rb, docs: docs.map((d) => ({ ...d, text: '' })), runs, results: results.filter((r) => r.runId === ra.id || r.runId === rb.id), tolerance, groupBy };
+    // (Every result as stored now, not the panel's view of them, which may be up to a second behind during a run.)
+    const all = getState().results;
+    const direct = () => buildComparisonReport(ra, rb, docs, runs, all, tolerance, groupBy);
+    const job: ReportJob = { runA: ra, runB: rb, docs: docs.map((d) => ({ ...d, text: '' })), runs, results: all.filter((r) => r.runId === ra.id || r.runId === rb.id), tolerance, groupBy };
     const build = () =>
       new Promise<Blob>((resolve, reject) => {
         const fallback = () => direct().then(resolve, reject);
@@ -629,7 +739,10 @@ function AgreementPanel() {
         <div className="hint">Choose what to compare with. To compare with human labels, import them as a column alongside your {w.many}.</div>
       ) : stats.n === 0 ? (
         <div className="notice warn">
-          No {w.many} have a value in both sources{f ? ` for “${cf?.label ?? f}”` : ''}.
+          {/* (Every pair left out, e.g. every label 99: they have values, just none that can be compared.) */}
+          {stats.leftOut.n > 0
+            ? `No ${w.many} can be compared${f ? ` for “${cf?.label ?? f}”` : ''}: ${leftOutText}`
+            : `No ${w.many} have a value in both sources${f ? ` for “${cf?.label ?? f}”` : ''}.`}
         </div>
       ) : (
         <>
@@ -641,9 +754,12 @@ function AgreementPanel() {
           )}
           {stats.leftOut.n > 0 && (
             <div className="notice warn" style={{ marginTop: 6 }}>
-              {fmtInt(stats.leftOut.n)} {stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because {leftOutReason(level, stats.leftOut.range)}:{' '}
-              {stats.leftOut.values.map((v) => `“${v}”`).join(', ')}
-              {stats.leftOut.values.length === 5 ? ', …' : ''}.
+              {leftOutText}
+            </div>
+          )}
+          {stats.outsideAnswers && (
+            <div className="hint" style={{ marginTop: 6 }}>
+              {outsideAnswersNote(stats.outsideAnswers, w)}
             </div>
           )}
           <Glance stats={stats} w={w} />
@@ -719,10 +835,12 @@ function Glance({ stats, w }: { stats: Agreement; w: Words }) {
   const large = g ? g.secondHigherLarge + g.secondLowerLarge : 0;
   const higher = g ? g.secondHigherSmall + g.secondHigherLarge : 0;
   const lower = g ? g.secondLowerSmall + g.secondLowerLarge : 0;
+  // With half points among the differences (combined labels, e.g. 0.5 or 1.5), the middle group is all differences
+  // under 2 points, not "off by 1".
   const segments = g
     ? [
         { n: same, cls: 'same', label: 'Same answer' },
-        { n: small, cls: 'near', label: 'Off by 1' },
+        { n: small, cls: 'near', label: g.fractional ? 'Off by less than 2' : 'Off by 1' },
         { n: large, cls: 'far', label: 'Off by 2 or more' },
       ]
     : [

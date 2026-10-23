@@ -146,8 +146,12 @@ export interface Run {
   resumeError?: string | null;
   /** Failed requests re-sent within this run (same frozen settings). `asBatch`: re-sent as a new batch
    *  (batch runs from October 2026 on; earlier retries were always individual requests). `requests`: those
-   *  actually sent (runs before October 22, 2026: those planned, even if a retry was stopped early). */
-  retries?: { at: string; requests: number; asBatch?: boolean }[];
+   *  actually sent (runs before October 22, 2026: those planned, even if a retry was stopped early).
+   *  `counted: 'sent'`: written by a version that counts the requests sent (from October 23, 2026); an entry
+   *  without it in a run of the published version (bare appVersion such as "0.1.0") holds the planned count.
+   *  `interrupted`: the page closed while this retry was being sent, so `requests` counts those answered (a few
+   *  more, at most the concurrency, may have gone out without an answer being recorded). */
+  retries?: { at: string; requests: number; asBatch?: boolean; counted?: 'sent'; interrupted?: boolean }[];
   /** Failed attempts replaced by a retry (from October 22, 2026): their number and token use, which the
    *  results no longer show (their logs are kept, see ResultLog.attempt). */
   replaced?: { requests: number; usage: Usage };
@@ -156,12 +160,18 @@ export interface Run {
 export interface UploadAttempt {
   since: string;
   requests: number;
-  /** OpenAI: the uploaded input file, when the file arrived but starting the batch got no answer. */
+  /** OpenAI: the uploaded input file (recorded as soon as the file has arrived, before the batch is started). */
   inputFileId?: string;
   /** The upload was a "Retry failed" (when that retry began), so a batch found later is recorded as that retry. */
   retryAt?: string;
+  /** The batch is created with metadata naming this run and upload (OpenAI, from October 23, 2026): it is found
+   *  by that or by its input file, never by its number of requests alone. */
+  labelled?: boolean;
   /** The run's finish time before the upload (restored if the upload is cut off). */
   finishedBefore?: string | null;
+  /** When the upload got no answer, if that happened while the page was open: a batch it created was created before
+   *  then, so a later lookup by request count leaves out batches created afterwards. */
+  endedAt?: string;
 }
 
 export interface BatchPart {

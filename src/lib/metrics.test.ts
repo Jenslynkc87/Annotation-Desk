@@ -113,6 +113,6 @@ describe('serious disagreement and linear weights (−3…+3 scale)', () => {
 
   it('counts same, small and large gaps with their direction', () => {
     const r = agreement(['0', '1', '1', '-2', '3', '0'], ['0', '2', '0', '1', '3', '-3'], 'ordinal', ['-3', '-2', '-1', '0', '1', '2', '3']);
-    expect(r.gaps).toEqual({ same: 2, secondHigherSmall: 1, secondLowerSmall: 1, secondHigherLarge: 1, secondLowerLarge: 1 });
+    expect(r.gaps).toEqual({ same: 2, secondHigherSmall: 1, secondLowerSmall: 1, secondHigherLarge: 1, secondLowerLarge: 1, fractional: 0 });
   });
 });

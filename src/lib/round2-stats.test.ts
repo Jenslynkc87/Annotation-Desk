@@ -370,11 +370,12 @@ describe('second look (reviewer, October 23, 2026)', () => {
     const run = mkRun(p, docs.map((d) => d.id));
     const results = docs.map((d, i) => mkResult('r', d.id, 1, { relevant: i % 3 || i === 4 ? 'true' : 'false', tone: tones[(i + Number(i % 5 === 0)) % 3] }));
     const rows = agreementForRun(run, docs, [run], results);
-    expect(rows.map((r) => [r.source, r.compared_with, r.stats.level, r.stats.n, r.stats.leftOut.n])).toEqual([
-      ['model', 'relevant_gold', 'nominal', 12, 28],
-      ['model', 'tone_gold', 'nominal', 12, 28],
-      ['model', 'tone_coder2', 'nominal', 12, 28],
-      ['tone_gold', 'tone_coder2', 'nominal', 12, 28],
+    // (Round 3, F10: an "NA" cell is a blank cell, so it is neither labelled nor left out; it was 28 left out before.)
+    expect(rows.map((r) => [r.source, r.compared_with, r.stats.level, r.stats.n, r.nLabelled, r.stats.leftOut.n])).toEqual([
+      ['model', 'relevant_gold', 'nominal', 12, 12, 0],
+      ['model', 'tone_gold', 'nominal', 12, 12, 0],
+      ['model', 'tone_coder2', 'nominal', 12, 12, 0],
+      ['tone_gold', 'tone_coder2', 'nominal', 12, 12, 0],
     ]);
     // The same figures as for the twelve labelled texts alone.
     const twelve = docs.slice(0, 12);
