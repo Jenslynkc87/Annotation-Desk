@@ -305,3 +305,105 @@ describe('samples and studies', () => {
     expect([now.status, now.error?.startsWith('Refused by the requested model')]).toEqual(['error', true]);
   });
 });
+
+// ---------- second round (after the verification of October 23, 2026) ----------
+
+describe('the early stop (second round)', () => {
+  const run = async (n: number, fail: () => never, retry = false) => {
+    const ids = await freshStudy(n);
+    const send = vi.spyOn(anthropicAdapter, 'send');
+    if (retry) {
+      send.mockImplementation(async () => outcome('', 'refusal'));
+      await store.startRun({ docIds: ids, scope: 'all' });
+      send.mockClear();
+    }
+    send.mockClear();
+    send.mockImplementation(async () => fail());
+    if (retry) await store.retryFailed(store.getState().runs.at(-1)!.id);
+    else await store.startRun({ docIds: ids, scope: 'all' });
+    return send.mock.calls.length;
+  };
+  const most = 3 + 2 * DEFAULT_RUN_OPTIONS.concurrency;
+  it('stops when the provider can’t be reached at all, or the account has no credit', async () => {
+    expect(await run(40, () => { throw new Error('Connection error.'); })).toBeLessThanOrEqual(most);
+    expect(await run(40, () => { throw Object.assign(apiError(429, 'You exceeded your current quota'), { code: 'insufficient_quota' }); })).toBeLessThanOrEqual(most);
+  });
+  it('goes on past texts the provider rejects one by one (flagged), and past 400s in a retry', async () => {
+    expect(await run(12, () => { throw Object.assign(apiError(400, 'Invalid prompt: your prompt was flagged as potentially violating our usage policy'), { code: 'invalid_prompt' }); })).toBe(12);
+    expect(await run(12, () => { throw apiError(400, 'something about this request'); }, true)).toBe(12);
+  });
+});
+
+describe('Remaining and uploads of unknown outcome', () => {
+  it('holds back the texts of a batch upload that may have reached the provider', async () => {
+    const ids = await freshStudy(3);
+    store.updateStudy((s) => void (s.options.batch = true));
+    vi.spyOn(anthropicAdapter, 'submitBatch').mockRejectedValue(new Error('Connection error.'));
+    vi.spyOn(anthropicAdapter, 'listRecentBatches').mockResolvedValue([]);
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const st = store.getState();
+    const r = store.remainingDocs(store.currentStudy()!, st.docs, st.runs, st.results);
+    expect([r.todo.length, r.unknown, r.unknownRuns]).toEqual([0, 3, [st.runs.at(-1)!.number]]);
+  });
+  it('record a found retry batch as that retry', async () => {
+    const ids = await freshStudy(2);
+    store.updateStudy((s) => void (s.options.batch = true));
+    const submit = vi.spyOn(anthropicAdapter, 'submitBatch').mockResolvedValue({ batchId: 'b1' });
+    vi.spyOn(anthropicAdapter, 'checkBatch').mockResolvedValue({ status: 'ended', done: true, total: 2, completed: 0, failed: 2, endedAt: '2026-10-23T01:00:00.000Z' });
+    vi.spyOn(anthropicAdapter, 'fetchBatchResults').mockImplementation(async () => {
+      const map = store.getState().runs.at(-1)!.batch!.map;
+      return Object.keys(map).map((customId) => ({ customId, ok: false as const, error: 'overloaded' }));
+    });
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const runId = store.getState().runs.at(-1)!.id;
+    await store.checkBatch(runId);
+    // The retry's upload gets no answer and the batch can't be found yet.
+    submit.mockRejectedValue(new Error('Connection error.'));
+    const list = vi.spyOn(anthropicAdapter, 'listRecentBatches').mockResolvedValue([]);
+    await store.retryFailed(runId);
+    expect(store.getState().runs.find((r) => r.id === runId)!.batch!.uploadUnknown?.retryAt).toBeTruthy();
+    list.mockResolvedValue([{ batchId: 'b2', createdAt: new Date().toISOString(), requests: 2 }]);
+    await store.retryFailed(runId);
+    const run = store.getState().runs.find((r) => r.id === runId)!;
+    expect([run.status, run.retries?.map((x) => [x.requests, x.asBatch])]).toEqual(['submitted', [[2, true]]]);
+    expect(run.finishedAt).toBeNull();
+  });
+});
+
+describe('replaced attempts and old results', () => {
+  it('keep the replaced attempts’ tokens with the results, so an interrupted retry loses none', async () => {
+    const ids = await freshStudy(1);
+    vi.spyOn(anthropicAdapter, 'send').mockImplementation(async () => outcome('', 'refusal'));
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const r = store.getState().results.at(-1)!;
+    // A retry's answer stored, then the page closed before the run was saved again.
+    await dbApi.putResult({ ...r, status: 'ok', rawText: 'fine', values: { response: 'fine' }, requestedAt: '2026-10-23T02:00:00.000Z', responseId: 'x2' }, null);
+    await store.selectStudy(store.currentStudy()!.id);
+    const run = store.getState().runs.at(-1)!;
+    expect(run.replaced).toEqual({ requests: 1, usage });
+  });
+  it('re-send an answer an older version stored as usable that today counts as failed', async () => {
+    const ids = await freshStudy(1);
+    vi.spyOn(anthropicAdapter, 'send').mockImplementation(async () => outcome('fine'));
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const r = store.getState().results.at(-1)!;
+    await dbApi.putResult({ ...r, status: 'ok', parseError: 'Answer contains JSON that could not be read' }, null);
+    await store.selectStudy(store.currentStudy()!.id);
+    const send = vi.spyOn(anthropicAdapter, 'send').mockImplementation(async () => outcome('fine'));
+    send.mockClear();
+    await store.retryFailed(store.getState().runs.at(-1)!.id);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it('give a prompt that only renames a field the earlier run’s version and hash', async () => {
+    const ids = await freshStudy(1, (p) => {
+      p.outputMode = 'structured';
+      p.variables = [ordinal('race')];
+    });
+    vi.spyOn(anthropicAdapter, 'send').mockImplementation(async () => outcome('{"rationale":"r","race":1}'));
+    await store.startRun({ docIds: ids, scope: 'all' });
+    store.updateStudy((s) => void (s.prompt.variables[0].label = 'Race score'));
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const [a, b] = store.getState().runs.slice(-2);
+    expect([b.snapshot.promptVersion, b.snapshot.promptHash]).toEqual([a.snapshot.promptVersion, a.snapshot.promptHash]);
+  });
+});

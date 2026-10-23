@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import * as dbApi from './db';
 import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
-import { describeApiError, isPermanentError, provider } from './providers';
+import { describeApiError, isConnectionError, isPermanentError, provider } from './providers';
 import { rejectsTemperature } from './providers/anthropic';
 import type { BatchLine, BatchStatus, CallOutcome, ModelInfo } from './providers/types';
 import { ZERO_USAGE } from './providers/types';
@@ -129,19 +129,25 @@ export function currentStudy(s: State = state): Study | null {
 
 /** A message at the bottom of the page. `sticky`: stays until dismissed (for something that must not be missed). */
 export function toast(text: string, kind: Toast['kind'] = 'info', sticky = false) {
+  showToast(text, kind, sticky);
+}
+
+/** The same, returning the message's id (to dismiss it later). */
+function showToast(text: string, kind: Toast['kind'], sticky: boolean): string {
   const t = { id: uid(), kind, text };
   set((s) => ({ toasts: [...s.toasts, t] }));
   if (!sticky) setTimeout(() => dismissToast(t.id), kind === 'error' ? 9000 : 4500);
+  return t.id;
 }
 
 /** For storage failures: browsers report a full disk or quota as QuotaExceededError, often without a message. */
 export function storageError(e: unknown): string {
   return isQuotaError(e)
-    ? "this browser's storage is full (free disk space, or export a backup and delete old runs or studies)"
+    ? "this browser's storage is full; free disk space, or export a backup and delete old runs or studies"
     : errorMessage(e) || 'the browser refused to save it';
 }
 
-function isQuotaError(e: unknown): boolean {
+export function isQuotaError(e: unknown): boolean {
   const name = (e as { name?: string } | null)?.name ?? '';
   return name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED' || /quota/i.test(errorMessage(e));
 }
@@ -207,19 +213,22 @@ export async function init() {
 }
 
 export async function refreshStudies() {
-  // (A study still marked as being imported is a partial import: never listed, removed at the next start.)
-  set({ studies: (await dbApi.listStudies()).filter((s) => !s.importIncomplete) });
+  // (A study still marked as being imported is a partial import: never listed, removed at the next start. A study
+  // with a change not yet saved keeps the version in memory, which is saved next.)
+  const stored = (await dbApi.listStudies()).filter((s) => !s.importIncomplete);
+  set((st) => ({ studies: stored.map((s) => (dirty.has(s.id) ? (st.studies.find((x) => x.id === s.id) ?? s) : s)) }));
 }
 
-export async function selectStudy(id: string) {
-  if (isBusy()) {
-    toast('Finish or cancel the running job before switching studies.', 'error');
-    return;
-  }
-  const data = await dbApi.loadStudyData(id);
-  // Older versions stored some answers as "ok" that count as failed now: apply today's rules (in memory).
-  const runById = new Map(data.runs.map((r) => [r.id, r]));
-  for (const r of data.results) {
+/**
+ * Today's rules for results stored by older versions as "ok" that count as failed now (in memory; the stored record
+ * is not changed): answers of the refusal fallback (another model), unreadable, cut-off, refused or empty answers,
+ * unreadable JSON in plain-text runs. A refused or cut-off answer is reported once, as such, not also as a JSON error.
+ */
+function applyTodaysRules(results: Result[], runs: Run[]) {
+  const runById = new Map(runs.map((r) => [r.id, r]));
+  for (const r of results) {
+    const incomplete = incompleteAnswer(r.stopReason) || (!!r.stopReason && !r.rawText.trim());
+    if (incomplete && r.parseError) r.parseError = null;
     if (r.status !== 'ok') continue;
     const legacy = r as Result & { fallback?: string };
     const prompt = runById.get(r.runId)?.snapshot.prompt;
@@ -237,6 +246,34 @@ export async function selectStudy(id: string) {
       if (parseError) [r.status, r.parseError] = ['error', parseError];
     }
   }
+}
+
+/** Failed attempts that retries replaced, from the results (each keeps its earlier attempts' token use). */
+function replacedFrom(results: Result[]): Run['replaced'] {
+  let requests = 0;
+  const usage = { ...ZERO_USAGE };
+  for (const r of results) {
+    requests += Math.max(0, (r.attempt ?? 1) - 1);
+    for (const k of Object.keys(usage) as (keyof Usage)[]) usage[k] += r.replacedUsage?.[k] ?? 0;
+  }
+  return requests ? { requests, usage } : undefined;
+}
+
+export async function selectStudy(id: string) {
+  if (isBusy()) {
+    toast('Finish or cancel the running job before switching studies.', 'error');
+    return;
+  }
+  const data = await dbApi.loadStudyData(id);
+  // Older versions stored some answers as "ok" that count as failed now: apply today's rules (in memory).
+  applyTodaysRules(data.results, data.runs);
+  // Replaced attempts (and their tokens) are kept with the results, so the run's record of them is always complete.
+  const byRun = new Map<string, Result[]>();
+  for (const r of data.results) byRun.set(r.runId, [...(byRun.get(r.runId) ?? []), r]);
+  for (const r of data.runs) {
+    const replaced = replacedFrom(byRun.get(r.id) ?? []) ?? (r.replaced?.requests ? r.replaced : undefined);
+    if (replaced) r.replaced = replaced;
+  }
   // Runs left "running" by a closed tab can't continue: mark them interrupted. (Another open tab would hold
   // the app, so a run marked "running" here is not being sent anywhere.) A batch run whose upload was cut off
   // may or may not have reached the provider.
@@ -250,18 +287,17 @@ export async function selectStudy(id: string) {
         if (!retry.requests) r.retries = r.retries!.slice(0, -1);
       }
       r.status = r.resumeStatus ?? 'cancelled';
-      r.error = r.resumeStatus ? r.resumeError ?? null : 'Interrupted (the page was closed or reloaded while running). Completed results were kept.';
-      if (r.resumeStatus) toast(`The retry in run #${r.number} was interrupted (the page was closed or reloaded). Completed results were kept.`);
+      r.error = r.resumeStatus
+        ? r.resumeError ?? null
+        : 'Interrupted: the run stopped without being saved as finished (the page was closed or reloaded, or the browser’s storage was full). Completed results were kept.';
+      if (r.resumeStatus) toast(`The retry in run #${r.number} was interrupted (the page was closed or reloaded, or storage was full). Completed results were kept.`);
       delete r.resumeStatus;
       delete r.resumeError;
       r.finishedAt ??= nowIso();
       changed = true;
     }
     if (r.batch?.uploading) {
-      r.batch.uploadUnknown = r.batch.uploading;
-      delete r.batch.uploading;
-      if (r.status === 'submitted' && !batchParts(r).some((p) => p.status === 'submitted')) r.status = batchParts(r).some((p) => p.status === 'collected') ? 'completed' : 'failed';
-      r.error = UPLOAD_UNKNOWN;
+      markUploadUnknown(r);
       changed = true;
     }
     if (changed) {
@@ -294,6 +330,9 @@ export function updateStudy(mutate: (s: Study) => void) {
   saveTimer = setTimeout(flushStudies, 400);
 }
 
+// The sticky "not saved" message, dismissed once the change is saved.
+let notSavedToast = '';
+
 async function flushStudies() {
   saveTimer = null;
   const ids = [...dirty];
@@ -310,7 +349,12 @@ async function flushStudies() {
       failed = storageError(e);
     }
   }
-  if (failed && !state.saveError) toast(`Your latest changes to the study could not be saved: ${failed}. They are tried again every few seconds; until then they are lost if this tab is closed.`, 'error', true);
+  if (failed && !state.saveError) notSavedToast = showToast(`Your latest changes to the study could not be saved: ${failed}. They are tried again every few seconds; until then they are lost if this tab is closed.`, 'error', true);
+  if (!failed && notSavedToast) {
+    dismissToast(notSavedToast);
+    notSavedToast = '';
+    toast('Your changes to the study are saved now.', 'success');
+  }
   set({ saving: false, saveError: failed });
   if (failed) saveTimer = setTimeout(flushStudies, 5000);
 }
@@ -320,7 +364,12 @@ if (typeof window !== 'undefined') window.addEventListener('pagehide', () => voi
 
 export async function createStudy(name: string, subject?: PromptSpec['subject']) {
   const s = newStudy(name, subject);
-  await dbApi.putStudy(s);
+  try {
+    await dbApi.putStudy(s);
+  } catch (e) {
+    toast(`The study was not created: ${storageError(e)}.`, 'error', true);
+    return;
+  }
   set((st) => ({ studies: [s, ...st.studies] }));
   await selectStudy(s.id);
 }
@@ -329,9 +378,12 @@ export async function duplicateStudy(withCorpus: boolean) {
   const cur = currentStudy();
   if (!cur) return;
   const copy: Study = { ...structuredClone(cur), id: uid(), name: `${cur.name} (copy)`, createdAt: nowIso(), updatedAt: nowIso() };
-  await dbApi.putStudy(copy);
-  if (withCorpus) {
-    await dbApi.putDocs(state.docs.map((d) => ({ ...d, id: uid(), studyId: copy.id })));
+  try {
+    // The copy and its texts in one transaction: both, or (e.g. storage full) neither.
+    await dbApi.putDocsAndStudy(withCorpus ? state.docs.map((d) => ({ ...d, id: uid(), studyId: copy.id })) : [], copy);
+  } catch (e) {
+    toast(`The study was not duplicated: ${storageError(e)}.`, 'error', true);
+    return;
   }
   set((st) => ({ studies: [copy, ...st.studies] }));
   await selectStudy(copy.id);
@@ -408,6 +460,11 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
     await dbApi.putDocs(docs);
   } catch (e) {
     toast(`Nothing was added: ${storageError(e)}.`, 'error', true);
+    return;
+  }
+  // (Another study may have been opened while they were being saved: they belong to this one, not the one in view.)
+  if (state.currentId !== cur.id) {
+    toast(`Added ${docs.length} ${docs.length === 1 ? w.one : w.many} to “${cur.name}” (not to the study now open).`, 'success', true);
     return;
   }
   set((s) => ({ docs: [...s.docs, ...docs] }));
@@ -595,9 +652,10 @@ export function versionFor(prompt: PromptSpec, runs: Run[]): number {
 
 /**
  * What "Remaining" sends: the texts without a usable result from a run with the current prompt, model and effort,
- * leaving out those still waiting in a batch with them (sending them again would pay twice).
+ * leaving out those still waiting in a batch with them, and those of a batch upload whose outcome is unknown
+ * (sending them again could pay twice: Retry failed on that run looks for its batch first).
  */
-export function remainingDocs(st: Study, docs: Doc[], runs: Run[], results: Result[]): { todo: Doc[]; waiting: number } {
+export function remainingDocs(st: Study, docs: Doc[], runs: Run[], results: Result[]): { todo: Doc[]; waiting: number; unknown: number; unknownRuns: number[] } {
   const key = promptKey(st.prompt);
   const same = new Set(
     runs
@@ -607,15 +665,25 @@ export function remainingDocs(st: Study, docs: Doc[], runs: Run[], results: Resu
   );
   const done = new Set(results.filter((r) => r.status === 'ok' && same.has(r.runId)).map((r) => r.docId));
   const pending = new Set(runs.filter((r) => same.has(r.id) && (r.status === 'submitted' || r.status === 'running')).flatMap((r) => r.docIds));
+  const unsure = runs.filter((r) => same.has(r.id) && (r.batch?.uploadUnknown || r.batch?.uploading));
+  const unknownIds = new Set(unsure.flatMap((r) => r.docIds));
   const left = docs.filter((d) => !done.has(d.id));
-  return { todo: left.filter((d) => !pending.has(d.id)), waiting: left.filter((d) => pending.has(d.id)).length };
+  return {
+    todo: left.filter((d) => !pending.has(d.id) && !unknownIds.has(d.id)),
+    waiting: left.filter((d) => pending.has(d.id)).length,
+    unknown: left.filter((d) => !pending.has(d.id) && unknownIds.has(d.id)).length,
+    unknownRuns: unsure.map((r) => r.number),
+  };
 }
 
 export async function buildSnapshot(st: Study, batch = false): Promise<RunSnapshot> {
-  const promptHash = await promptFingerprint(st);
+  // A prompt that sends the same as an earlier run's keeps that run's version and hash (only a display name differs).
+  const key = promptKey(st.prompt);
+  const promptHash = state.runs.find((r) => promptKey(r.snapshot.prompt) === key)?.snapshot.promptHash ?? (await promptFingerprint(st));
   const outputSchema = buildOutputSchema(st.prompt);
   const adapter = provider(st.model.provider);
   const model = structuredClone(st.model);
+  delete (model as { refusalFallback?: unknown }).refusalFallback; // a setting removed in October 2026
   // Record only what is sent: these models take no temperature.
   if (model.provider === 'anthropic' && rejectsTemperature(model.model)) model.temperature = null;
   // Anthropic cache lifetime: 5 minutes between immediate requests; 1 hour for batches, which are
@@ -688,14 +756,6 @@ function makeResult(
 
 function incompleteMessage(rawText: string, stopReason: string): string {
   return `${rawText.trim() ? 'Incomplete answer' : 'Empty response'} (stop reason: ${stopReason || 'none'})`;
-}
-
-/** Add a replaced attempt's token use to the run's record of replaced attempts. */
-function addReplaced(run: Run, prev: Result) {
-  const r = run.replaced ?? { requests: 0, usage: { ...ZERO_USAGE } };
-  r.requests++;
-  for (const k of Object.keys(r.usage) as (keyof Usage)[]) r.usage[k] += prev.usage[k] ?? 0;
-  run.replaced = r;
 }
 
 /** Store a run. Its name is kept as stored (it may have been renamed while the run was going), unless renaming. */
@@ -854,6 +914,22 @@ export function batchParts(run: Run): BatchPart[] {
   return run.batch.parts ?? [{ batchId: run.batch.batchId, inputFileId: run.batch.inputFileId, status, lastStatus: run.batch.lastStatus }];
 }
 
+/**
+ * A batch upload cut off before the provider confirmed it (the page closed, or the run couldn't be saved after it):
+ * recorded as an upload of unknown outcome, and the run (with nothing else waiting) back to how it was before.
+ */
+function markUploadUnknown(r: Run) {
+  if (!r.batch?.uploading) return;
+  const attempt = r.batch.uploading;
+  r.batch.uploadUnknown = attempt;
+  delete r.batch.uploading;
+  if (r.status === 'submitted' && !batchParts(r).some((p) => p.status === 'submitted')) {
+    r.status = batchParts(r).some((p) => p.status === 'collected') ? 'completed' : 'failed';
+    r.finishedAt = attempt.finishedBefore ?? r.finishedAt ?? nowIso();
+  }
+  r.error = UPLOAD_UNKNOWN;
+}
+
 /** Shown on a run whose batch upload may or may not have reached the provider. */
 const UPLOAD_UNKNOWN =
   'A batch upload of this run was cut off (connection lost, or the page closed) before the provider confirmed it, so it may or may not have arrived. Retry failed looks for it at the provider first.';
@@ -878,8 +954,9 @@ function refusedByProvider(e: unknown): boolean {
 async function findUploadedBatch(p: ProviderId, key: string, attempt: UploadAttempt): Promise<{ batchId: string; inputFileId?: string } | null> {
   try {
     const known = new Set((await dbApi.listAllRuns()).flatMap((r) => batchParts(r).map((x) => x.batchId)));
+    // (OpenAI lists a batch with 0 requests while it is still being validated.)
     const found = (await provider(p).listRecentBatches(key, attempt.since)).filter(
-      (b) => !known.has(b.batchId) && (attempt.inputFileId ? b.inputFileId === attempt.inputFileId : b.requests === attempt.requests),
+      (b) => !known.has(b.batchId) && (attempt.inputFileId ? b.inputFileId === attempt.inputFileId : b.requests === attempt.requests || (p === 'openai' && b.requests === 0)),
     );
     return found.length === 1 ? { batchId: found[0].batchId, inputFileId: found[0].inputFileId } : null;
   } catch {
@@ -914,6 +991,7 @@ async function submitBatches(
   let requestsSent = 0;
   let problem = '';
   let unknown: UploadAttempt | null = null;
+  let cancelFailed = '';
   cancelRequested.delete(run.id);
   uploadingRun = run.id;
   try {
@@ -921,14 +999,14 @@ async function submitBatches(
       if (cancelRequested.has(run.id)) break;
       const which = groups.length > 1 ? `batch ${g + 1} of ${groups.length}` : 'a batch';
       set({ submitting: `Uploading ${which} (${group.length.toLocaleString()} request${group.length === 1 ? '' : 's'}) to ${adapter.label}…` });
-      const attempt: UploadAttempt = { since: nowIso(), requests: group.length };
+      const attempt: UploadAttempt = { since: nowIso(), requests: group.length, finishedBefore: retry ? retry.before.finishedAt : null, ...(retry ? { retryAt: retry.at } : {}) };
       try {
         record({ uploading: attempt });
         run.status = 'submitted';
         run.finishedAt = null;
         await saveRun(run);
       } catch (e) {
-        problem = `${sent ? 'The remaining batches were not sent' : 'Nothing was sent'}: the run could not be saved (${storageError(e)}).`;
+        problem = `${sent ? 'The remaining batches were not sent' : 'Nothing was sent'}: the run could not be saved, because ${storageError(e)}.`;
         break;
       }
       let handle: { batchId: string; inputFileId?: string } | null;
@@ -959,15 +1037,24 @@ async function submitBatches(
         else run.retries = [...(run.retries ?? []), { at: retry.at, requests: requestsSent, asBatch: true }];
       }
       // Cancelled while this batch was going up: stop it right away (what finished before is still collected).
-      if (cancelRequested.has(run.id)) await adapter.cancelBatch(key, handle.batchId).catch(() => undefined);
+      if (cancelRequested.has(run.id)) {
+        try {
+          await adapter.cancelBatch(key, handle.batchId);
+        } catch (e) {
+          const ended = await adapter.checkBatch(key, handle.batchId).then((st) => st.done, () => false);
+          if (!ended) cancelFailed = describeApiError(e).replace(/\.$/, '');
+        }
+      }
       try {
         record({});
         await saveRun(run);
       } catch (e) {
+        // (The record before the upload stays, marked as an upload under way: after a reload, Retry failed finds the
+        // batch at the provider. Until then this page keeps it and collects it.)
         problem = `${parts
           .slice(earlier.length)
           .map((x) => x.batchId)
-          .join(', ')} went up to ${adapter.label}, but the run could not be saved (${storageError(e)}), so its results can't be collected yet. Free some space and reload the page: the app then finds the batch at the provider (Retry failed). Nothing else was sent.`;
+          .join(', ')} went up to ${adapter.label}, but the run could not be saved, because ${storageError(e)}. This page still collects its results while it stays open; after a reload, Retry failed finds the batch at the provider. Nothing else was sent.`;
         break;
       }
     }
@@ -982,7 +1069,7 @@ async function submitBatches(
       record({ uploadUnknown: unknown });
       run.status = sent || parts.some((x) => x.status === 'submitted') ? 'submitted' : retry ? retry.before.status : 'failed';
       run.error = UPLOAD_UNKNOWN;
-      run.finishedAt = run.status === 'submitted' ? null : nowIso();
+      run.finishedAt = run.status === 'submitted' ? null : (retry?.before.finishedAt ?? nowIso());
       await saveRun(run);
     } else if (!problem.includes('could not be saved')) {
       if (!sent && !retry) {
@@ -998,10 +1085,12 @@ async function submitBatches(
       }
     }
   } catch (e) {
-    problem ||= `The run could not be saved: ${storageError(e)}.`;
+    problem ||= `The run could not be saved, because ${storageError(e)}.`;
   }
   if (problem) toast(problem, 'error', true);
-  else if (cancelled) toast(`Upload stopped: ${sent} of ${groups.length} batches had gone up and ${sent === 1 ? 'was' : 'were'} cancelled at ${adapter.label}. Results finished before cancelling are still collected.`, 'error', true);
+  else if (cancelled && cancelFailed) {
+    toast(`Upload stopped: ${sent} of ${groups.length} batches had gone up. The last one could not be cancelled (${cancelFailed}): it runs on at ${adapter.label} and its results are collected into run #${run.number}.`, 'error', true);
+  } else if (cancelled) toast(`Upload stopped: ${sent} of ${groups.length} batches had gone up and ${sent === 1 ? 'was' : 'were'} cancelled at ${adapter.label}. Results finished before cancelling are still collected.`, 'error', true);
   else if (sent === groups.length) {
     toast(`${sent > 1 ? `${sent} batches` : 'Batch'} submitted (run #${run.number}). Results usually arrive within an hour; this page checks every minute while open.`, 'success');
   }
@@ -1025,14 +1114,25 @@ function buildTasks(run: Run, include: (docId: string, replicate: number) => boo
   return tasks;
 }
 
+/** HTTP 400 messages about one text rather than the settings: too long for the model, or flagged by the provider. */
+const PER_TEXT_400 = /too long|context length|context window|context limit|maximum context|too many tokens|invalid_prompt|flagged|usage polic|safety|content (policy|filter)/i;
+
 /**
- * An error that points to the settings shared by every request (a wrong key, model or parameter, no credit), not
- * to one text: an HTTP 400, 401, 403 or 404, except a text too long for the model.
+ * An error that says nothing about one text, so it would hit every request the same way: no connection to the
+ * provider at all (offline, an extension or firewall blocking it), an exhausted account (OpenAI's 429
+ * insufficient_quota), or the settings shared by every request (HTTP 401, 403, 404, and 400 except the messages
+ * about one text). In a retry the settings already worked for the run's other answers, so a 400 there is about
+ * its text.
  */
-function settingsError(e: unknown): boolean {
-  const status = (e as { status?: unknown } | null)?.status;
-  if (typeof status !== 'number' || ![400, 401, 403, 404].includes(status)) return false;
-  return !/too long|context length|context window|maximum context|too many tokens/i.test(describeApiError(e));
+function sharedFailure(e: unknown, inRetry: boolean): boolean {
+  if (isConnectionError(e)) return true;
+  const err = e as { status?: unknown; code?: unknown } | null;
+  const status = err?.status;
+  if (typeof status !== 'number') return false;
+  const text = `${String(err?.code ?? '')} ${describeApiError(e)}`;
+  if (status === 429) return /insufficient_quota|billing|credit/i.test(text);
+  if ([401, 403, 404].includes(status)) return true;
+  return status === 400 && !inRetry && !PER_TEXT_400.test(text);
 }
 
 type Retry = { at: string; before: Pick<Run, 'status' | 'error' | 'finishedAt'> };
@@ -1047,12 +1147,11 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
   const job: Job = { runId: run.id, total: tasks.length, done: 0, failed: 0, abort: new AbortController() };
   set({ job });
   const signal = job.abort.signal;
-  // Stopped because of the settings: no further requests are sent; those already under way finish and are kept.
+  // Stopped because every request fails the same way: no further requests are sent; those under way finish and are kept.
   let stopping = false;
-  // Requests answered (stored) so far, and how many of them failed because of the settings.
+  // Requests answered (stored) so far, and how many of them failed in a way that would hit every request.
   let answered = 0;
-  let settingsFailures = 0;
-  let sent = 0;
+  let sharedFailures = 0;
   let next = 0;
   const worker = async () => {
     try {
@@ -1070,52 +1169,49 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
       const started = performance.now();
       let outcome: CallOutcome | null = null;
       let error: string | null = null;
-      let fromSettings = false;
-      sent++;
+      let shared = false;
       try {
         outcome = await adapter.send(key, snapshot.requestBase, t.part, signal);
       } catch (e) {
         if (signal.aborted) return;
         error = describeApiError(e);
-        fromSettings = settingsError(e);
+        shared = sharedFailure(e, !!retry);
       }
       const result = makeResult(run, t.doc, t.replicate, requestedAt, outcome, error, Math.round(performance.now() - started));
       const log: ResultLog = { id: result.id, runId: run.id, studyId: run.studyId, requestPart: t.part, response: outcome?.response ?? { error } };
-      let replaced: Result | null;
       try {
-        replaced = await dbApi.putResult(result, log);
+        await dbApi.putResult(result, log);
       } catch (e) {
         // Without a saved result, sending more would only pay for answers that are lost.
         const others = Math.min(snapshot.options.concurrency, tasks.length) - 1;
         if (!signal.aborted) {
-          run.error = `Stopped: a result could not be saved in this browser (${storageError(e)}).${others > 0 ? ` Answers to up to ${others} other requests that were under way could not be kept either.` : ''}`;
+          run.error = `Stopped: a result could not be saved in this browser, because ${storageError(e)}.${others > 0 ? ` Answers to up to ${others} other requests that were under way could not be kept either.` : ''}`;
         }
         job.abort.abort();
         return;
       }
-      if (replaced) addReplaced(run, replaced);
       queueResult(result);
       const failed = result.status === 'error';
       set((s) => (s.job ? { job: { ...s.job, done: s.job.done + 1, failed: s.job.failed + (failed ? 1 : 0) } } : {}));
-      // Stop when every request so far failed because of the settings (almost certainly a configuration problem).
-      // Answers that came back refused, cut off or unreadable say something about one text, not the settings.
+      // Stop when every request so far failed in a way that would hit every request (the settings, the connection,
+      // the account). Answers that came back refused, cut off or unreadable say something about one text.
       answered++;
-      if (fromSettings) settingsFailures++;
-      if (!stopping && answered >= 3 && settingsFailures === answered) {
+      if (shared) sharedFailures++;
+      if (!stopping && answered >= 3 && sharedFailures === answered) {
         stopping = true;
-        run.error = `${retry ? 'Retry stopped' : 'Stopped'}: the first ${answered} requests all failed with an error that points to the settings rather than the ${words(snapshot.prompt).many}: ${result.error}`;
+        run.error = `${retry ? 'Retry stopped' : 'Stopped'}: the first ${answered} requests all failed in a way that points to the settings, the connection or the account rather than the ${words(snapshot.prompt).many}: ${result.error}`;
       }
     }
   };
   try {
     await Promise.all(Array.from({ length: Math.max(1, Math.min(snapshot.options.concurrency, tasks.length)) }, worker));
   } finally {
-    await finishTasks(run, job, doneMessage, { retry, stopping, sent });
+    await finishTasks(run, job, doneMessage, { retry, stopping });
   }
 }
 
-async function finishTasks(run: Run, job: Job, doneMessage: string, how: { retry?: Retry; stopping: boolean; sent: number }) {
-  const { retry, stopping, sent } = how;
+async function finishTasks(run: Run, job: Job, doneMessage: string, how: { retry?: Retry; stopping: boolean }) {
+  const { retry, stopping } = how;
   const signal = job.abort.signal;
   flushResults();
   const final = getState().job;
@@ -1123,10 +1219,18 @@ async function finishTasks(run: Run, job: Job, doneMessage: string, how: { retry
   const stoppedByErrors = stopping || (signal.aborted && !!run.error);
   run.status = !stopped ? 'completed' : retry ? retry.before.status : stoppedByErrors ? 'failed' : 'cancelled';
   if (retry && stopped && !stoppedByErrors) run.error = retry.before.error;
+  // Stored with the results, so complete whatever happened during the run.
+  const stored = await dbApi.getResultsForRun(run.id).catch(() => null);
+  if (stored) {
+    const replaced = replacedFrom(stored);
+    if (replaced) run.replaced = replaced;
+  }
   if (retry) {
-    // Record the requests actually sent (a retry stopped early sent fewer than it planned; none: no retry).
+    // Record the requests it re-sent: those answered (the same count as after a page closed during a retry; a
+    // retry stopped early sent fewer than it planned; none: no retry).
+    const resent = stored ? stored.filter((x) => x.requestedAt >= retry.at).length : (getState().job?.done ?? 0);
     const others = (run.retries ?? []).filter((x) => x.at !== retry.at);
-    run.retries = sent ? [...others, { at: retry.at, requests: sent }] : others;
+    run.retries = resent ? [...others, { at: retry.at, requests: resent }] : others;
   }
   delete run.resumeStatus;
   delete run.resumeError;
@@ -1188,6 +1292,8 @@ export async function retryFailed(runId: string) {
         run.status = 'submitted';
         run.error = null;
         run.finishedAt = null;
+        // An upload made by a retry is recorded as that retry.
+        if (unknown.retryAt) run.retries = [...(run.retries ?? []).filter((x) => x.at !== unknown.retryAt), { at: unknown.retryAt, requests: unknown.requests, asBatch: true }];
         await saveRun(run);
         toast(`Found the batch that was uploaded (${found.batchId}): its results are collected into run #${run.number}. Nothing was sent again.`, 'success', true);
         return;
@@ -1200,8 +1306,11 @@ export async function retryFailed(runId: string) {
       )
         return;
     }
-    // What is stored now (not what this page loaded): answers may have arrived since.
-    ok = new Set((await dbApi.getResultsForRun(runId)).filter((r) => r.status === 'ok').map((r) => r.id));
+    // What is stored now (not what this page loaded): answers may have arrived since. Read by today's rules, as the
+    // page shows them (an answer older versions stored as usable may count as failed now, and is re-sent).
+    const stored = await dbApi.getResultsForRun(runId);
+    applyTodaysRules(stored, state.runs);
+    ok = new Set(stored.filter((r) => r.status === 'ok').map((r) => r.id));
   } catch (e) {
     toast(`Could not prepare the retry: ${storageError(e)}`, 'error', true);
     return;
@@ -1217,7 +1326,8 @@ export async function retryFailed(runId: string) {
   if (run.mode === 'batch' && run.batch) {
     // A batch run's failed requests go out as a new batch (half price), collected into the same run.
     const map = { ...run.batch.map };
-    const n = (run.retries?.length ?? 0) + 1;
+    // (Named after the retry's time, so they never repeat an earlier retry's names.)
+    const n = Date.parse(retry.at).toString(36);
     const items = tasks.map((t, i) => {
       const customId = `t${n}_${i}`;
       map[customId] = [t.doc.id, t.replicate];
@@ -1254,14 +1364,22 @@ export function cancelJob() {
 
 export async function deleteRunById(runId: string) {
   if (uploadingRun === runId) return toast('A batch of this run is being uploaded: wait until that is done.', 'error');
-  await dbApi.deleteRun(runId);
+  try {
+    await dbApi.deleteRun(runId);
+  } catch (e) {
+    return toast(`The run was not deleted: ${storageError(e)}.`, 'error', true);
+  }
   set((s) => ({ runs: s.runs.filter((r) => r.id !== runId), results: s.results.filter((r) => r.runId !== runId) }));
 }
 
 export async function renameRun(runId: string, label: string) {
   const run = state.runs.find((r) => r.id === runId);
   if (!run) return;
-  await saveRun({ ...run, label }, true);
+  try {
+    await saveRun({ ...run, label }, true);
+  } catch (e) {
+    toast(`The run's label was not saved: ${storageError(e)}.`, 'error', true);
+  }
 }
 
 // ---------- batches ----------
@@ -1269,6 +1387,9 @@ export async function renameRun(runId: string, label: string) {
 const checking = new Set<string>();
 // Runs whose batch results could not be stored: said once per session, not at every quiet check.
 const saveFailureShown = new Set<string>();
+// Batches whose results could not be stored: not fetched again by the quiet checks (also when the run record
+// itself couldn't be saved with that mark), only when the owner checks by hand.
+const saveFailedBatches = new Set<string>();
 
 export async function checkBatch(runId: string, quiet = false) {
   const run = state.runs.find((r) => r.id === runId);
@@ -1291,11 +1412,10 @@ export async function checkBatch(runId: string, quiet = false) {
     const errors: string[] = [];
     let lookupError = '';
     let saveError = '';
-    const replaced: Result[] = [];
     for (const p of parts) {
       if (p.status !== 'submitted') continue;
       // Results that didn't fit: fetched again only when the owner asks (after freeing space).
-      if (p.saveFailed && quiet) continue;
+      if ((p.saveFailed || saveFailedBatches.has(p.batchId)) && quiet) continue;
       let st: BatchStatus;
       try {
         st = await adapter.checkBatch(key, p.batchId);
@@ -1320,19 +1440,20 @@ export async function checkBatch(runId: string, quiet = false) {
       if (!(await dbApi.getRun(runId))) break; // deleted meanwhile
       // The time the provider finished the batch (not when this page collected it).
       const endedAt = st.endedAt ?? nowIso();
-      let c: { ok: number; failed: number; replaced: Result[] };
+      let c: { ok: number; failed: number };
       try {
         c = await storeBatchResults(run, lines, p.submittedAt ?? run.createdAt, endedAt);
       } catch (e) {
         saveError = storageError(e);
         p.saveFailed = nowIso();
-        p.lastStatus = `${st.status} · results could not be saved: ${saveError}. Free space, then click Check`;
+        saveFailedBatches.add(p.batchId);
+        p.lastStatus = `${st.status}; the results could not be saved, because ${saveError}. Free space, then click Check`;
         continue;
       }
       delete p.saveFailed;
+      saveFailedBatches.delete(p.batchId);
       counts.ok += c.ok;
       counts.failed += c.failed;
-      replaced.push(...c.replaced);
       p.status = lines.length ? 'collected' : 'failed';
       p.endedAt = endedAt;
       if (!lines.length) p.error ??= `A batch ended with status "${st.status}" and returned no results.`;
@@ -1345,11 +1466,24 @@ export async function checkBatch(runId: string, quiet = false) {
       set((s) => ({ results: s.results.filter((r) => r.runId !== runId) }));
       return;
     }
-    const merged = batchParts(latest).map((p) => parts.find((q) => q.batchId === p.batchId) ?? p);
+    // The stored batches, updated, plus any this page knows of that the stored record lacks (a batch that went up
+    // when the run could not be saved after it): never dropped.
+    const merged = [
+      ...batchParts(latest).map((p) => parts.find((q) => q.batchId === p.batchId) ?? p),
+      ...parts.filter((q) => !batchParts(latest).some((p) => p.batchId === q.batchId)),
+    ];
     const waiting = merged.filter((p) => p.status === 'submitted');
     const lastStatus = waiting.map((p) => p.lastStatus).join('; ') || 'ended';
-    const updated: Run = { ...latest, batch: { ...latest.batch, parts: merged, lastStatus, lastCheckedAt: nowIso() } };
-    for (const r of replaced) addReplaced(updated, r);
+    const updated: Run = { ...latest, batch: { ...latest.batch, parts: merged, batchId: merged[0]?.batchId ?? latest.batch.batchId, lastStatus, lastCheckedAt: nowIso() } };
+    // An upload still marked as under way, but not going on in this page: its outcome is unknown.
+    if (updated.batch!.uploading && uploadingRun !== runId) {
+      updated.batch = { ...updated.batch!, uploadUnknown: updated.batch!.uploading };
+      delete updated.batch.uploading;
+    }
+    // Replaced attempts (and their tokens) are kept with the results.
+    const stored = await dbApi.getResultsForRun(runId).catch(() => null);
+    const replacedNow = stored ? replacedFrom(stored) : undefined;
+    if (replacedNow) updated.replaced = replacedNow;
     if (!waiting.length) {
       // Every batch is in. The run failed only if no batch returned anything.
       updated.status = merged.some((p) => p.status === 'collected') ? 'completed' : 'failed';
@@ -1357,14 +1491,19 @@ export async function checkBatch(runId: string, quiet = false) {
       // Errors of the batches sent since the last retry (a retry replaces what failed before it).
       const since = latest.retries?.at(-1)?.at ?? '';
       const current = merged.filter((p) => (p.submittedAt ?? '') >= since);
-      const allErrors = current.map((p) => p.error).filter((x): x is string => !!x);
+      const allErrors = [...(updated.batch!.uploadUnknown ? [UPLOAD_UNKNOWN] : []), ...current.map((p) => p.error).filter((x): x is string => !!x)];
       updated.error = allErrors.length ? allErrors.join(' ') : null;
       const mine = state.currentId === run.studyId ? state.results.filter((r) => r.runId === run.id) : null;
       const ok = mine ? mine.filter((r) => r.status === 'ok').length : counts.ok;
       const failed = mine ? mine.length - ok : counts.failed;
-      toast(updated.status === 'failed' ? `Batch run #${run.number}: ${updated.error}` : `Batch run #${run.number} finished: ${ok} ok, ${failed} failed.`, failed || errors.length ? 'error' : 'success');
+      const unsure = updated.batch!.uploadUnknown ? ' One of its batch uploads may or may not have reached the provider: Retry failed looks for it first.' : '';
+      toast(
+        updated.status === 'failed' ? `Batch run #${run.number}: ${updated.error}` : `Batch run #${run.number} finished: ${ok} ok, ${failed} failed.${unsure}`,
+        failed || errors.length || unsure ? 'error' : 'success',
+        !!unsure,
+      );
     } else if (saveError) {
-      if (!quiet || !saveFailureShown.has(runId)) toast(`Batch run #${run.number}: the results arrived but could not be saved (${saveError}). Free some space, then click Check on the run.`, 'error', true);
+      if (!quiet || !saveFailureShown.has(runId)) toast(`Batch run #${run.number}: the results arrived but could not be saved, because ${saveError}. Free some space, then click Check on the run.`, 'error', true);
       saveFailureShown.add(runId);
     } else if (!quiet) {
       toast(`Batch run #${run.number}: ${lastStatus}.`, lookupError ? 'error' : undefined);
@@ -1377,20 +1516,23 @@ export async function checkBatch(runId: string, quiet = false) {
   }
 }
 
-async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: string, completedAt: string): Promise<{ ok: number; failed: number; replaced: Result[] }> {
+async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: string, completedAt: string): Promise<{ ok: number; failed: number }> {
   // Read the run's own texts (not the open study's): the user may switch studies while results are collected.
   const docsById = new Map((await dbApi.getDocsForStudy(run.studyId)).map((d) => [d.id, d]));
   const adapter = provider(run.snapshot.model.provider);
-  const counts = { ok: 0, failed: 0, replaced: [] as Result[] };
+  const counts = { ok: 0, failed: 0 };
   const stored: Result[] = [];
   try {
     for (const line of lines) {
       const ref = run.batch!.map[line.customId];
       if (!ref) continue;
-      const doc = docsById.get(ref[0]);
-      if (!doc) continue; // text deleted since submission
+      // A text deleted since the batch went up: its answer is kept all the same (paid for, and in the token
+      // totals), like other results of deleted texts, just without the request (its text is gone).
+      const doc = docsById.get(ref[0]) ?? ({ id: ref[0] } as Doc);
       const result = makeResult(run, doc, ref[1], requestedAt, line.ok ? line.outcome : null, line.ok ? null : line.error, null, completedAt);
-      const part = adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc, run.snapshot.prompt.subject), run.snapshot.options, run.snapshot.model.model);
+      const part = docsById.has(ref[0])
+        ? adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc, run.snapshot.prompt.subject), run.snapshot.options, run.snapshot.model.model)
+        : { note: 'text deleted from the study before its answer was collected' };
       const log: ResultLog = {
         id: result.id,
         runId: run.id,
@@ -1398,8 +1540,7 @@ async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: stri
         requestPart: { custom_id: line.customId, ...part },
         response: line.ok ? line.outcome.response : line.response ?? { error: line.error },
       };
-      const prev = await dbApi.putResult(result, log);
-      if (prev) counts.replaced.push(prev);
+      await dbApi.putResult(result, log);
       stored.push(result);
       counts[result.status === 'ok' ? 'ok' : 'failed']++;
     }

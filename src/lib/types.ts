@@ -158,6 +158,10 @@ export interface UploadAttempt {
   requests: number;
   /** OpenAI: the uploaded input file, when the file arrived but starting the batch got no answer. */
   inputFileId?: string;
+  /** The upload was a "Retry failed" (when that retry began), so a batch found later is recorded as that retry. */
+  retryAt?: string;
+  /** The run's finish time before the upload (restored if the upload is cut off). */
+  finishedBefore?: string | null;
 }
 
 export interface BatchPart {
@@ -206,6 +210,8 @@ export interface Result {
   stopReason: string;
   /** How many times this request was sent (absent = 1); earlier attempts' logs are kept as `${id}#${n}`. */
   attempt?: number;
+  /** The token use of those earlier, replaced attempts (paid for too), kept with the result so it can't get lost. */
+  replacedUsage?: Usage;
 }
 
 /** Heavy per-result data, loaded on demand. */

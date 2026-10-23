@@ -30,6 +30,8 @@ export function db(): Promise<IDBPDatabase<DeskDB>> {
 
 export async function listStudies(): Promise<Study[]> {
   const all = await (await db()).getAll('studies');
+  // A setting removed in October 2026 (the refusal fallback), still stored in studies made before: never used again.
+  for (const s of all) delete (s.model as { refusalFallback?: unknown }).refusalFallback;
   return all.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
@@ -74,7 +76,8 @@ export async function getRun(id: string): Promise<Run | undefined> {
 /**
  * Store a result and its log. When a retry replaces an earlier, failed attempt stored under the same id, that
  * attempt's log is kept as `${id}#${attempt}` (with its outcome and token use), so every request sent stays on
- * record; the earlier result is returned (null if there was none). `r.attempt` is set accordingly.
+ * record, and its token use is added to `r.replacedUsage`; the earlier result is returned (null if there was none).
+ * `r.attempt` is set accordingly.
  */
 export async function putResult(r: Result, log: ResultLog | null): Promise<Result | null> {
   const tx = (await db()).transaction(['results', 'logs'], 'readwrite');
@@ -87,6 +90,8 @@ export async function putResult(r: Result, log: ResultLog | null): Promise<Resul
     replaced = prev;
     const n = prev.attempt ?? 1;
     r.attempt = n + 1;
+    const before = prev.replacedUsage;
+    r.replacedUsage = Object.fromEntries(Object.entries(prev.usage).map(([k, v]) => [k, v + (before?.[k as keyof typeof before] ?? 0)])) as Result['usage'];
     const prevLog = await logs.get(r.id);
     await logs.put({
       id: `${r.id}#${n}`,
@@ -105,7 +110,7 @@ export async function putResult(r: Result, log: ResultLog | null): Promise<Resul
         completedAt: prev.completedAt,
       },
     });
-  } else if (prev?.attempt) r.attempt = prev.attempt;
+  } else if (prev?.attempt) [r.attempt, r.replacedUsage] = [prev.attempt, prev.replacedUsage];
   await results.put(r);
   if (log) await logs.put(log);
   await tx.done;
