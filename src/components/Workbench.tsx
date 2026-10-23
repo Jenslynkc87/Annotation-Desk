@@ -1,20 +1,78 @@
 import { useEffect, useMemo, useState } from 'react';
-import { fieldLabel, isYesNoField, normalizeLabel, outputFields } from '../lib/prompt';
-import { batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
-import type { Doc } from '../lib/types';
+import { isMissingLabel } from '../lib/metrics';
+import { fieldLabel, isYesNoField, normalizeLabel, outputFields, toNumber } from '../lib/prompt';
+import { batchParts, batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
+import type { Doc, Variable } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
 import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
 import { words, isEntries } from '../lib/subject';
 import { CorpusImport } from './CorpusImport';
-import { CostEstimate, EstimateLink } from './CostEstimate';
+import { CostEstimate, EstimateLink, remainingRule } from './CostEstimate';
 import { DocDrawer } from './DocDrawer';
 import { SampleDialog } from './SampleDialog';
 import { SetupPanel } from './SetupPanel';
 import { Icon, Menu, NumberField } from './ui';
 
 const PAGE = 50;
+
+type StatusFilter = 'all' | 'done' | 'todo' | 'error' | 'mismatch';
+
+/**
+ * The list's filters that still apply: a metadata filter or a "Compare with" column on a column that is gone (e.g.
+ * after Remove a column…, or a label sheet that cleared it) or a value no longer offered is dropped, and with the
+ * compared column also "Disagree with" it.
+ */
+export function validFilters(
+  f: { metaFilter: string; compareCol: string; statusFilter: StatusFilter },
+  filterOptions: { c: string; values: string[] }[],
+  metaColumns: string[],
+): { metaFilter: string; compareCol: string; statusFilter: StatusFilter } {
+  const [col, val] = f.metaFilter.split('\u001f');
+  const metaFilter = f.metaFilter && filterOptions.some((o) => o.c === col && o.values.includes(val)) ? f.metaFilter : '';
+  const compareCol = f.compareCol && metaColumns.includes(f.compareCol) ? f.compareCol : '';
+  const statusFilter = f.statusFilter === 'mismatch' && !compareCol ? 'all' : f.statusFilter;
+  return { metaFilter, compareCol, statusFilter };
+}
+
+/**
+ * Which labels "Disagree with" (and the highlighting) compares, by the Agreement panel's rule (`agreement`): a
+ * missing-value marker such as "NA" never; on a scale only numbers on it, with categories only the categories (or
+ * a tie of them), unless most labelled pairs fall outside (then the values are compared as they are). `pairs`:
+ * the (normalized) model value and label of each text that has both.
+ */
+export function comparableLabel(field: Variable | undefined, pairs: [string, string][]): (v: string) => boolean {
+  let fits: ((v: string) => boolean) | null = null;
+  if (field?.type === 'ordinal' || field?.type === 'number') {
+    const scale = field.type === 'ordinal' ? field.values.map((x) => toNumber(x)).filter(Number.isFinite) : [];
+    const lo = scale.length >= 2 ? Math.min(...scale) : -Infinity;
+    const hi = scale.length >= 2 ? Math.max(...scale) : Infinity;
+    fits = (v) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
+  } else if (field?.type === 'category' || field?.type === 'boolean') {
+    const cats = new Set(field.type === 'boolean' ? ['false', 'true'] : field.values.map((x) => normalizeLabel(x)).filter(Boolean));
+    if (cats.size >= 2) fits = (v) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));
+  }
+  if (!fits) return (v) => !isMissingLabel(v);
+  const onScale = fits;
+  const missing = (v: string) => !onScale(v) && isMissingLabel(v);
+  const labelled = pairs.filter(([x, y]) => !missing(x) && !missing(y));
+  const kept = labelled.filter(([x, y]) => onScale(x) && onScale(y)).length;
+  const strict = kept > 0 && kept >= labelled.length / 2;
+  return (v) => !missing(v) && (!strict || onScale(v));
+}
+
+/** What the Remaining button leaves out, said when it is clicked (`remainingDocs`'s `waiting`, `unknown` and `unknownRuns`). */
+export function remainingNotes(r: { waiting: number; unknown: number; unknownRuns: number[] }, w: { one: string; many: string }): { waiting: string; unknown: string } {
+  const are = (n: number) => `${n.toLocaleString()} ${n === 1 ? `${w.one} is` : `${w.many} are`}`;
+  const runs = `run${r.unknownRuns.length === 1 ? '' : 's'} ${r.unknownRuns.map((n) => `#${n}`).join(', ')}`;
+  return {
+    waiting: r.waiting ? `${are(r.waiting)} still waiting in a batch and left out.` : '',
+    unknown: r.unknown
+      ? `${are(r.unknown)} left out: ${r.unknown === 1 ? 'it is' : 'they are'} in ${runs}, whose batch upload may have reached the provider. Retry failed on ${runs} (under Runs & agreement) looks for that batch at the provider first, so it isn't paid for twice.`
+      : '',
+  };
+}
 
 export function Workbench({ onOpenKeys }: { onOpenKeys: () => void }) {
   return (
@@ -41,12 +99,12 @@ function TextsAndResults() {
   const keys = useStore((s) => s.keys);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'done' | 'todo' | 'error' | 'mismatch'>('all');
+  const [statusPicked, setStatusFilter] = useState<StatusFilter>('all');
   // Filter on a metadata column, e.g. sample = validation or era = 1980s ("column␟value"; '' = no filter).
-  const [metaFilter, setMetaFilter] = useState('');
+  const [metaPicked, setMetaFilter] = useState('');
   const [sampling, setSampling] = useState(false);
   const [runFilter, setRunFilter] = useState<RunFilter>('latest');
-  const [compareCol, setCompareCol] = useState('');
+  const [comparePicked, setCompareCol] = useState('');
   const [page, setPage] = useState(0);
   const [openDoc, setOpenDoc] = useState<string | null>(null);
   const [sampleN, setSampleN] = useState(10);
@@ -61,6 +119,14 @@ function TextsAndResults() {
         .filter((x) => x.values.length >= 1 && x.values.length <= 30),
     [metaColumns, docs],
   );
+  // A filter or comparison on a column that is gone no longer applies, and is cleared (so it doesn't come back
+  // if a column of that name is added again).
+  const { metaFilter, compareCol, statusFilter } = validFilters({ metaFilter: metaPicked, compareCol: comparePicked, statusFilter: statusPicked }, filterOptions, metaColumns);
+  useEffect(() => {
+    if (metaFilter !== metaPicked) setMetaFilter(metaFilter);
+    if (compareCol !== comparePicked) setCompareCol(compareCol);
+    if (statusFilter !== statusPicked) setStatusFilter(statusFilter);
+  }, [metaFilter, metaPicked, compareCol, comparePicked, statusFilter, statusPicked]);
   // Columns to show: the current prompt's fields, plus any extra fields of the run being viewed.
   const fields = useMemo(() => {
     const f = outputFields(study.prompt);
@@ -71,11 +137,25 @@ function TextsAndResults() {
   const compareField = fields[0];
   const compareYesNo = isYesNoField(study.prompt, compareField);
   // Display names: look the key up in the current prompt, then in the viewed run's prompt.
-  const fieldName = (key: string) => {
+  const promptOf = (key: string) => {
     const viewedRun = runFilter === 'latest' ? null : runs.find((r) => r.id === runFilter);
     const inCurrent = study.prompt.variables.some((v) => v.name === key);
-    return fieldLabel(inCurrent || !viewedRun ? study.prompt : viewedRun.snapshot.prompt, key);
+    return inCurrent || !viewedRun ? study.prompt : viewedRun.snapshot.prompt;
   };
+  const fieldName = (key: string) => fieldLabel(promptOf(key), key);
+  const compareVar = promptOf(compareField).variables.find((v) => v.name === compareField);
+  // Labels the comparison leaves out, as the Agreement panel does (e.g. "NA", or a number off the scale).
+  const comparable = useMemo(() => {
+    const pairs: [string, string][] = [];
+    if (compareCol)
+      for (const d of docs) {
+        const v = views.get(d.id)!;
+        const val = normalizeLabel(v.values[compareField], compareYesNo);
+        const gold = normalizeLabel(d.meta[compareCol], compareYesNo);
+        if (v.status !== 'none' && v.status !== 'error' && val && gold) pairs.push([val, gold]);
+      }
+    return comparableLabel(compareVar, pairs);
+  }, [docs, views, compareCol, compareField, compareYesNo, compareVar]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -89,15 +169,16 @@ function TextsAndResults() {
         if (d.meta[col] !== val) return false;
       }
       if (statusFilter === 'mismatch') {
-        // Only texts with both a model value and a label (as the highlighted cells), not every unlabelled one.
+        // Only texts with both a model value and a label (as the highlighted cells), not every unlabelled one, and
+        // not those whose label the comparison leaves out (e.g. "NA").
         const val = normalizeLabel(v.values[compareField], compareYesNo);
         const gold = normalizeLabel(d.meta[compareCol], compareYesNo);
-        if (!compareCol || v.status === 'none' || v.status === 'error' || !val || !gold || val === gold) return false;
+        if (!compareCol || v.status === 'none' || v.status === 'error' || !val || !gold || val === gold || !comparable(val) || !comparable(gold)) return false;
       }
       if (!q) return true;
       return d.docId.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) || Object.values(v.values).some((x) => x.toLowerCase().includes(q));
     });
-  }, [docs, views, query, statusFilter, metaFilter, compareCol, compareField, compareYesNo]);
+  }, [docs, views, query, statusFilter, metaFilter, compareCol, compareField, compareYesNo, comparable]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
   const curPage = Math.min(page, pageCount - 1);
@@ -166,14 +247,23 @@ function TextsAndResults() {
   };
 
   const remaining = async () => {
-    // Texts still waiting in a batch with this prompt and model are on their way: sending them again would pay twice.
-    const { todo, waiting } = remainingDocs(study, docs, runs, getState().results);
-    const batchNote = waiting ? `${waiting.toLocaleString()} ${waiting === 1 ? `${w.one} is` : `${w.many} are`} still waiting in a batch and left out.` : '';
+    // Texts still waiting in a batch with this prompt, model and effort are on their way, and those in a batch upload
+    // whose outcome is unknown may be: sending them again would pay twice.
+    const r = remainingDocs(study, docs, runs, getState().results);
+    const { todo, waiting, unknown } = r;
+    const notes = remainingNotes(r, w);
     if (!todo.length) {
-      return alert(waiting ? `Every ${w.one} has a result with the current prompt and model, or is waiting in a batch. ${batchNote}` : `Every ${w.one} already has a result with the current prompt and model.`);
+      const or = [waiting ? ', or is waiting in a batch' : '', unknown ? ', or is in a batch upload whose outcome is unknown' : ''].join('');
+      return alert(
+        or
+          ? `Every ${w.one} has a result with the current prompt, model and effort${or}. ${[notes.waiting, notes.unknown].filter(Boolean).join(' ')}`
+          : `Every ${w.one} already has a result with the current prompt, model and effort.`,
+      );
     }
-    if (waiting) toast(batchNote);
-    await runDocs(todo, `Not yet annotated with the current prompt and model (${todo.length})`, false);
+    if (waiting) toast(notes.waiting);
+    // (Stays until dismissed: those texts are not sent, and the way to send them is elsewhere.)
+    if (unknown) toast(notes.unknown, 'info', true);
+    await runDocs(todo, `Not yet annotated with the current prompt, model and effort (${todo.length})`, false);
   };
 
   const testDoc = docs.find((d) => selected.has(d.id)) ?? docs[0];
@@ -249,7 +339,7 @@ function TextsAndResults() {
               <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All ${w.many} (${docs.length})`, false)} title={study.options.batch ? `Submit every ${w.one} as a batch` : `Annotate every ${w.one} now`}>
                 All ({docs.length.toLocaleString()})
               </button>
-              <button className="btn" disabled={busy} onClick={remaining} title={`Starts a new run with the ${w.many} that have no usable result for the current prompt, model and effort. To complete a finished run instead, use Retry failed under Runs & agreement.`}>
+              <button className="btn" disabled={busy} onClick={remaining} title={`Starts a new run with the ${remainingRule(w)}. To complete a finished run instead, use Retry failed under Runs & agreement.`}>
                 Remaining
               </button>
             </div>
@@ -268,9 +358,11 @@ function TextsAndResults() {
               <div className="row">
                 <span>
                   Batch run {runTitle(r)} is processing ({r.batch?.lastStatus ?? 'submitted'}).{' '}
-                  {r.batch && keys[r.batch.provider]
-                    ? 'Results appear here automatically while this page is open.'
-                    : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
+                  {r.batch && batchParts(r).some((p) => p.status === 'submitted' && p.saveFailed)
+                    ? 'Results that arrived could not be saved: free some space, then click Check now.'
+                    : r.batch && keys[r.batch.provider]
+                      ? 'Results appear here automatically while this page is open.'
+                      : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
                   Unfinished requests expire 24 hours after submission.
                 </span>
                 <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
@@ -424,7 +516,8 @@ function TextsAndResults() {
                       </td>
                       {fields.map((f, i) => {
                         const val = v.values[f] ?? '';
-                        const cmp = compareCol && f === compareField && val && gold ? (normalizeLabel(val, compareYesNo) === normalizeLabel(gold, compareYesNo) ? 'match' : 'mismatch') : '';
+                        const [nv, ng] = [normalizeLabel(val, compareYesNo), normalizeLabel(gold, compareYesNo)];
+                        const cmp = compareCol && f === compareField && val && gold && comparable(nv) && comparable(ng) ? (nv === ng ? 'match' : 'mismatch') : '';
                         return (
                           <td key={f}>
                             {v.status === 'error' ? (

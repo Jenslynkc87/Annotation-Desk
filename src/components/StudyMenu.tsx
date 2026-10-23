@@ -18,6 +18,7 @@ import {
 } from '../lib/store';
 import { words } from '../lib/subject';
 import { fmtDateTime } from '../lib/util';
+import { copyElsewhere, OTHER_STUDY_HERE, quoted } from './RunsView';
 import { Icon, Menu, Modal } from './ui';
 
 export function StudyMenu() {
@@ -112,8 +113,9 @@ export function StudyMenu() {
                 const s = getState();
                 const cur = currentStudy(s);
                 if (!cur) return;
-                // Batches still processing are cancelled, except one that a copy of this study (made through a backup)
-                // also waits for: that one is left running for the copy, which collects it.
+                // Batches still processing are cancelled, except one that another study here also waits for (a copy of
+                // this study made through a backup, or the study it was copied from): that one is left running for it,
+                // which collects it. A copy in another browser can't be seen from here: the note says so.
                 let cancelled = 0;
                 const kept = new Set<string>();
                 const copies = new Set<string>();
@@ -128,9 +130,9 @@ export function StudyMenu() {
                 }
                 const left = kept.size;
                 const note =
-                  (cancelled ? ` ${cancelled} batch${cancelled === 1 ? ' is' : 'es are'} still processing and will be cancelled.` : '') +
+                  (cancelled ? ` ${cancelled} batch${cancelled === 1 ? ' is' : 'es are'} still processing and will be cancelled. ${copyElsewhere(cancelled)}` : '') +
                   (left
-                    ? ` ${left === 1 ? 'A batch' : `${left} batches`} still processing ${left === 1 ? 'is' : 'are'} left running: ${[...copies].map((x) => `“${x}”`).join(', ')} (the same study, copied through a backup) also ${copies.size === 1 ? 'waits' : 'wait'} for ${left === 1 ? 'it' : 'them'}.`
+                    ? ` ${left === 1 ? 'A batch' : `${left} batches`} still processing ${left === 1 ? 'is' : 'are'} left running: ${quoted([...copies])} (${OTHER_STUDY_HERE}) also ${copies.size === 1 ? 'waits' : 'wait'} for ${left === 1 ? 'it' : 'them'}.`
                     : '');
                 if (confirm(`Delete “${cur.name}” with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
                   void removeStudy(cur.id);

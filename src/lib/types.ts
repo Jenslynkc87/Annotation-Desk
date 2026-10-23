@@ -224,6 +224,8 @@ export interface ResultLog {
   response: unknown;
   /** An earlier, failed attempt that a retry replaced: which attempt it was, and its outcome. */
   attempt?: number;
+  /** Settings of the run that were not sent with this request (the retired `fallbacks` of day-one runs). */
+  omitted?: string[];
   replaced?: Pick<Result, 'status' | 'error' | 'parseError' | 'stopReason' | 'usage' | 'requestedAt' | 'completedAt'>;
 }
 

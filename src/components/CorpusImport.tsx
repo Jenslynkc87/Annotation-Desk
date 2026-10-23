@@ -10,13 +10,40 @@ import {
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
-import { clearPlan, guessKeyColumn, matchLabels } from '../lib/import/labels';
+import { clearPlan, guessKeyColumn, matchLabels, modelAnswerColumns } from '../lib/import/labels';
+import { templatePlaceholders } from '../lib/prompt';
 import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
-import { isEntries } from '../lib/subject';
+import { isEntries, words } from '../lib/subject';
+import type { PromptSpec, Run } from '../lib/types';
 import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
 
 type NewDoc = { docId: string; text: string; meta: Record<string, string>; source: string };
+
+/** Metadata columns the prompt inserts with {{meta.<column>}} (the study's prompt, and the prompts of its runs,
+ *  which "Retry failed" sends again with the texts' current metadata). */
+function promptColumns(prompt: PromptSpec, runs: Run[]): Set<string> {
+  const templates = [prompt.userTemplate, ...runs.map((r) => r.snapshot.prompt.userTemplate)];
+  return new Set(templates.flatMap((t) => templatePlaceholders(t)).filter((k) => k.startsWith('meta.')).map((k) => k.slice(5)));
+}
+
+/** A button's action that must not run twice at once (a double click would add every text twice). */
+function useOnce(): [boolean, (f: () => Promise<unknown>) => Promise<void>] {
+  const running = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const once = async (f: () => Promise<unknown>) => {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    try {
+      await f();
+    } finally {
+      running.current = false;
+      setBusy(false);
+    }
+  };
+  return [busy, once];
+}
 
 const TABLE_EXTENSIONS = '.csv,.tsv,.xlsx,.xls,.ods,.json,.jsonl';
 
@@ -52,22 +79,38 @@ export function CorpusImport() {
     const studyId = getState().currentId ?? undefined;
     const texts: NewDoc[] = [];
     const newTables: ParsedTable[] = [];
-    const errors: string[] = [];
+    // Files not added, by reason.
+    const errors = new Map<string, string[]>();
+    const skip = (name: string, reason: string) => (errors.get(reason) ?? errors.set(reason, []).get(reason)!).push(name);
     for (let i = 0; i < files.length; i++) {
       setBusy(`Reading ${i + 1} of ${files.length}: ${files[i].name}`);
       const r = await parseFile(files[i]);
       if (r.kind === 'text' && entries) {
-        errors.push(`${r.file.name}: this study takes entries as a table (one row each), not text files`);
+        skip(r.file.name, 'This study takes entries as a table (one row each), not text files.');
       } else if (r.kind === 'text') {
         if (r.file.text.trim()) texts.push({ docId: baseName(r.file.name), text: r.file.text, meta: { file: r.file.name }, source: r.file.name });
-        else errors.push(`${r.file.name}: empty`);
+        else skip(r.file.name, 'Empty.');
       } else if (r.kind === 'table') newTables.push(r.table);
-      else errors.push(`${r.name}: ${r.error}`);
+      else skip(r.name, r.error.replace(/([^.])$/, '$1.'));
     }
     setBusy('');
     if (texts.length) await addDocs(texts, studyId);
     if (newTables.length) setTables(newTables);
-    if (errors.length) toast(`Skipped ${errors.length} file(s): ${errors.slice(0, 3).join('; ')}${errors.length > 3 ? '…' : ''}`, 'error');
+    if (errors.size) {
+      // Kept until dismissed, so the files can be fixed one by one: each reason once (the most common first), with up
+      // to 10 of its files' names.
+      const groups = [...errors].sort((a, b) => b[1].length - a[1].length);
+      const n = groups.reduce((k, [, names]) => k + names.length, 0);
+      const parts = groups
+        .slice(0, 3)
+        .map(([reason, names]) => `${names.slice(0, 10).join(', ')}${names.length > 10 ? ` and ${(names.length - 10).toLocaleString()} more` : ''}: ${reason}`);
+      const others = groups.slice(3).reduce((k, [, names]) => k + names.length, 0);
+      toast(
+        `Skipped ${n.toLocaleString()} file${n === 1 ? '' : 's'}. ${parts.join(' ')}${others ? ` And ${others.toLocaleString()} more for other reasons.` : ''}`,
+        'error',
+        true,
+      );
+    }
   };
 
   return (
@@ -139,7 +182,7 @@ export function CorpusImport() {
           </button>
         )}
         {hasMeta && (
-          <button className="btn small" onClick={() => setRemoving(true)} title="Remove a column added by mistake (or an outdated one) from every text">
+          <button className="btn small" onClick={() => setRemoving(true)} title={`Remove a column added by mistake (or an outdated one) from every ${entries ? 'entry' : 'text'}`}>
             Remove a column…
           </button>
         )}
@@ -168,6 +211,7 @@ export function CorpusImport() {
       {labels && <LabelsDialog entries={entries} table={labels} onDone={() => setLabels(null)} />}
       {tables.length > 0 && (
         <TableDialog
+          key={`${tables.length}:${tables[0].name}`}
           entries={entries}
           table={tables[0]}
           onDone={() => setTables((t) => t.slice(1))}
@@ -188,11 +232,13 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
   const asTable = mode === 'table';
   const table = useMemo(() => (asTable && text.trim() ? parsePastedTable(text) : null), [asTable, text]);
   const items = asTable ? [] : splitPasted(text, mode);
-  const add = async () => {
-    const docs = items.map((t, i) => ({ docId: items.length === 1 ? prefix : `${prefix}_${i + 1}`, text: t, meta: {}, source: 'pasted' }));
-    await addDocs(docs);
-    onClose();
-  };
+  const [adding, once] = useOnce();
+  const add = () =>
+    once(async () => {
+      const docs = items.map((t, i) => ({ docId: items.length === 1 ? prefix : `${prefix}_${i + 1}`, text: t, meta: {}, source: 'pasted' }));
+      await addDocs(docs);
+      onClose();
+    });
   return (
     <Modal
       title={tableOnly ? 'Paste entries' : 'Paste text'}
@@ -206,7 +252,7 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
               Continue with {table?.rows.length.toLocaleString() ?? 0} row{table?.rows.length === 1 ? '' : 's'}…
             </button>
           ) : (
-            <button className="btn primary" disabled={!items.length} onClick={add}>
+            <button className="btn primary" disabled={!items.length || adding} onClick={add}>
               Add {items.length || ''} text{items.length === 1 ? '' : 's'}
             </button>
           )}
@@ -290,18 +336,20 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
   const ids = rows.map(idOf);
   const seen = new Set<string>();
   const repeated = ids.filter((x) => seen.has(x) || (seen.add(x), false));
-  const add = async () => {
-    const docs = rows.map((r, i) => {
-      return {
-        docId: ids[i],
-        text: textOf(r),
-        meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
-        source: table.name,
-      };
+  const [adding, once] = useOnce();
+  const add = () =>
+    once(async () => {
+      const docs = rows.map((r, i) => {
+        return {
+          docId: ids[i],
+          text: textOf(r),
+          meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
+          source: table.name,
+        };
+      });
+      await addDocs(docs);
+      onDone();
     });
-    await addDocs(docs);
-    onDone();
-  };
   return (
     <Modal
       title={entry ? `Add entries: ${table.name}` : `Import table: ${table.name}`}
@@ -309,7 +357,7 @@ function TableDialog({ entries, table, onDone, onUseAsLabels }: { entries: boole
       footer={
         <>
           <button className="btn" onClick={onDone}>Cancel</button>
-          <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !rows.length} onClick={add}>
+          <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !rows.length || adding} onClick={add}>
             Import {rows.length.toLocaleString()} {entry ? 'entries' : 'texts'}
           </button>
         </>
@@ -439,19 +487,35 @@ function SheetNote({ table }: { table: ParsedTable }) {
 
 function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: ParsedTable; onDone: () => void }) {
   const docs = useStore((s) => s.docs);
+  const runs = useStore((s) => s.runs);
+  const results = useStore((s) => s.results);
+  const prompt = useStore((s) => currentStudy(s)!.prompt);
   const [keyCol, setKeyCol] = useState(() => guessKeyColumn(docs, table));
-  const [keepUnlisted, setKeepUnlisted] = useState(false);
+  // Texts the sheet doesn't list keep their values, unless asked (e.g. a corrected sheet for all texts).
+  const [removeUnlisted, setRemoveUnlisted] = useState(false);
   const m = useMemo(() => matchLabels(docs, table, keyCol), [docs, table, keyCol]);
-  const clear = useMemo(() => clearPlan(docs, m, keepUnlisted), [docs, m, keepUnlisted]);
-  // Texts this sheet doesn't list but that have a value in one of its columns already (kept only if asked).
-  const unlisted = useMemo(() => docs.filter((d) => !m.updates.has(d.id) && m.replaced.some((c) => (d.meta[c] ?? '') !== '')).length, [docs, m]);
+  const clear = useMemo(() => clearPlan(docs, m, !removeUnlisted), [docs, m, removeUnlisted]);
+  // Texts this sheet doesn't list but that have a value in one of its columns already (kept unless asked).
+  const unlisted = useMemo(
+    () => docs.filter((d) => !m.updates.has(d.id) && !m.untouched.has(d.id) && m.replaced.some((c) => (d.meta[c] ?? '') !== '')).length,
+    [docs, m],
+  );
+  // A results file exported from this app: its answer columns are the model's, not human labels.
+  const modelCols = useMemo(() => modelAnswerColumns(table, runs, results), [table, runs, results]);
   const removedBy = (c: string) => [...clear.values()].filter((cols) => cols.includes(c)).length;
+  const inPrompt = useMemo(() => promptColumns(prompt, runs), [prompt, runs]);
+  const emptied = m.replaced.filter((c) => inPrompt.has(c) && removedBy(c) > 0);
   const list = (xs: string[]) => `${xs.slice(0, 5).join(', ')}${xs.length > 5 ? ', …' : ''}`;
   const [one, many] = entries ? ['entry', 'entries'] : ['text', 'texts'];
-  const blocked = m.conflicts.length > 0;
-  const apply = async () => {
-    if (await addLabels(m.updates, clear)) onDone();
-  };
+  const blocked = m.conflicts.length > 0 || modelCols.length > 0;
+  // Several rows for texts that the study has twice under one name (John Smith, John Smith_2) need other advice.
+  const sameName = m.sameName.filter((x) => m.conflicts.includes(x.key) || m.repeated.includes(x.key));
+  const otherConflicts = m.conflicts.filter((k) => !sameName.some((x) => x.key === k));
+  const [adding, once] = useOnce();
+  const apply = () =>
+    once(async () => {
+      if (await addLabels(m.updates, clear)) onDone();
+    });
   return (
     <Modal
       title={`${entries ? 'Add answers' : 'Add labels'}: ${table.name}`}
@@ -459,7 +523,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
       footer={
         <>
           <button className="btn" onClick={onDone}>Cancel</button>
-          <button className="btn primary" disabled={!m.updates.size || !m.columns.length || blocked} onClick={apply}>
+          <button className="btn primary" disabled={!m.updates.size || !m.columns.length || blocked || adding} onClick={apply}>
             Add to {m.updates.size.toLocaleString()} {m.updates.size === 1 ? one : many}
           </button>
         </>
@@ -477,8 +541,22 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
             model). Texts are not changed.
           </>
         )}{' '}
-        A column that is already there is replaced by this sheet’s: a blank cell leaves no value (“NA” keeps a {one} out of the comparison).
+        For the {many} it lists, a column that is already there gets this sheet’s values: a blank cell leaves no value (“NA” keeps {entries ? 'an entry' : 'a text'} out
+        of the comparison). {entries ? 'Entries' : 'Texts'} it doesn’t list keep theirs.
       </p>
+      {modelCols.length > 0 && (
+        <div className="notice warn" style={{ marginBottom: 12 }}>
+          <strong>This is a results file exported from Annotation Desk.</strong> Its columns {list(modelCols)} hold the model’s answers, which are already in this
+          study (under <em>Runs &amp; agreement</em>); added here, they would count as {entries ? 'your own answers' : 'human labels'}. To add{' '}
+          {entries ? 'your answers' : 'human labels'}, use a sheet with only your own columns (the {entries ? 'ID' : 'file name or ID'} and your{' '}
+          {entries ? 'answers' : 'labels'}), or delete these columns from this sheet and add it again.
+        </div>
+      )}
+      {table.problems?.map((p) => (
+        <div key={p} className="notice warn" style={{ marginBottom: 12 }}>
+          {p}
+        </div>
+      ))}
       <SheetNote table={table} />
       <div className="field">
         <label>Column with the {entries ? 'ID' : 'file name or ID'}</label>
@@ -488,39 +566,62 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
           ))}
         </select>
       </div>
-      <div className={`notice ${m.unmatched.length || m.ambiguous.length || blocked || clear.size ? 'warn' : ''}`}>
+      <div className={`notice ${m.unmatched.length || m.ambiguous.length || blocked || clear.size || sameName.length ? 'warn' : ''}`}>
         <div>
-          <strong>{m.matchedRows.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {m.updates.size.toLocaleString()}{' '}
-          {m.updates.size === 1 ? one : many}. Columns to add: {m.columns.length ? m.columns.join(', ') : '(none)'}.
+          <strong>{m.matchedRows.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {m.matchedTexts.toLocaleString()}{' '}
+          {m.matchedTexts === 1 ? one : many}. Columns to add: {m.columns.length ? m.columns.join(', ') : '(none)'}.
         </div>
-        {blocked && (
+        {m.conflicts.length > 0 && (
           <div>
             <strong>
               Several rows for the same {one} with different values ({m.conflicts.length}): {list(m.conflicts)}.
             </strong>{' '}
-            Only one row per {one} can be used, e.g. not one row per coder: put each coder’s labels in a column of their own (race_coder1, race_coder2, …).
+            {otherConflicts.length > 0 && (
+              <>
+                Only one row per {one} can be used, e.g. not one row per coder: put each coder’s labels in a column of their own (race_coder1, race_coder2, …).{' '}
+              </>
+            )}
             Nothing is added until the sheet is fixed.
+          </div>
+        )}
+        {sameName.length > 0 && (
+          <div>
+            This study has more than one {one} called {list(sameName.map((x) => `“${x.key}”`))}: they were stored as{' '}
+            {sameName.slice(0, 5).map((x) => x.ids.join(', ')).join('; ')}
+            {sameName.length > 5 ? '; …' : ''}. Rows are matched by {entries ? 'ID' : 'file name or ID'}, so every row with that name went to
+            the first. In the sheet, give each row the ID its {one} has here (e.g. {sameName[0].ids[1]}).
           </div>
         )}
         {m.repeated.length > 0 && <div>Listed more than once with the same values, merged ({m.repeated.length}): {list(m.repeated)}</div>}
         {m.unmatched.length > 0 && <div>Not found ({m.unmatched.length}): {list(m.unmatched)}</div>}
-        {m.ambiguous.length > 0 && <div>Matches more than one {one}, skipped ({m.ambiguous.length}): {list(m.ambiguous)}</div>}
+        {m.ambiguous.length > 0 && (
+          <div>
+            Matches more than one {one}, skipped and left as they are ({m.ambiguous.length}): {list(m.ambiguous)}
+          </div>
+        )}
         {m.skipped.length > 0 && <div>Not added: the sheet’s {m.skipped.join(', ')} column ({m.skipped.length === 1 ? 'it' : 'they'} would rename the {many}: each keeps the name of its own file).</div>}
         {m.replaced.length > 0 && (
           <div>
-            Already present, replaced by this sheet:{' '}
+            Already present, replaced for the {many} this sheet lists:{' '}
             {m.replaced.map((c) => {
               const n = removedBy(c);
-              return `${c}${n ? ` (${n.toLocaleString()} earlier value${n === 1 ? '' : 's'} removed: blank here${keepUnlisted ? '' : ' or not listed'})` : ''}`;
+              return `${c}${n ? ` (${n.toLocaleString()} earlier value${n === 1 ? '' : 's'} removed: blank here${removeUnlisted ? ' or not listed' : ''})` : ''}`;
             }).join(', ')}
             .
+          </div>
+        )}
+        {emptied.length > 0 && (
+          <div>
+            The prompt inserts {emptied.map((c) => `{{meta.${c}}}`).join(', ')}: {entries ? 'an entry' : 'a text'} whose value is removed gets an empty value there in later requests (also
+            with Retry failed).
           </div>
         )}
       </div>
       {unlisted > 0 && (
         <label className="check" style={{ marginTop: 10 }}>
-          <input type="checkbox" checked={keepUnlisted} onChange={(e) => setKeepUnlisted(e.target.checked)} /> Keep the values of the {unlisted.toLocaleString()}{' '}
-          {unlisted === 1 ? one : many} this sheet doesn’t list (e.g. when adding labels in parts)
+          <input type="checkbox" checked={removeUnlisted} onChange={(e) => setRemoveUnlisted(e.target.checked)} /> Also remove the values of the{' '}
+          {unlisted.toLocaleString()} {unlisted === 1 ? one : many} this sheet doesn’t list (in {list(m.replaced)}), e.g. when this sheet replaces an earlier one
+          for all {many}
         </label>
       )}
     </Modal>
@@ -530,13 +631,17 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
 /** Remove a metadata column (e.g. labels added by mistake) from every text; the texts themselves are not changed. */
 function RemoveColumnDialog({ onDone }: { onDone: () => void }) {
   const docs = useStore((s) => s.docs);
+  const runs = useStore((s) => s.runs);
+  const prompt = useStore((s) => currentStudy(s)!.prompt);
   const busy = useStore((s) => isBusy(s));
+  const w = words(prompt);
   // Not the file name: texts are matched and named by it.
   const cols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))].filter((c) => c !== 'file'), [docs]);
   const [col, setCol] = useState(cols[0] ?? '');
   const n = docs.filter((d) => col in d.meta).length;
+  const inPrompt = useMemo(() => promptColumns(prompt, runs), [prompt, runs]).has(col);
   const remove = async () => {
-    if (!confirm(`Remove the column "${col}" from ${n.toLocaleString()} ${n === 1 ? 'text' : 'texts'}? This cannot be undone (add it again from a spreadsheet if needed).`)) return;
+    if (!confirm(`Remove the column "${col}" from ${n.toLocaleString()} ${n === 1 ? w.one : w.many}? This cannot be undone (add it again from a spreadsheet if needed).`)) return;
     if (await removeMetaColumn(col)) onDone();
   };
   return (
@@ -553,8 +658,8 @@ function RemoveColumnDialog({ onDone }: { onDone: () => void }) {
       }
     >
       <p className="hint" style={{ marginTop: 0 }}>
-        Removes a label or metadata column from every text in this study, e.g. one added by mistake or replaced by a corrected sheet. The texts and the runs are not
-        changed.
+        Removes a label or metadata column from every {w.one} in this study, e.g. one added by mistake or replaced by a corrected sheet. The {w.many} and the runs
+        are not changed.
       </p>
       <div className="field">
         <label>Column</label>
@@ -564,7 +669,12 @@ function RemoveColumnDialog({ onDone }: { onDone: () => void }) {
           ))}
         </select>
       </div>
-      <div className="hint">{n.toLocaleString()} {n === 1 ? 'text has' : 'texts have'} a value in this column.</div>
+      <div className="hint">{n.toLocaleString()} {n === 1 ? `${w.one} has` : `${w.many} have`} a value in this column.</div>
+      {inPrompt && (
+        <div className="notice warn" style={{ marginTop: 10 }}>
+          The prompt inserts <code>{`{{meta.${col}}}`}</code>: after this, later requests (also with Retry failed) get an empty value there.
+        </div>
+      )}
     </Modal>
   );
 }

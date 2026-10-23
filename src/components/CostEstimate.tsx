@@ -7,6 +7,14 @@ import { Icon } from './ui';
 type Scope = 'all' | 'selected' | 'remaining';
 
 /**
+ * What "Remaining" sends, in words (the rule of `remainingDocs`), for the Remaining button's and this panel's
+ * tooltips: e.g. "texts that have no usable result from a run with the current prompt, model and effort (…)".
+ */
+export function remainingRule(w: { many: string }): string {
+  return `${w.many} that have no usable result from a run with the current prompt, model and effort (${w.many} still waiting in a batch, or in a batch upload whose outcome is unknown, are left out)`;
+}
+
+/**
  * "Estimate cost" panel under the run buttons. Recomputed on every render, so it follows any change
  * to the model, effort, Now/Batch, caching, replicates, prompt, codebook or texts while it is open.
  */
@@ -20,7 +28,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
   const [scope, setScope] = useState<Scope>(selected.size ? 'selected' : 'all');
   const effScope: Scope = scope === 'selected' && !selected.size ? 'all' : scope;
 
-  // What "Remaining" would send (the same rule as the button: not texts done, or waiting in a batch).
+  // What "Remaining" would send (the same rule as the button, see `remainingRule`).
   const remaining = useMemo(() => remainingDocs(study, docs, runs, results).todo, [study, docs, runs, results]);
 
   const scopeDocs = useMemo(() => {
@@ -63,7 +71,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
         </button>
       </div>
 
-      <span className="seg compact" role="radiogroup" aria-label="Which texts">
+      <span className="seg compact" role="radiogroup" aria-label={`Which ${w.many}`}>
         <button role="radio" aria-checked={effScope === 'all'} className={effScope === 'all' ? 'on' : ''} onClick={() => setScope('all')}>
           All ({docs.length.toLocaleString()})
         </button>
@@ -72,7 +80,7 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
             Selected ({selected.size.toLocaleString()})
           </button>
         )}
-        <button role="radio" aria-checked={effScope === 'remaining'} className={effScope === 'remaining' ? 'on' : ''} onClick={() => setScope('remaining')} title="Texts without a usable result for the current prompt">
+        <button role="radio" aria-checked={effScope === 'remaining'} className={effScope === 'remaining' ? 'on' : ''} onClick={() => setScope('remaining')} title={`What Remaining would send: the ${remainingRule(w)}`}>
           Remaining ({remainingN.toLocaleString()})
         </button>
       </span>

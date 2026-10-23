@@ -267,12 +267,12 @@ export function isExplanationKey(k: string): boolean {
 }
 
 /** Canonical form for comparing labels across sources (gold columns, runs).
- *  For yes/no fields (`yesNo`), 1 and 0 also count as yes and no. */
+ *  For yes/no fields (`yesNo`), 1 and 0 and y and n also count as yes and no. */
 export function normalizeLabel(v: string | undefined, yesNo = false): string {
   if (v === undefined) return '';
   const s = v.trim().toLowerCase();
-  if (s === 'true' || s === 'yes' || (yesNo && s === '1')) return 'true';
-  if (s === 'false' || s === 'no' || (yesNo && s === '0')) return 'false';
+  if (s === 'true' || s === 'yes' || (yesNo && (s === '1' || s === 'y'))) return 'true';
+  if (s === 'false' || s === 'no' || (yesNo && (s === '0' || s === 'n'))) return 'false';
   if (!Number.isNaN(toNumber(s))) return String(toNumber(s));
   return s;
 }

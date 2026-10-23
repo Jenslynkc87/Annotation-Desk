@@ -62,7 +62,7 @@ describe('weighted kappa with combined labels between scale points', () => {
     const b = base.map(([, y]) => y);
     const clean = agreement(a, b, 'ordinal', scale);
     const coded = agreement([...a, '1'], [...b, '99'], 'ordinal', scale);
-    expect(coded.leftOut).toEqual({ n: 1, values: ['99'] });
+    expect(coded.leftOut).toEqual({ n: 1, values: ['99'], range: [-3, 3] });
     expect(coded.gwetAC2Linear).toBeCloseTo(clean.gwetAC2Linear!, 10);
     expect(coded.weightedKappaLinear).toBeCloseTo(clean.weightedKappaLinear!, 10);
   });
@@ -93,13 +93,14 @@ describe('plain-text JSON scores', () => {
     const b = { ...a, allowed: ['0', '1', '2', '3'] };
     expect(combineFields(a, b).allowed).toEqual(combineFields(b, a).allowed);
     expect(combineFields(a, b).allowed).toEqual(['-1', '0', '1', '2', '3']);
-    // And inside agreement: the range seen in either source, gaps filled.
+    // And inside agreement: the same result in either order; a label outside one run's range alone is left out.
     const x = ['-1', '0', '1', '1', '0', '-1', '1', '0', '1', '0', '-1', '1'];
     const y = ['3', '0', '1', '2', '0', '-1', '1', '0', '1', '0', '-1', '2'];
-    expect(agreement(x, y, 'ordinal', a.allowed, 1, { scaleSeen: true }).weightedKappaLinear).toBeCloseTo(
-      agreement(x, y, 'ordinal', ['-1', '0', '1', '2', '3'], 1, { scaleSeen: true }).weightedKappaLinear!,
+    expect(agreement(x, y, 'ordinal', combineFields(a, b).allowed, 1, { scaleSeen: true }).weightedKappaLinear).toBeCloseTo(
+      agreement(x, y, 'ordinal', combineFields(b, a).allowed, 1, { scaleSeen: true }).weightedKappaLinear!,
       10,
     );
+    expect(agreement(x, y, 'ordinal', a.allowed, 1, { scaleSeen: true }).leftOut).toEqual({ n: 3, values: ['3', '2'], range: [-1, 1] });
   });
 });
 

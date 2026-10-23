@@ -17,8 +17,12 @@ export interface Agreement {
   n: number;
   /** The level the statistics were computed at: the one asked for, or nominal when the values aren't numbers. */
   level: Level;
-  /** On a scale: texts left out because a label wasn't a number (e.g. "NA") or was outside the codebook scale (e.g. 99), and some of those labels. */
-  leftOut: { n: number; values: string[] };
+  /**
+   * Texts left out, and some of those labels. On a scale: a label that wasn't a number (e.g. "NA") or was outside
+   * the scale (e.g. 99): the codebook's, or for plain-text scores the range of the model's answers (`range`, the
+   * scale's lowest and highest value). With codebook categories: a label that isn't one of them (nor a tie of them).
+   */
+  leftOut: { n: number; values: string[]; range?: [number, number] };
   percentAgreement: number | null;
   cohenKappa: number | null;
   weightedKappa: number | null; // quadratic weights, ordinal/interval only
@@ -66,6 +70,10 @@ export type CiStat =
   | 'mae';
 
 const isNum = (s: string) => s.trim() !== '' && !Number.isNaN(Number(s));
+
+/** Cell values that mean "no label" (e.g. R writes NA for a missing value), in any case. */
+const MISSING_LABEL = /^(na|n\/a|#n\/a|n\.a\.?|nan|none|missing|unknown|-|–|—|\.|\?)$/i;
+export const isMissingLabel = (v: string) => MISSING_LABEL.test(v.trim());
 
 /** The distinct values: `first` (e.g. the codebook scale), then those of the pairs, in order of appearance. */
 function distinct(pairs: [string, string][], first: string[] = []): string[] {
@@ -172,33 +180,91 @@ export function krippendorffAlpha(pairs: [string, string][], level: Level): numb
   return 1 - ((n - 1) * num) / den;
 }
 
-/** Gwet's AC1 for two raters, nominal categories. */
-export function gwetAC1(pairs: [string, string][], allowed: string[] = []): number | null {
+/** The fixed categories for Gwet's coefficients: the codebook's (numbers: the scale's points, in order); null if fewer than 2. */
+function fixedCategories(allowed: string[], numeric: boolean): string[] | null {
+  if (!numeric) {
+    const cats = [...new Set(allowed)];
+    return cats.length >= 2 ? cats : null;
+  }
+  const byValue = new Map<number, string>();
+  for (const s of allowed) if (isNum(s) && !byValue.has(Number(s))) byValue.set(Number(s), s);
+  return byValue.size >= 2 ? [...byValue.entries()].sort((a, b) => a[0] - b[0]).map(([, s]) => s) : null;
+}
+
+/**
+ * Each category's share of all labels (both sides of every pair), on fixed categories: a label on a category counts
+ * for it; a tie of categories ("a | b", majority vote) is split equally among them; on a numeric scale, a value between
+ * two adjacent points (e.g. a 1.5 median) is split between them by distance. Null if a label fits none of these.
+ */
+function marginalsOn(cats: string[], pairs: [string, string][], numeric: boolean): number[] | null {
+  const idx = new Map(cats.map((c, i) => [c, i]));
+  const points = numeric ? cats.map(Number) : [];
+  const pi = new Array<number>(cats.length).fill(0);
+  for (const [v, count] of valueCounts(pairs)) {
+    const share = count / (2 * pairs.length);
+    const i = idx.get(v) ?? (numeric && isNum(v) ? points.findIndex((p) => Math.abs(p - Number(v)) < 1e-9) : -1);
+    if (i >= 0) {
+      pi[i] += share;
+    } else if (numeric) {
+      if (!isNum(v)) return null;
+      const x = Number(v);
+      const above = points.findIndex((p) => p > x);
+      if (above <= 0) return null; // below the lowest point or above the highest
+      const [lo, hi] = [points[above - 1], points[above]];
+      pi[above - 1] += (share * (hi - x)) / (hi - lo);
+      pi[above] += (share * (x - lo)) / (hi - lo);
+    } else {
+      const parts = v.split(' | ');
+      if (parts.length < 2 || !parts.every((p) => idx.has(p))) return null;
+      for (const p of parts) pi[idx.get(p)!] += share / parts.length;
+    }
+  }
+  return pi;
+}
+
+const spread = (pi: number[]) => pi.reduce((s, p) => s + p * (1 - p), 0);
+
+/**
+ * Gwet's AC1 for two raters. With the codebook's categories (`allowed`; `numericScale`: the points of a numeric scale)
+ * q is their number and labels count towards them as in `marginalsOn`, so a tie or a half-point median is a
+ * disagreement but no extra category. Without a codebook (or when a label fits none of its categories): the
+ * categories are those seen.
+ */
+export function gwetAC1(pairs: [string, string][], allowed: string[] = [], numericScale = false): number | null {
   const n = pairs.length;
   if (!n) return null;
-  const cats = distinct(pairs, allowed);
-  const q = cats.length;
-  if (q < 2) return null;
   const pa = pairs.filter(([a, b]) => a === b).length / n;
-  const counts = valueCounts(pairs);
-  let pe = 0;
-  for (const c of cats) {
-    const pi = (counts.get(c) ?? 0) / (2 * n);
-    pe += pi * (1 - pi);
+  const fixed = fixedCategories(allowed, numericScale);
+  const pi = fixed && marginalsOn(fixed, pairs, numericScale);
+  let q: number;
+  let sum: number;
+  if (fixed && pi) {
+    q = fixed.length;
+    sum = spread(pi);
+  } else {
+    const cats = distinct(pairs, allowed);
+    q = cats.length;
+    if (q < 2) return null;
+    const counts = valueCounts(pairs);
+    sum = spread(cats.map((c) => (counts.get(c) ?? 0) / (2 * n)));
   }
-  pe /= q - 1;
+  const pe = sum / (q - 1);
   if (pe === 1) return null;
   return (pa - pe) / (1 - pe);
 }
 
 /**
- * Gwet's AC2 for two raters with linear weights, 1 − |a − b| / (max − min) over the scale's values
- * (the categories are the codebook scale plus any observed value). With identity weights this is AC1.
+ * Gwet's AC2 for two raters with linear weights, 1 − |a − b| / (max − min) over the scale's values. With a scale
+ * (`scale`, at least 2 numbers) the categories are its points: q, the weights' total and the chance term are taken
+ * over them, and a value between two points (e.g. a 1.5 median) is split between them as in `marginalsOn`. Without
+ * one (or with a value off it), the categories are the values seen. With identity weights this is AC1.
  */
 export function gwetAC2Linear(pairs: [string, string][], scale: string[] = []): number | null {
   const n = pairs.length;
   if (!n) return null;
-  const cats = sortCats(distinct(pairs, scale));
+  const fixed = fixedCategories(scale, true);
+  const pi = fixed && marginalsOn(fixed, pairs, true);
+  const cats = fixed && pi ? fixed : sortCats(distinct(pairs, scale));
   const q = cats.length;
   if (q < 2 || !cats.every(isNum)) return null;
   const vals = cats.map(Number);
@@ -208,11 +274,7 @@ export function gwetAC2Linear(pairs: [string, string][], scale: string[] = []): 
   let tw = 0;
   for (const a of vals) for (const b of vals) tw += w(a, b);
   const counts = valueCounts(pairs);
-  let sum = 0;
-  for (const c of cats) {
-    const pi = (counts.get(c) ?? 0) / (2 * n);
-    sum += pi * (1 - pi);
-  }
+  const sum = spread(pi ?? cats.map((c) => (counts.get(c) ?? 0) / (2 * n)));
   const pe = (tw / (q * (q - 1))) * sum;
   if (pe === 1) return null;
   return (pa - pe) / (1 - pe);
@@ -317,8 +379,8 @@ function scaleMidpoint(scale: number[], observed: number[]): number | null {
 /**
  * `tolerance`: for numbers, how many scale points apart still count as agreeing in `withinTolerance`.
  * `withIntervals` false: leave out the bootstrap intervals (the slow part), e.g. to show the figures first.
- * `scaleSeen`: `allowed` is only the range of values seen (no codebook scale), so it sets the weights but not
- * the scale's midpoint (which decides "opposite direction").
+ * `scaleSeen`: `allowed` is only the range of the model's answers (no codebook scale), so it sets the weights and
+ * the range labels must fall in, but not the scale's midpoint (which decides "opposite direction").
  */
 export function agreement(
   a: string[],
@@ -334,20 +396,34 @@ export function agreement(
   }
   // On a scale, a value that isn't a number (e.g. "NA" in a coder's column) is missing, not a category of its
   // own (one such cell would otherwise turn every statistic nominal), as long as most values are numbers.
-  // So is a number outside the codebook scale (e.g. a missing-value code such as 9 or 99, or a typo such as
-  // 30 for 3), which would otherwise stretch the scale every weight is measured on. Those left out are
-  // reported. Mostly words (e.g. "2 (moderate)"): compared as categories instead.
-  const leftOut = { n: 0, values: [] as string[] };
+  // So is a number outside the scale (e.g. a missing-value code such as 9 or 99, or a typo such as 30 for 3),
+  // which would otherwise stretch the scale every weight is measured on: the codebook's scale, or for plain-text
+  // scores (`scaleSeen`) the range of the model's answers. With codebook categories, so is a label that is
+  // neither a category nor a tie of categories ("a | b"). Those left out are reported. Mostly words (e.g.
+  // "2 (moderate)"): compared as categories instead. A missing-value marker such as "NA" or "N/A" that isn't
+  // itself a category is always left out (and reported), even where most labels are such markers.
+  const leftOut: Agreement['leftOut'] = { n: 0, values: [] };
+  let fits: ((v: string) => boolean) | null = null;
   if (level !== 'nominal') {
-    const scaleNums = scaleSeen ? [] : allowed.filter(isNum).map(Number);
+    const scaleNums = allowed.filter(isNum).map(Number);
     const lo = scaleNums.length >= 2 ? Math.min(...scaleNums) : -Infinity;
     const hi = scaleNums.length >= 2 ? Math.max(...scaleNums) : Infinity;
-    const onScale = (v: string) => isNum(v) && Number(v) >= lo - 1e-9 && Number(v) <= hi + 1e-9;
-    const kept = pairs.filter(([x, y]) => onScale(x) && onScale(y));
-    if (kept.length && kept.length >= pairs.length / 2 && kept.length < pairs.length) {
-      leftOut.n = pairs.length - kept.length;
-      leftOut.values = [...new Set(pairs.flat().filter((v) => !onScale(v)))].slice(0, 5);
-      pairs = kept;
+    if (scaleNums.length >= 2) leftOut.range = [lo, hi];
+    fits = (v: string) => isNum(v) && Number(v) >= lo - 1e-9 && Number(v) <= hi + 1e-9;
+  } else if (new Set(allowed).size >= 2) {
+    const cats = new Set(allowed);
+    fits = (v: string) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));
+  }
+  if (fits) {
+    const onScale = fits;
+    const missing = (v: string) => !onScale(v) && isMissingLabel(v);
+    const labelled = pairs.filter(([x, y]) => !missing(x) && !missing(y));
+    const kept = labelled.filter(([x, y]) => onScale(x) && onScale(y));
+    const use = kept.length && kept.length >= labelled.length / 2 ? kept : labelled;
+    if (use.length < pairs.length) {
+      leftOut.n = pairs.length - use.length;
+      leftOut.values = [...new Set(pairs.flat().filter((v) => !onScale(v) && (use === kept || missing(v))))].slice(0, 5);
+      pairs = use;
     }
   }
   const numeric = level !== 'nominal' && pairs.length > 0 && pairs.every(([x, y]) => isNum(x) && isNum(y));
@@ -357,14 +433,18 @@ export function agreement(
   const confusion: Record<string, Record<string, number>> = {};
   for (const c of categories) confusion[c] = Object.fromEntries(categories.map((d) => [d, 0]));
   for (const [x, y] of pairs) confusion[x][y]++;
-  // Plain-text runs (`scaleSeen`): whole-number scores are on every whole number from the lowest to the highest
-  // seen, here or in `allowed`, so the result doesn't depend on which source supplied the range.
+  // Plain-text runs (`scaleSeen`): whole-number scores are on every whole number of the range of the model's
+  // answers (`allowed`; labels outside it were left out above). Without such a range, the range of the values
+  // here. A combined label between whole numbers (e.g. a 1.5 median) doesn't change the scale.
   const seenRange = (): string[] => {
-    const vals = [...allowed.filter(isNum), ...pairs.flat()].map(Number);
-    if (!vals.every(Number.isInteger)) return allowed.filter(isNum);
-    const lo = Math.min(...vals);
-    const hi = Math.max(...vals);
-    return hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : allowed.filter(isNum);
+    const own = allowed.filter(isNum).map(Number);
+    const vals = own.length >= 2 ? own : [...own, ...pairs.flat().map(Number)];
+    if (!vals.length || (level !== 'ordinal' && !vals.every(Number.isInteger))) return own.map(String);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const x of vals) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
+    [lo, hi] = [Math.floor(lo), Math.ceil(hi)];
+    return hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : own.map(String);
   };
   const scale = numeric ? (scaleSeen ? seenRange() : allowed.filter(isNum)) : [];
   const alphaLevel = numeric ? level : 'nominal';
@@ -382,7 +462,7 @@ export function agreement(
         }
       : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
-    gwetAC1: (p: [string, string][]) => gwetAC1(p, numeric ? scale : allowed),
+    gwetAC1: (p: [string, string][]) => gwetAC1(p, numeric ? scale : allowed, numeric),
     ...(numeric
       ? {
           withinTolerance: (p: [string, string][]) => withinTolerance(p, tolerance),
@@ -400,7 +480,7 @@ export function agreement(
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
     weightedKappaLinear: numeric ? cohenKappa(pairs, 'linear', scale) : null,
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
-    gwetAC1: gwetAC1(pairs, numeric ? scale : allowed),
+    gwetAC1: gwetAC1(pairs, numeric ? scale : allowed, numeric),
     gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
     ci: withIntervals ? bootstrapCI(pairs, stats) : {},
     spearman: numeric ? spearman(xs, ys) : null,

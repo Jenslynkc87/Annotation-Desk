@@ -149,7 +149,27 @@ export async function parseFile(file: File): Promise<ParsedFile> {
           if (fmt === 'General' || (!XLSX.SSF.is_date(fmt) && !fmt.includes('%') && toNumber(String(cell.w ?? '')) !== Number(full))) cell.w = full;
         }
         const objs = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
-        return { kind: 'table', table: { ...tableFromObjects(file.name, objs), sheet: wb.SheetNames[0], sheets: wb.SheetNames } };
+        // A column name used twice is kept apart by a number (note, note_1); say so. The names as SheetJS gives them:
+        const range = XLSX.utils.decode_range(sheet['!ref'] ?? 'A1');
+        range.e.r = range.s.r;
+        const [head = []] = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: '', raw: false, range });
+        const counts = new Map<string, number>();
+        const renamed: [string, string][] = [];
+        for (const raw of head.map(String)) {
+          const v = raw === '' ? '__EMPTY' : raw;
+          let vv = v;
+          let k = counts.get(v) ?? 0;
+          if (!k) counts.set(v, 1);
+          else {
+            do vv = `${v}_${k++}`;
+            while (counts.get(vv));
+            counts.set(v, k);
+            counts.set(vv, 1);
+          }
+          if (vv !== v && raw.trim() !== '') renamed.push([v, vv]);
+        }
+        const table = tableFromObjects(file.name, objs);
+        return { kind: 'table', table: { ...table, problems: renamedNote(renamed), sheet: wb.SheetNames[0], sheets: wb.SheetNames } };
       }
       case '.json': {
         const data = JSON.parse(await readText(file));
@@ -172,11 +192,67 @@ export async function parseFile(file: File): Promise<ParsedFile> {
   }
 }
 
+/** A note on columns renamed because their name was already taken (`renamed`: [name, new name]); nothing is lost. */
+function renamedNote(renamed: [string, string][]): string[] {
+  const n = renamed.length;
+  if (!n) return [];
+  return [
+    `${n === 1 ? 'A column has' : `${n} columns have`} the same name as an earlier column, so ${n === 1 ? 'it is' : 'they are'} kept under a new name: ` +
+      `${renamed.slice(0, 5).map(([a, b]) => `“${a}” → “${b}”`).join(', ')}${n > 5 ? ', …' : ''}. Rename ${n === 1 ? 'it' : 'them'} in the sheet if you prefer other names.`,
+  ];
+}
+
+/** Column names made unique as Papa does it for CSV files (note, note → note, note_1), so no column overwrites another. */
+function uniqueNames(names: string[]): { names: string[]; renamed: [string, string][] } {
+  const used = new Set(names);
+  const count = new Map<string, number>();
+  const renamed: [string, string][] = [];
+  const out = names.map((c) => {
+    const k = count.get(c) ?? 0;
+    count.set(c, k + 1);
+    if (!k) return c;
+    let s = k;
+    let v: string;
+    do v = `${c}_${s++}`;
+    while (used.has(v));
+    used.add(v);
+    renamed.push([c, v]);
+    return v;
+  });
+  return { names: out, renamed };
+}
+
+/** The line (1-based) of each character position in `text`; `cr`: lines end in \r alone (old Mac files). */
+function linesAt(text: string, positions: number[], cr = false): number[] {
+  const order = [...positions.keys()].sort((a, b) => positions[a] - positions[b]);
+  const out: number[] = [];
+  const end = cr ? '\r' : '\n';
+  let line = 1;
+  let i = 0;
+  for (const k of order) {
+    for (; i < positions[k] && i < text.length; i++) if (text[i] === end) line++;
+    out[k] = line;
+  }
+  return out;
+}
+
 /** A CSV/TSV table; the first row holds the column names. `delimiter` '' = detect. */
 function readDelimited(name: string, text: string, delimiter: string): ParsedTable {
   const res = Papa.parse<Record<string, string>>(text, { header: true, skipEmptyLines: 'greedy', delimiter });
   const lines = res.errors.filter((x) => x.type === 'FieldMismatch').map((x) => (x.row ?? 0) + 2);
-  const quotes = res.errors.filter((x) => x.type === 'Quotes').map((x) => (x.row ?? 0) + 2);
+  // Papa reports one bad quotation mark up to three times, by its position in the file (its row number counts the
+  // column names' row too): one line each.
+  const quoteErrors = res.errors.filter((x) => x.type === 'Quotes');
+  const quotes = [
+    ...new Set(
+      quoteErrors.every((x) => typeof x.index === 'number')
+        ? linesAt(text, quoteErrors.map((x) => x.index as number), res.meta.linebreak === '\r')
+        : quoteErrors.map((x) => (x.row ?? 0) + 1),
+    ),
+  ];
+  const renamed = Object.entries(res.meta.renamedHeaders ?? {})
+    .filter(([, was]) => was.trim() !== '')
+    .map(([now, was]) => [was, now] as [string, string]);
   const problems = [
     ...(lines.length
       ? [
@@ -186,10 +262,11 @@ function readDelimited(name: string, text: string, delimiter: string): ParsedTab
       : []),
     ...(quotes.length
       ? [
-          `A value starts with a quotation mark (") that is never closed (around line ${quotes.slice(0, 3).join(', ')}), so the rows after it may have been read as part of that value. ` +
+          `A value starts with a quotation mark (") that is never closed (around line ${quotes.slice(0, 3).join(', ')}${quotes.length > 3 ? ', …' : ''}), so the rows after it may have been read as part of that value. ` +
             'Check the row count; put such a value in quotes with the quotation mark doubled ("say ""hi"""), or save the table as XLSX.',
         ]
       : []),
+    ...renamedNote(renamed),
   ];
   const columns = (res.meta.fields ?? []).filter((c) => c.trim() !== '');
   const rows = res.data.map((r) => Object.fromEntries(columns.map((c) => [c, r[c] ?? ''])));
@@ -198,8 +275,9 @@ function readDelimited(name: string, text: string, delimiter: string): ParsedTab
 
 /**
  * Rows and cells of tab-separated text as Excel and Word put it on the clipboard: a cell is in quotes only when it
- * holds a line break or tab (inner quotation marks doubled); any other quotation mark is part of the text, e.g. a
- * cell that starts with "The Old Man".
+ * holds a line break (inner quotation marks doubled); any other quotation mark is part of the text, e.g. a cell
+ * that starts with "The Old Man". What lies between two quotation marks that holds a tab as well is several cells,
+ * not one (e.g. ditto marks (") in two rows of a column).
  */
 export function splitTabbed(text: string): string[][] {
   const rows: string[][] = [];
@@ -210,7 +288,8 @@ export function splitTabbed(text: string): string[][] {
   for (;;) {
     let cell: string | null = null;
     if (text[i] === '"') {
-      // A quoted cell: up to the closing quotation mark, which must end the cell, and only if it holds a break or tab.
+      // A quoted cell: up to the closing quotation mark, which must end the cell, and only if it holds a line break
+      // and no tab.
       let j = i + 1;
       let v = '';
       while (j < n) {
@@ -224,7 +303,7 @@ export function splitTabbed(text: string): string[][] {
         }
         v += text[j++];
       }
-      if (j < n && endOfCell(j + 1) && /[\n\t]/.test(v)) {
+      if (j < n && endOfCell(j + 1) && v.includes('\n') && !v.includes('\t')) {
         cell = v;
         i = j + 1;
       }
@@ -255,20 +334,46 @@ export function splitTabbed(text: string): string[][] {
 export function parsePastedTable(text: string): ParsedTable {
   // One column is fine too (e.g. a list of names under a heading). Only blank lines are trimmed at either end:
   // a leading tab is an empty first cell (e.g. an Excel header row whose first cell is blank).
-  const body = text.replace(/^(?:[ \t]*\r?\n)+/, '').replace(/(?:\r?\n[ \t]*)+$/, '');
-  if (!text.includes('\t')) return readDelimited('pasted', body, '');
-  const [head = [], ...rest] = splitTabbed(body);
+  const lead = /^(?:[ \t]*\r?\n)*/.exec(text)![0];
+  const body = text.slice(lead.length).replace(/(?:\r?\n[ \t]*)+$/, '');
+  // Line numbers count from the top of what was pasted.
+  const above = lead.split('\n').length - 1;
+  if (!body.includes('\t')) {
+    // Typed with commas (or semicolons) between the values; otherwise one column (e.g. names copied from a single
+    // column in Excel, which puts no tab on the clipboard): one value per line, so “Bohr, Niels” stays one name.
+    const [head = '', ...rest] = body.split(/\r?\n/);
+    if (/[,;]/.test(head)) return readDelimited('pasted', body, '');
+    const name = head.trim();
+    return { name: 'pasted', columns: name ? [name] : [], rows: name ? rest.filter((l) => l.trim() !== '').map((l) => ({ [name]: l })) : [], problems: [] };
+  }
+  // Read as written (a row per line, a cell per tab), unless that doesn't give every row as many cells as there are
+  // column names and Excel's quoting does (a cell in quotes holds a line break). So quotation marks as text,
+  // e.g. ditto marks (") or a title that starts with one, never join rows.
+  const blank = (r: string[]) => r.every((c) => c.trim() === '');
+  const misfits = (rows: string[][]) => rows.flatMap((r, k) => (k > 0 && !blank(r) && r.length !== rows[0].length ? [k] : []));
+  const literal = body.split(/\r?\n/).map((l) => l.split('\t'));
+  const bad = misfits(literal);
+  const quoted = bad.length ? splitTabbed(body) : [];
+  const read = bad.length && !misfits(quoted).length ? quoted : literal;
+  const mismatch = read === literal ? bad.map((k) => k + 1 + above) : [];
+  const [head = [], ...rest] = read;
   // Blank lines (e.g. between pasted blocks) are not rows.
-  const lines = rest.filter((r) => r.some((c) => c.trim() !== ''));
+  const lines = rest.filter((r) => !blank(r));
   const keep = head.map((c, i) => [c.trim(), i] as const).filter(([c]) => c !== '');
-  const mismatch = lines.map((r, k) => [r.length, k] as const).filter(([len]) => len !== head.length).map(([, k]) => k + 2);
+  const { names, renamed } = uniqueNames(keep.map(([c]) => c));
   return {
     name: 'pasted',
-    columns: keep.map(([c]) => c),
-    rows: lines.map((r) => Object.fromEntries(keep.map(([c, i]) => [c, r[i] ?? '']))),
-    problems: mismatch.length
-      ? [`${mismatch.length} row${mismatch.length === 1 ? ' has' : 's have'} more or fewer cells than there are column names (line ${mismatch.slice(0, 5).join(', ')}${mismatch.length > 5 ? ', …' : ''}).`]
-      : [],
+    columns: names,
+    rows: lines.map((r) => Object.fromEntries(keep.map(([, i], j) => [names[j], r[i] ?? '']))),
+    problems: [
+      ...(mismatch.length
+        ? [
+            `${mismatch.length} row${mismatch.length === 1 ? ' has' : 's have'} more or fewer cells than there are column names (line ${mismatch.slice(0, 5).join(', ')}${mismatch.length > 5 ? ', …' : ''}), ` +
+              'so some values may be under the wrong column. Check those rows.',
+          ]
+        : []),
+      ...renamedNote(renamed),
+    ],
   };
 }
 

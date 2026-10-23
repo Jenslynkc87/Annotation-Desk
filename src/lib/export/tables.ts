@@ -1,7 +1,7 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
 import { comparableFields, fieldValue, type ComparableField } from '../compare';
-import { agreement, type Agreement, type Level } from '../metrics';
+import { agreement, isMissingLabel, type Agreement, type Level } from '../metrics';
 import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields, toNumber } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
@@ -111,11 +111,18 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
   const docById = new Map(docs.map((d) => [d.id, d]));
   const runById = new Map(runs.map((r) => [r.id, r]));
   const rows: Row[] = [];
+  // Texts no longer in the study go after all present ones, each with its replicates together.
+  const pos = (id: string) => docById.get(id)?.order ?? Number.MAX_SAFE_INTEGER;
   const sorted = [...results].sort((a, b) => {
     const ra = runById.get(a.runId)?.number ?? 0;
     const rb = runById.get(b.runId)?.number ?? 0;
-    return ra - rb || (docById.get(a.docId)?.order ?? 0) - (docById.get(b.docId)?.order ?? 0) || a.replicate - b.replicate;
+    return ra - rb || pos(a.docId) - pos(b.docId) || (a.docId < b.docId ? -1 : a.docId > b.docId ? 1 : 0) || a.replicate - b.replicate;
   });
+  // Plain-text runs that answered with JSON: one list of columns for the whole table, over all the answers (so every
+  // row has them in the same place, whichever request comes first or failed).
+  const isText = (r: Result) => runById.get(r.runId)?.snapshot.prompt.outputMode === 'text';
+  const textRun = runs.find((run) => run.snapshot.prompt.outputMode === 'text');
+  const jsonKeys = textRun ? jsonKeyOrder(textRun, sorted.filter(isText).map((r) => r.values[TEXT_RESPONSE_KEY])) : [];
   for (const r of sorted) {
     const run = runById.get(r.runId);
     if (!run) continue;
@@ -134,7 +141,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       status: r.status,
     };
     for (const f of outputFields(run.snapshot.prompt)) row[fieldColumn(run, f)] = isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
-    Object.assign(row, jsonColumns(jsonKeyOrder(run, [r.values[TEXT_RESPONSE_KEY]]), r.values[TEXT_RESPONSE_KEY]));
+    if (isText(r)) Object.assign(row, jsonColumns(jsonKeys, r.values[TEXT_RESPONSE_KEY]));
     if (opts.rationale) row.rationale = r.rationale;
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
     Object.assign(row, {
@@ -213,6 +220,8 @@ export interface AgreementRow {
 /** Words in a column name that mark coders' notes or ratings about a field, not labels for it (race_note,
  *  race_confidence, race_explanation_coder2). */
 const NOT_LABEL_WORDS = new Set(['explanation', 'explanations', 'reasoning', 'rationale', 'note', 'notes', 'comment', 'comments', 'memo', 'confidence', 'certainty', 'flag', 'flags']);
+/** Words that mark metadata about a text's author, not a label for the text (author_gender for a gender field). */
+const AUTHOR_WORDS = new Set(['author', 'authors']);
 
 /** The rest of a column's name around a field's name ("gold" in race_gold or gold_race); null if not named after it. */
 function nameRest(column: string, field: string): string | null {
@@ -238,25 +247,46 @@ function fitsField(v: string, f: ComparableField): boolean {
 
 /**
  * Metadata columns that hold human labels for a field: named after it ("sentiment", "sentiment_gold",
- * "human_sentiment", "sentiment_coder2") and, when the field is known, holding mostly its values. Not labels:
- * coders' notes and ratings named after it (sentiment_explanation, sentiment_note, sentiment_confidence); a
- * column named after a longer field in `knownFields` (gender_role_gold belongs to gender_role, not gender);
- * and a column whose values are mostly not values of the field (e.g. author_race holding words, for a −3…3 scale).
+ * "human_sentiment", "sentiment_coder2") and, when the field is known, holding mostly its values (blank cells and
+ * missing-value markers such as "NA" aside). Not labels, and listed in `skipped` with the reason: coders' notes and
+ * ratings named after it (sentiment_explanation, sentiment_note, sentiment_confidence); metadata about the author
+ * (author_gender); a column named after a longer field in `knownFields` (gender_role_gold belongs to gender_role,
+ * not gender); and a column whose values are mostly not values of the field (e.g. race_old holding words, for a
+ * −3…3 scale).
  */
-export function goldColumnsFor(field: ComparableField | string, docs: Doc[], knownFields: string[] = []): string[] {
+export function labelColumnsFor(
+  field: ComparableField | string,
+  docs: Doc[],
+  knownFields: string[] = [],
+): { columns: string[]; skipped: { column: string; reason: string }[] } {
   const f = typeof field === 'string' ? null : field;
   const key = typeof field === 'string' ? field : field.key;
   const longer = knownFields.filter((g) => g.toLowerCase() !== key.toLowerCase() && g.length > key.length);
-  return metaColumns(docs).filter((c) => {
+  const columns: string[] = [];
+  const skipped: { column: string; reason: string }[] = [];
+  for (const c of metaColumns(docs)) {
     const rest = nameRest(c, key);
-    if (rest === null) return false;
-    if (isExplanationKey(c.toLowerCase()) && !isExplanationKey(key.toLowerCase())) return false;
-    if (rest.split('_').some((w) => NOT_LABEL_WORDS.has(w))) return false;
-    if (longer.some((g) => nameRest(c, g) !== null)) return false;
-    if (!f) return true;
-    const values = docs.map((d) => d.meta[c] ?? '').filter((v) => v.trim() !== '');
-    return values.length > 0 && values.filter((v) => fitsField(v, f)).length >= values.length / 2;
-  });
+    if (rest === null) continue;
+    const owner = longer.find((g) => nameRest(c, g) !== null);
+    let reason: string | null = null;
+    if ((isExplanationKey(c.toLowerCase()) && !isExplanationKey(key.toLowerCase())) || rest.split('_').some((w) => NOT_LABEL_WORDS.has(w))) reason = 'a note or rating';
+    else if (rest.split('_').some((w) => AUTHOR_WORDS.has(w))) reason = 'about the author';
+    else if (owner) reason = `belongs to ${owner}`;
+    else if (f) {
+      // A missing-value marker (e.g. "NA" for an uncoded text) is no label, unless the field has it as a category.
+      const values = docs.map((d) => d.meta[c] ?? '').filter((v) => v.trim() !== '' && (!isMissingLabel(v) || fitsField(v, f)));
+      if (!values.length) reason = `no labels for ${key}`;
+      else if (values.filter((v) => fitsField(v, f)).length < values.length / 2) reason = `mostly not values of ${key}`;
+    }
+    if (reason) skipped.push({ column: c, reason });
+    else columns.push(c);
+  }
+  return { columns, skipped };
+}
+
+/** The label columns of a field (see `labelColumnsFor`). */
+export function goldColumnsFor(field: ComparableField | string, docs: Doc[], knownFields: string[] = []): string[] {
+  return labelColumnsFor(field, docs, knownFields).columns;
 }
 
 /** The label column to show first for a field: one named exactly like it, else a "gold" or "human" one, else the first. */
@@ -269,18 +299,60 @@ export function preferredGoldColumn(field: string, columns: string[]): string | 
   );
 }
 
-/** Every field name a study or its runs use (current prompt, saved prompts, runs), to tell gender from gender_role. */
-export function knownFieldNames(study: Study | null, runs: Run[], extra: string[] = []): string[] {
-  const prompts = [...(study ? [study.prompt, ...(study.savedPrompts ?? []).map((x) => x.prompt)] : []), ...runs.map((r) => r.snapshot.prompt)];
-  return [...new Set([...prompts.flatMap((p) => p.variables.map((v) => v.name)), ...extra])];
+/** How many JSON answers of each plain-text run `knownFieldNames` reads for their score keys. */
+const JSON_KEYS_SAMPLE = 200;
+
+/** The score keys (values mostly numbers) in the JSON answers of plain-text runs, from up to `perRun` answers per run. */
+function jsonScoreKeys(runs: Run[], results: Result[], perRun = JSON_KEYS_SAMPLE): string[] {
+  const textRuns = new Set(runs.filter((r) => r.snapshot.prompt.outputMode === 'text').map((r) => r.id));
+  if (!textRuns.size) return [];
+  const read = new Map<string, number>();
+  const counts = new Map<string, { numbers: number; values: number }>();
+  for (const r of results) {
+    if (r.status !== 'ok' || !textRuns.has(r.runId) || (read.get(r.runId) ?? 0) >= perRun) continue;
+    const flat = flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]);
+    if (!flat) continue;
+    read.set(r.runId, (read.get(r.runId) ?? 0) + 1);
+    for (const [k, v] of Object.entries(flat)) {
+      if (v.trim() === '') continue;
+      const c = counts.get(k) ?? { numbers: 0, values: 0 };
+      c.values++;
+      if (Number.isFinite(toNumber(v))) c.numbers++;
+      counts.set(k, c);
+    }
+  }
+  return [...counts].filter(([, c]) => c.numbers > 0 && c.numbers >= c.values / 2).map(([k]) => k);
 }
 
-/** The fields of a run agreement can be computed on, each with the label columns that belong to it. */
-export function labelPairs(run: Run, docs: Doc[], allRuns: Run[], results: Result[], study: Study | null = null): { fields: ComparableField[]; pairs: { field: string; column: string }[] } {
+/**
+ * Every field name a study or its runs use (current prompt, saved prompts, runs, and with `results`, the score keys
+ * of plain-text runs' JSON answers), to tell gender from gender_role.
+ */
+export function knownFieldNames(study: Study | null, runs: Run[], extra: string[] = [], results: Result[] = []): string[] {
+  const prompts = [...(study ? [study.prompt, ...(study.savedPrompts ?? []).map((x) => x.prompt)] : []), ...runs.map((r) => r.snapshot.prompt)];
+  return [...new Set([...prompts.flatMap((p) => p.variables.map((v) => v.name)), ...jsonScoreKeys(runs, results), ...extra])];
+}
+
+/**
+ * The fields of a run agreement can be computed on, each with the label columns that belong to it, and the columns
+ * named after a field that are not used, with the reason (e.g. "mostly not values of race").
+ */
+export function labelPairs(
+  run: Run,
+  docs: Doc[],
+  allRuns: Run[],
+  results: Result[],
+  study: Study | null = null,
+): { fields: ComparableField[]; pairs: { field: string; column: string }[]; skipped: { field: string; column: string; reason: string }[] } {
   const views = buildDocViews(docs, allRuns, results, run.id);
   const fields = comparableFields(run, views.values());
-  const known = knownFieldNames(study, allRuns, fields.map((f) => f.key));
-  return { fields, pairs: fields.flatMap((f) => goldColumnsFor(f, docs, known).map((column) => ({ field: f.key, column }))) };
+  const known = knownFieldNames(study, allRuns, fields.map((f) => f.key), results);
+  const found = fields.map((f) => ({ field: f.key, ...labelColumnsFor(f, docs, known) }));
+  return {
+    fields,
+    pairs: found.flatMap(({ field, columns }) => columns.map((column) => ({ field, column }))),
+    skipped: found.flatMap(({ field, skipped }) => skipped.map((x) => ({ field, ...x }))),
+  };
 }
 
 export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: Result[], study: Study | null = null): AgreementRow[] {
@@ -387,7 +459,8 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       requests_replaced_by_retries: r.replaced?.requests ?? 0,
       provider: r.snapshot.model.provider,
       model_requested: r.snapshot.model.model,
-      models_reported: [...new Set(rs.map((x) => x.modelReported).filter(Boolean))].join('; '),
+      // (Of usable answers only: a failed one may come from another model, e.g. the refusal fallback of the first version.)
+      models_reported: [...new Set(rs.filter((x) => x.status === 'ok').map((x) => x.modelReported).filter(Boolean))].join('; '),
       effort: r.snapshot.model.effort || 'default',
       thinking: r.snapshot.model.provider === 'anthropic' ? thinkingLabel(r.snapshot.model.model, r.snapshot.model.reasoningSummary) : '',
       temperature: r.snapshot.model.temperature ?? 'default',

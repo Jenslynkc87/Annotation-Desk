@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { buildBackup } from '../lib/export/backup';
-import { buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from '../lib/export/packages';
+import { buildExcel, buildResearchRepo, buildSupplementary, runInProgress, type ExportData } from '../lib/export/packages';
 import { labelPairs } from '../lib/export/tables';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
@@ -18,9 +18,14 @@ export function ExportView() {
   const results = useStore((s) => s.results);
   const docs = useStore((s) => s.docs);
   const withResults = runs.filter((r) => results.some((x) => x.runId === r.id));
-  // The run picked, else the latest with results (also once the first results arrive while this tab is open).
+  // The run picked; until then the latest finished run with results (else the latest with results, e.g. once the
+  // first results arrive while this tab is open). Once shown it stays: a run that is still being sent doesn't take
+  // its place when its first results come in.
   const [runId, setRunId] = useState('');
-  const run = withResults.find((r) => r.id === runId) ?? withResults[withResults.length - 1];
+  const run = withResults.find((r) => r.id === runId) ?? [...withResults].reverse().find((r) => !runInProgress(r)) ?? withResults[withResults.length - 1];
+  useEffect(() => {
+    if (run && run.id !== runId) setRunId(run.id);
+  }, [run, runId]);
   const [busy, setBusy] = useState('');
   const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(true);
@@ -37,12 +42,27 @@ export function ExportView() {
   };
 
   const study = useStore((s) => currentStudy(s))!;
-  // The label columns agreement is computed for (as in the exports: codebook fields, or scores in JSON answers).
-  const gold = useMemo(() => {
-    if (!run) return [];
-    const { fields, pairs } = labelPairs(run, docs, runs, results, study);
-    return pairs.map((p) => `${fields.find((f) => f.key === p.field)?.label ?? p.field} ↔ ${p.column}`);
+  // The label columns agreement is computed for (as in the exports: codebook fields, or scores in JSON answers), and
+  // the columns named after a field that are not used, with the reason.
+  const { gold, skipped } = useMemo(() => {
+    if (!run) return { gold: [], skipped: [] };
+    const { fields, pairs, skipped } = labelPairs(run, docs, runs, results, study);
+    // Each column once, and not one used for another field (gender_role_gold is skipped for gender, used for gender_role).
+    const notUsed = new Map<string, string>();
+    for (const x of skipped) if (!pairs.some((p) => p.column === x.column) && !notUsed.has(x.column)) notUsed.set(x.column, `${x.column} (${x.reason})`);
+    return {
+      gold: pairs.map((p) => `${fields.find((f) => f.key === p.field)?.label ?? p.field} ↔ ${p.column}`),
+      skipped: [...notUsed.values()],
+    };
   }, [run, docs, runs, results, study]);
+  // A run still being sent: how far it has got.
+  const progress = useMemo(() => {
+    if (!run || !runInProgress(run)) return null;
+    const present = new Set(docs.map((d) => d.id));
+    const answered = new Set(results.filter((x) => x.runId === run.id).map((x) => x.docId));
+    const own = run.docIds.filter((id) => present.has(id));
+    return { done: own.filter((id) => answered.has(id)).length, total: own.length };
+  }, [run, docs, results]);
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
 
   return (
@@ -56,13 +76,21 @@ export function ExportView() {
               {[...withResults].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
                   Run {runTitle(r)} · {r.scope} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model} · {fmtDateTime(r.createdAt)}
+                  {runInProgress(r) ? ' · still running' : ''}
                 </option>
               ))}
             </select>
           </div>
+          {progress && (
+            <div className="notice warn" style={{ marginBottom: 8, maxWidth: 640 }}>
+              This run is not finished yet ({progress.done.toLocaleString('en-US')} of {progress.total.toLocaleString('en-US')} {w.many} have results so far). Excel and
+              the supplementary package show the results so far, and say that the run was not finished.
+            </div>
+          )}
           <div className="hint">
             Excel and the supplementary package describe this one run (typically your final, full run). The research repository always includes every run.
             {gold.length > 0 && <> Agreement is computed automatically for: {gold.join(', ')}.</>}
+            {skipped.length > 0 && <> Not used for agreement: {skipped.join(', ')}.</>}
           </div>
         </div>
       </div>

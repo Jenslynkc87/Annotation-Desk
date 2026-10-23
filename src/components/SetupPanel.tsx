@@ -84,10 +84,9 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   const noTemperature = m.provider === 'anthropic' && rejectsTemperature(m.model);
   const metaColumns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))].slice(0, 30), [docs]);
   const allMetaColumns = useMemo(() => new Set(docs.flatMap((d) => Object.keys(d.meta))), [docs]);
-  const unknownPlaceholders = [
-    ...templatePlaceholders(p.userTemplate).filter((k) => k !== 'text' && k !== 'id' && !(k.startsWith('meta.') && allMetaColumns.has(k.slice(5)))),
-    ...invalidPlaceholders(p.userTemplate),
-  ];
+  // {{meta.x}} without such a column is filled in empty; any other unknown or malformed {{…}} is sent as written.
+  const missingColumns = templatePlaceholders(p.userTemplate).filter((k) => k.startsWith('meta.') && !allMetaColumns.has(k.slice(5)));
+  const unknownPlaceholders = [...templatePlaceholders(p.userTemplate).filter((k) => k !== 'text' && k !== 'id' && !k.startsWith('meta.')), ...invalidPlaceholders(p.userTemplate)];
 
   const ownPrice = priceOverrides[m.model];
   const price = ownPrice ?? builtInPrice(m.model);
@@ -335,6 +334,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
               ? 'Paste your prompt here. Each entry’s details are added after it automatically, between <entry> tags.'
               : 'Paste your prompt here. Each text from your corpus is added after it automatically.'}
           </div>
+          {missingColumns.length > 0 && <div className="hint warn">No such column: {missingColumns.join(', ')} (filled in empty).</div>}
           {unknownPlaceholders.length > 0 && <div className="hint warn">Unknown placeholder(s): {unknownPlaceholders.join(', ')} (sent as written).</div>}
         </div>
         <details className="more" open={!!p.system.trim()}>

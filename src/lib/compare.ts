@@ -28,7 +28,8 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
         key: v.name,
         label: fieldLabel(p, v.name),
         level: v.type === 'ordinal' ? 'ordinal' : v.type === 'number' ? 'interval' : 'nominal',
-        allowed: v.type === 'category' || v.type === 'ordinal' ? v.values.map((x) => normalizeLabel(x)).filter(Boolean) : [],
+        // Yes/no: its two values are its categories (a tie "false | true" is no third one).
+        allowed: v.type === 'category' || v.type === 'ordinal' ? v.values.map((x) => normalizeLabel(x)).filter(Boolean) : v.type === 'boolean' ? ['false', 'true'] : [],
         yesNo: v.type === 'boolean',
       }));
   }
@@ -41,7 +42,12 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       if (r.status !== 'ok') continue;
       const flat = flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]);
       if (!flat) continue;
-      for (const [k, v] of Object.entries(flat)) if (v.trim() !== '') values.set(k, [...(values.get(k) ?? []), v]);
+      for (const [k, v] of Object.entries(flat)) {
+        if (v.trim() === '') continue;
+        const list = values.get(k);
+        if (list) list.push(v);
+        else values.set(k, [v]);
+      }
     }
   }
   // A field of scores, even if a few answers are not numbers (e.g. "NA", left out and reported by `agreement`).
@@ -52,8 +58,9 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       const ordinal = nums.every(Number.isInteger);
       // Whole-number scores: the scale is every value from the lowest to the highest seen, so weighted κ measures
       // distances on the scale even where a value (e.g. −2) was never used. (No codebook says what the scale is.)
-      const lo = Math.min(...nums);
-      const hi = Math.max(...nums);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const x of nums) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
       const allowed = ordinal && hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [];
       return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, yesNo: false };
     });

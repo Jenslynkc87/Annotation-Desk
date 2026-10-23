@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { agreement, fixed, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
-import { combineFields, comparableFields, fieldValue } from '../lib/compare';
+import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
-import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
-import { cachingLabel, goldColumnsFor, knownFieldNames, preferredGoldColumn } from '../lib/export/tables';
+import { effectiveTemplate, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
+import { cachingLabel, goldColumnsFor, knownFieldNames, labelPairs, preferredGoldColumn } from '../lib/export/tables';
 import { batchParts, cancelBatch, checkBatch, currentStudy, deleteRunById, getState, isBusy, renameRun, retryableCount, retryFailed, sharedBatches, toast, useStore } from '../lib/store';
-import type { Run } from '../lib/types';
+import type { Doc, Result, Run, Study } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, runTitle, runTokens } from '../lib/view';
 import { Modal } from './ui';
@@ -134,9 +134,9 @@ export function RunsView() {
                               <button
                                 className="btn small"
                                 onClick={async () => {
-                                  // A batch a copy of this study (imported from a backup) also waits for stops there too.
+                                  // A batch another study here also waits for (a copy of this study, or the study it was copied from) stops there too.
                                   const shared = [...new Set((await sharedBatches(r).catch(() => new Map<string, string>())).values())];
-                                  const also = shared.length ? ` It is also the batch of ${shared.map((x) => `"${x}"`).join(', ')} (a copy from a backup), which would lose it too.` : '';
+                                  const also = shared.length ? ` It is also the batch of ${quoted(shared)} (${OTHER_STUDY_HERE}), which would lose it too.` : '';
                                   if (!confirm(`Cancel this batch at the provider?${also}`)) return;
                                   const why = await cancelBatch(r.id);
                                   toast(why || 'Cancellation requested. Results finished before cancelling will still be collected.', why ? 'error' : 'info');
@@ -150,13 +150,14 @@ export function RunsView() {
                             className="btn small danger"
                             disabled={r.status === 'running' || uploading}
                             onClick={async () => {
-                              // A batch that a copy of this study (from a backup) also waits for is left running for that copy.
+                              // A batch that another study here also waits for (a copy of this study, or the study it was copied
+                              // from) is left running for it. A copy in another browser can't be seen from here: say so.
                               const shared = r.status === 'submitted' ? await sharedBatches(r).catch(() => new Map<string, string>()) : new Map<string, string>();
                               const pending =
                                 r.status === 'submitted'
                                   ? shared.size
-                                    ? ` Its batch is left running for ${[...new Set(shared.values())].map((x) => `"${x}"`).join(', ')} (a copy from a backup), which collects it.`
-                                    : ' The batch is still running at the provider and will be cancelled.'
+                                    ? ` Its batch is left running for ${quoted([...new Set(shared.values())])} (${OTHER_STUDY_HERE}), which collects it.`
+                                    : ` The batch is still running at the provider and will be cancelled. ${copyElsewhere()}`
                                   : '';
                               if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending} This cannot be undone.`)) return;
                               // A batch that could not be cancelled would go on (and be charged) with nowhere to deliver its results: ask.
@@ -236,7 +237,81 @@ function decode(v: string): Source | null {
 }
 
 /** Choice in the Field menu for two label columns that belong to no field: compare their values as they are. */
-const NO_FIELD = '\u0000none';
+export const NO_FIELD = '\u0000none';
+
+/** Shared-batch wording: who else may wait for a batch another study in this browser also lists (either way round). */
+export const OTHER_STUDY_HERE = 'another study here, e.g. a copy from a backup or the study this one was copied from';
+/**
+ * Said wherever deleting cancels batches (`n` of them): the same study restored elsewhere from a backup (or, for a
+ * restored study, the original) can't be seen from this browser.
+ */
+export const copyElsewhere = (n = 1) =>
+  `The same study in another browser or on another computer (a copy from a backup, or the study this one was copied from) that waits for the same ${n === 1 ? 'batch would lose it' : 'batches would lose them'} too, since this browser can’t see it.`;
+export const quoted = (names: string[]) => names.map((x) => `“${x}”`).join(', ');
+
+/** Is a column named after a field (race, race_gold, gold_race), as the exports' label columns are? */
+const namedAfter = (column: string, field: string) => {
+  const c = column.toLowerCase();
+  const f = field.toLowerCase();
+  return c === f || c.startsWith(`${f}_`) || c.endsWith(`_${f}`);
+};
+
+/** The field names a run could have: its codebook's, or the keys in its plain-text JSON answers. */
+function fieldNamesOf(run: Run, results: Result[]): string[] {
+  const p = run.snapshot.prompt;
+  if (p.outputMode === 'structured') return p.variables.map((v) => v.name);
+  const keys = new Set<string>();
+  for (const r of results) if (r.runId === run.id && r.status === 'ok') for (const k of Object.keys(flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]) ?? {})) keys.add(k);
+  return [...keys];
+}
+
+/**
+ * Two label columns: the field both belong to (e.g. race_gold and race_coder2 → race), as in the exports'
+ * human–human rows, with its scale, level and yes/no rule. Taken from the newest run that has such a field, so
+ * a later run of another prompt (a pilot, a renamed field) doesn't lose it. Undefined when no run has one.
+ */
+export function columnsFieldRun(
+  colA: string,
+  colB: string,
+  study: Study | null,
+  runs: Run[],
+  docs: Doc[],
+  results: Result[],
+): { run: Run; fields: ComparableField[]; field: ComparableField } | undefined {
+  for (const run of [...runs].reverse()) {
+    // A quick look at the names first, so only a run that may have the field is read in full.
+    if (!fieldNamesOf(run, results).some((n) => namedAfter(colA, n) && namedAfter(colB, n))) continue;
+    const { fields, pairs } = labelPairs(run, docs, runs, results, study);
+    const has = (key: string, col: string) => pairs.some((x) => x.field === key && x.column === col);
+    const field = fields.find((x) => has(x.key, colA) && has(x.key, colB));
+    if (field) return { run, fields, field };
+  }
+  return undefined;
+}
+
+/**
+ * The Field menu's choice in effect. For two label columns, a field picked applies to the pair it was picked for
+ * only: a new pair starts from the field its columns belong to (`columnsField`), or none. Otherwise the pick (if
+ * any) applies, else the first field.
+ */
+export function chosenField(
+  pick: { pair: string; key: string } | null,
+  pair: string,
+  bothColumns: boolean,
+  fields: ComparableField[],
+  columnsField: ComparableField | undefined,
+): ComparableField | undefined {
+  if (!bothColumns) return fields.find((x) => x.key === pick?.key) ?? fields[0];
+  const key = pick?.pair === pair ? pick.key : '';
+  return key === NO_FIELD ? undefined : (fields.find((x) => x.key === key) ?? columnsField);
+}
+
+/** Why labels were left out of the comparison, e.g. "a label isn’t a number or is outside the scale (−3 to 3)". */
+export function leftOutReason(level: Level, range?: [number, number]): string {
+  if (level === 'nominal') return 'a label isn’t one of the field’s values';
+  const num = (x: number) => (x < 0 ? `−${-x}` : String(x));
+  return `a label isn’t a number or is outside the scale${range ? ` (${num(range[0])} to ${num(range[1])})` : ''}`;
+}
 
 function AgreementPanel() {
   const study = useStore((s) => currentStudy(s))!;
@@ -249,14 +324,16 @@ function AgreementPanel() {
   const [aPicked, setA] = useState(encode({ kind: 'run', id: latest.id }));
   // Pre-select a label column only when it belongs to a field (e.g. sentiment ↔ sentiment_gold), the clearest first.
   const [bPicked, setB] = useState(() => {
-    const first = comparableFields(latest, buildDocViews(docs, runs, results, latest.id).values())[0];
-    const col = first ? preferredGoldColumn(first.key, goldColumnsFor(first, docs, knownFieldNames(study, runs))) : undefined;
+    const fs = comparableFields(latest, buildDocViews(docs, runs, results, latest.id).values());
+    const first = fs[0];
+    const col = first ? preferredGoldColumn(first.key, goldColumnsFor(first, docs, knownFieldNames(study, runs, fs.map((x) => x.key), results))) : undefined;
     return col ? encode({ kind: 'meta', col }) : '';
   });
-  // A run picked here may have been deleted since: fall back to the latest run (left) or nothing (right).
+  // A run or column picked here may be gone since (deleted, or another study opened): fall back to the latest run
+  // (left) or nothing (right).
   const exists = (v: string) => {
     const s = decode(v);
-    return !!s && (s.kind === 'meta' || runs.some((r) => r.id === (s.kind === 'run' ? s.id : s.runId)));
+    return !!s && (s.kind === 'meta' ? metaCols.includes(s.col) : runs.some((r) => r.id === (s.kind === 'run' ? s.id : s.runId)));
   };
   const a = exists(aPicked) ? aPicked : encode({ kind: 'run', id: latest.id });
   const b = exists(bPicked) ? bPicked : '';
@@ -265,32 +342,36 @@ function AgreementPanel() {
     src?.kind === 'run' ? runs.find((r) => r.id === src.id) : src?.kind === 'rep' ? runs.find((r) => r.id === src.runId) : undefined;
   const srcB = decode(b);
   const bothColumns = srcA?.kind === 'meta' && srcB?.kind === 'meta';
-  // Either side may be a label column (e.g. two human coders); the field list comes from whichever side is a run
-  // (for two label columns: from the latest run, so that their field's scale and level apply, as in the exports).
-  const runA = runOf(srcA) ?? runOf(srcB) ?? (bothColumns ? latest : undefined);
+  // Two label columns (e.g. two human coders): the field both belong to, from the newest run that has it, so that
+  // its scale, level and yes/no rule apply, as in the exports.
+  const columnsMatch = useMemo(
+    () => (srcA?.kind === 'meta' && srcB?.kind === 'meta' ? columnsFieldRun(srcA.col, srcB.col, study, runs, docs, results) : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [a, b, study, runs, docs, results],
+  );
+  // Either side may be a label column; the field list comes from whichever side is a run (for two label columns:
+  // from the run their field was found in, else the latest run).
+  const runA = runOf(srcA) ?? runOf(srcB) ?? (bothColumns ? (columnsMatch?.run ?? latest) : undefined);
   const runB = runOf(srcA) ? runOf(srcB) : undefined;
   // Fields agreement can be computed on (codebook fields, or the numeric scores in JSON answers). Two runs:
   // plain-text scores get the range seen in either run, so it doesn't matter which side is which.
-  const fieldsA = useMemo(() => (runA ? comparableFields(runA, buildDocViews(docs, runs, results, runA.id).values()) : []), [runA, docs, runs, results]);
+  const fieldsA = useMemo(
+    () => (!runA ? [] : columnsMatch?.run === runA ? columnsMatch.fields : comparableFields(runA, buildDocViews(docs, runs, results, runA.id).values())),
+    [runA, columnsMatch, docs, runs, results],
+  );
   const fieldsB = useMemo(() => (runB && runB !== runA ? comparableFields(runB, buildDocViews(docs, runs, results, runB.id).values()) : []), [runA, runB, docs, runs, results]);
   const fields = useMemo(() => fieldsA.map((x) => combineFields(x, fieldsB.find((y) => y.key === x.key))), [fieldsA, fieldsB]);
-  const known = useMemo(() => knownFieldNames(study, runs, fieldsA.map((x) => x.key)), [study, runs, fieldsA]);
-  // Two label columns: the field both belong to by name (e.g. race_gold and race_coder2 → race), unless one is chosen.
-  const columnsField = useMemo(
-    () =>
-      srcA?.kind === 'meta' && srcB?.kind === 'meta'
-        ? fields.find((x) => {
-            const cols = goldColumnsFor(x, docs, known);
-            return cols.includes(srcA.col) && cols.includes(srcB.col);
-          })
-        : undefined,
-    [srcA, srcB, fields, docs, known],
-  );
-  const [field, setField] = useState('');
-  const cf = bothColumns ? (field === NO_FIELD ? undefined : (fields.find((x) => x.key === field) ?? columnsField)) : (fields.find((x) => x.key === field) ?? fields[0]);
+  const columnsField = bothColumns && columnsMatch ? fields.find((x) => x.key === columnsMatch.field.key) : undefined;
+  // A field picked in the menu, with the pair of sources it was picked for (see `chosenField`).
+  const pair = `${a}\u0001${b}`;
+  const [fieldPick, setFieldPick] = useState<{ pair: string; key: string } | null>(null);
+  const cf = chosenField(fieldPick, pair, bothColumns, fields, columnsField);
   const f = cf?.key ?? '';
   const autoLevel: Level = cf?.level ?? 'nominal';
-  const [levelOverride, setLevelOverride] = useState<'' | Level>('');
+  // A level picked by hand, for the pair of sources it was picked for (a new pair starts from its field's level).
+  const [levelPick, setLevelPick] = useState<{ pair: string; level: '' | Level } | null>(null);
+  const levelOverride: '' | Level = levelPick?.pair === pair ? levelPick.level : '';
+  const setLevelOverride = (level: '' | Level) => setLevelPick({ pair, level });
   const level = levelOverride || autoLevel;
   const [tolerance, setTolerance] = useState(1);
 
@@ -487,7 +568,7 @@ function AgreementPanel() {
         </div>
         <div className="field">
           <label>{bothColumns ? 'Field (scale and level)' : 'Field'}</label>
-          <select className="select" value={bothColumns && !cf ? NO_FIELD : f} onChange={(e) => setField(e.target.value)}>
+          <select className="select" value={bothColumns && !cf ? NO_FIELD : f} onChange={(e) => setFieldPick({ pair, key: e.target.value })}>
             {bothColumns && <option value={NO_FIELD}>None: compare the values as they are</option>}
             {fields.map((x) => (
               <option key={x.key} value={x.key}>
@@ -547,12 +628,20 @@ function AgreementPanel() {
       ) : !b ? (
         <div className="hint">Choose what to compare with. To compare with human labels, import them as a column alongside your {w.many}.</div>
       ) : stats.n === 0 ? (
-        <div className="notice warn">No {w.many} have a value in both sources for "{f}".</div>
+        <div className="notice warn">
+          No {w.many} have a value in both sources{f ? ` for “${cf?.label ?? f}”` : ''}.
+        </div>
       ) : (
         <>
+          {bothColumns && (
+            <div className="hint" style={{ marginTop: 6 }}>
+              Two label columns are compared on every {w.one} in the study that has both labels. The human–human rows in the exports use only the {w.many} of
+              the run being exported, so their figures can differ.
+            </div>
+          )}
           {stats.leftOut.n > 0 && (
             <div className="notice warn" style={{ marginTop: 6 }}>
-              {fmtInt(stats.leftOut.n)} {stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because a label isn't a number or is outside the scale:{' '}
+              {fmtInt(stats.leftOut.n)} {stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because {leftOutReason(level, stats.leftOut.range)}:{' '}
               {stats.leftOut.values.map((v) => `“${v}”`).join(', ')}
               {stats.leftOut.values.length === 5 ? ', …' : ''}.
             </div>

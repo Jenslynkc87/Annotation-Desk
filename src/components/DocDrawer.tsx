@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getLog } from '../lib/db';
+import { requestAsSent } from '../lib/export/packages';
 import { fieldLabel, outputFields } from '../lib/prompt';
 import { currentStudy, isBusy, startRun, useStore } from '../lib/store';
 import { words } from '../lib/subject';
@@ -212,7 +213,7 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
           ) : (
             <>
               <p className="section-title" style={{ marginTop: 12 }}>Request (shared part + this {words(run.snapshot.prompt).one})</p>
-              <RequestView request={{ ...run.snapshot.requestBase, ...log.requestPart }} />
+              <RequestView request={requestAsSent(run, log, r.attempt ?? 1)} />
               <p className="section-title" style={{ marginTop: 12 }}>Response</p>
               <pre className="textblock mono">{JSON.stringify(log.response, null, 2)}</pre>
             </>

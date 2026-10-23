@@ -4,7 +4,7 @@ import { logPagesForRun } from '../db';
 import { fixed, fmtStat } from '../metrics';
 import { combineFields, comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
-import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel } from '../prompt';
+import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY } from '../prompt';
 import { buildDocViews } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
@@ -113,7 +113,7 @@ function settingsRows(study: Study, run: Run): Row[] {
     ...(study.description.trim() ? [{ setting: 'Study notes (e.g. how samples were drawn)', value: study.description.trim() }] : []),
     { setting: 'Run', value: `#${run.number}${run.label ? ` (${run.label})` : ''}` },
     { setting: 'Started', value: run.createdAt },
-    { setting: 'Finished', value: run.finishedAt },
+    { setting: 'Finished', value: run.finishedAt ?? (runInProgress(run) ? 'not finished when exported (the results so far)' : null) },
     { setting: 'Provider', value: m.provider },
     { setting: 'Model', value: m.model },
     { setting: 'Effort / reasoning', value: m.effort || 'model default' },
@@ -132,8 +132,36 @@ function settingsRows(study: Study, run: Run): Row[] {
   ];
 }
 
-function runFolder(run: Run): string {
-  return `run-${String(run.number).padStart(2, '0')}${run.label ? '-' + slug(run.label) : ''}`;
+const runFolderBase = (r: Run) => `run-${String(r.number).padStart(2, '0')}${r.label ? '-' + slug(r.label) : ''}`;
+
+/**
+ * Each run's folder in the research repository: run-NN[-label], plus the start of the run's id where two runs would
+ * get the same name (runs that earlier versions gave the same number, in two tabs), so neither overwrites the other.
+ */
+function runFolders(runs: Run[]): Map<string, string> {
+  const count = new Map<string, number>();
+  for (const r of runs) count.set(runFolderBase(r), (count.get(runFolderBase(r)) ?? 0) + 1);
+  return new Map(runs.map((r) => [r.id, count.get(runFolderBase(r))! > 1 ? `${runFolderBase(r)}-${slug(r.id.slice(0, 8))}` : runFolderBase(r)]));
+}
+
+/** A run still being sent, or waiting for its batch: an export of it shows the results so far. */
+export const runInProgress = (run: Run) => run.status === 'running' || run.status === 'submitted';
+
+/**
+ * A logged request as it was sent: the run's shared settings plus the request's own part. Runs made with the first
+ * version (October 15, 2026) keep its refusal fallback (`fallbacks`) in their frozen settings. It went out with
+ * those runs' own immediate requests, and with retries sent by versions before the October 22 fixes (which
+ * overwrote the earlier attempt's log and numbered no attempts). It never went out in a batch (every version's batch
+ * upload left it out; a batch request's logged part holds its custom_id), nor with a retry sent by a later version:
+ * the adapter leaves it out, and such a retry's attempts are numbered 2 or later (attempt numbers came with the same
+ * fixes). A log that records what was left out (`omitted`) is taken at its word; without that record, a text first
+ * sent by such a retry (attempt 1: it had never been sent) can't be told from a day-one request.
+ */
+export function requestAsSent(run: Run, log: ResultLog, attempt: number): Record<string, unknown> {
+  const base = run.snapshot.requestBase;
+  const omitted = new Set(log.omitted ?? []);
+  if ('fallbacks' in base && (attempt >= 2 || 'custom_id' in (log.requestPart ?? {}))) omitted.add('fallbacks');
+  return { ...Object.fromEntries(Object.entries(base).filter(([k]) => !omitted.has(k))), ...log.requestPart };
 }
 
 /**
@@ -164,7 +192,7 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[], results: Result[]) 
     const head = (x: (typeof pending)[number]) => ({ doc_id: docById.get(x.doc) ?? x.doc, replicate: x.replicate, attempt: x.attempt });
     parts.push({
       doc: pending[0].doc,
-      requests: jsonlBlob(pending.map((x) => ({ ...head(x), request: { ...run.snapshot.requestBase, ...x.l.requestPart } }))),
+      requests: jsonlBlob(pending.map((x) => ({ ...head(x), request: requestAsSent(run, x.l, x.attempt) }))),
       responses: jsonlBlob(
         pending.map((x) => ({ ...head(x), ...(x.l.replaced ? { status: x.l.replaced.status, error: x.l.replaced.error } : {}), response: x.l.response })),
       ),
@@ -240,8 +268,9 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
   }
 
   const runsDir = root.folder('runs')!;
+  const folders = runFolders(d.runs);
   for (const run of d.runs) {
-    const f = runsDir.folder(runFolder(run))!;
+    const f = runsDir.folder(folders.get(run.id)!)!;
     f.file('run.json', JSON.stringify(run, null, 2));
     const rs = d.results.filter((r) => r.runId === run.id);
     f.file('results_long.csv', toCsv(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true })));
@@ -253,10 +282,10 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
 
   const latest = finished[finished.length - 1];
   if (latest) {
-    results.file(`results_${runFolder(latest)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
+    results.file(`results_${folders.get(latest.id)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
     scriptFiles(root.folder('scripts')!, d.study, latest, exportedAt);
   }
-  root.file('README.md', researchReadme(d, exportedAt, latest, opts));
+  root.file('README.md', researchReadme(d, exportedAt, latest, folders, opts));
   const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
   return { blob, name: `${name}.zip` };
 }
@@ -310,17 +339,42 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   const answered = [...new Set(ok.map((r) => r.docId))].filter((id) => present.has(id));
   const hasScores = (id: string) => !scoreKeys.length || scoreKeys.some((k) => fieldValue(run, views.get(id)?.values ?? {}, k) !== '');
   const usable = answered.filter(hasScores);
+  // The run's texts without a label, by cause (with the texts answered without scores, they add up to the
+  // difference): every request failed, or no result at all (never sent: the run was cancelled, stopped or isn't
+  // finished; or no answer came back for them).
+  const inRun = run.docIds.filter((id) => present.has(id));
+  const withResults = new Set(rs.map((r) => r.docId));
+  const okDocs = new Set(answered);
+  // Plain-text runs whose answers give scores as JSON: ok answers without them (e.g. in prose). With several answers
+  // per text, such an answer is left out when they are combined, like a failed one, but it still counts as ok.
+  const withoutScores = scoreKeys.length ? ok.filter((r) => !flattenJsonResponse(r.values[TEXT_RESPONSE_KEY])).length : 0;
+  // Categorical labels combined by majority vote: texts whose vote was tied (kept as "a | b", see aggregate()).
+  const prompt = run.snapshot.prompt;
+  const voted = prompt.outputMode === 'structured' && run.snapshot.options.replicates > 1 ? prompt.variables.filter((v) => v.type === 'category' || v.type === 'boolean') : [];
+  const tied = Object.fromEntries(
+    voted.map((v) => [v.name, usable.filter((id) => isTie((views.get(id)?.results ?? []).filter((r) => r.status === 'ok').map((r) => r.values[v.name] ?? ''))).length]),
+  );
   return {
     software: { name: 'Annotation Desk', version: __APP_VERSION__, version_used_for_run: run.snapshot.appVersion },
     exported_at: exportedAt,
     study: d.study.name,
     // Notes kept with the study, e.g. how a validation sample was drawn (rule and seed).
     study_notes: d.study.description.trim() || null,
-    run: { number: run.number, label: run.label, mode: run.mode === 'batch' ? 'batch API' : 'immediate requests', batch_id: run.batch ? (run.batch.parts ?? [run.batch]).map((p) => p.batchId).join('; ') : null, started_at: run.createdAt, finished_at: run.finishedAt },
+    run: {
+      number: run.number,
+      label: run.label,
+      mode: run.mode === 'batch' ? 'batch API' : 'immediate requests',
+      batch_id: run.batch ? (run.batch.parts ?? [run.batch]).map((p) => p.batchId).join('; ') : null,
+      started_at: run.createdAt,
+      finished_at: run.finishedAt,
+      // "running" or "submitted": the run was not finished when exported, and this describes the results so far.
+      status_when_exported: run.status,
+    },
     model: {
       provider: m.provider,
       requested: m.model,
-      reported_by_api: [...new Set(rs.map((r) => r.modelReported).filter(Boolean))],
+      // The usable answers' (a failed one may name another model, e.g. a day-one refusal fallback's, now excluded).
+      reported_by_api: [...new Set(ok.map((r) => r.modelReported).filter(Boolean))],
       effort: m.effort || 'model default',
       thinking: m.provider === 'anthropic' ? thinkingLabel(m.model, m.reasoningSummary) : null,
       reasoning_summary_requested: m.reasoningSummary,
@@ -331,18 +385,22 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     options: { replicates_per_text: run.snapshot.options.replicates, prompt_caching: cachingLabel(run) },
     request_settings: run.snapshot.requestBase,
     corpus: {
-      n_texts_in_run: run.docIds.filter((id) => present.has(id)).length,
-      n_texts_with_results: new Set(rs.map((r) => r.docId).filter((id) => present.has(id))).size,
+      n_texts_in_run: inRun.length,
+      n_texts_with_results: inRun.filter((id) => withResults.has(id)).length,
       n_texts_with_usable_labels: usable.length,
       ...(scoreKeys.length ? { n_texts_answer_without_scores: answered.length - usable.length } : {}),
-      // Annotated, then deleted from the study: not in results.csv or the agreement figures.
-      n_texts_removed_from_study_since: run.docIds.filter((id) => !present.has(id)).length,
+      n_texts_all_requests_failed: inRun.filter((id) => withResults.has(id) && !okDocs.has(id)).length,
+      n_texts_without_results: inRun.filter((id) => !withResults.has(id)).length,
+      ...(voted.length ? { n_texts_with_tied_votes: tied } : {}),
+      // Annotated (sent, with a result), then deleted from the study: not in results.csv or the agreement figures.
+      n_texts_removed_from_study_since: run.docIds.filter((id) => !present.has(id) && withResults.has(id)).length,
     },
     requests: {
       total: rs.length,
       ok: ok.length,
       failed: rs.filter((r) => r.status === 'error').length,
       parse_errors: rs.filter((r) => r.parseError).length,
+      ...(scoreKeys.length ? { answers_without_scores: withoutScores } : {}),
       // Failed attempts that "Retry failed" replaced: not in the totals above, but in the tokens and the logs.
       replaced_by_retries: run.replaced?.requests ?? 0,
       first_requested_at: started[0] ?? null,
@@ -358,11 +416,21 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   };
 }
 
+/** Did a majority vote tie (two or more values with the most votes)? Counted as aggregate() does. */
+function isTie(values: string[]): boolean {
+  const counts = new Map<string, number>();
+  for (const v of values) if (v !== '') counts.set(v, (counts.get(v) ?? 0) + 1);
+  const max = Math.max(0, ...counts.values());
+  return [...counts.values()].filter((c) => c === max).length > 1;
+}
+
 function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>): string {
   const m = run.snapshot.model;
   const { total, failed } = meta.requests;
-  const noScores = meta.corpus.n_texts_answer_without_scores ?? 0;
-  const removed = meta.corpus.n_texts_removed_from_study_since;
+  const c = meta.corpus;
+  const noScores = c.n_texts_answer_without_scores ?? 0;
+  const withoutScores = meta.requests.answers_without_scores ?? 0;
+  const removed = c.n_texts_removed_from_study_since;
   const retried = (run.retries ?? []).reduce((s, x) => s + x.requests, 0);
   const retriedAs = run.mode !== 'batch' ? '' : (run.retries ?? []).every((x) => x.asBatch) ? ' in a new batch' : (run.retries ?? []).every((x) => !x.asBatch) ? ' as individual requests' : '';
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
@@ -377,6 +445,27 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   ].filter((x): x is string => !!x);
   const w = words(run.snapshot.prompt);
   const settingsText = settings.length > 1 ? `${settings.slice(0, -1).join(', ')} and ${settings[settings.length - 1]}` : settings[0];
+  const n = (k: number) => k.toLocaleString('en-US');
+  const items = (k: number) => `${n(k)} ${k === 1 ? w.one : w.many}`;
+  const was = (k: number) => (k === 1 ? 'was' : 'were');
+  // A tied majority vote keeps both labels ("a | b"): it matches no single label, so it counts as a disagreement.
+  const tied = Object.entries(c.n_texts_with_tied_votes ?? {}).filter(([, k]) => k > 0);
+  const label = (name: string) => run.snapshot.prompt.variables.find((v) => v.name === name)?.label?.trim() || name;
+  const ties = c.n_texts_with_tied_votes
+    ? ` A tied vote is kept as both labels (e.g. “a | b”) and counts as a disagreement in the agreement figures${tied.length ? ` (${tied.map(([f, k], i) => `${i ? n(k) : items(k)} for ${label(f)}`).join(', ')})` : '; no vote was tied'}.`
+    : '';
+  // The run's texts without a label, by cause; the total once at the end when there is more than one cause.
+  const allFailed = c.n_texts_all_requests_failed;
+  const notSent = c.n_texts_without_results;
+  const unlabelled = c.n_texts_in_run - c.n_texts_with_usable_labels;
+  // A run left "running" by a closed or reloaded page is stored as cancelled, with an error saying it was interrupted.
+  const stopped = run.status === 'cancelled' ? (/^Interrupted\b/.test(run.error ?? '') ? 'interrupted' : 'cancelled') : run.status === 'failed' ? 'stopped' : '';
+  const notSentText = runInProgress(run)
+    ? `${items(notSent)} in the run had no result yet (the run was not finished when this was exported).`
+    : stopped
+      ? `${items(notSent)} in the run ${run.mode === 'batch' ? `${notSent === 1 ? 'has' : 'have'} no result` : `${was(notSent)} not sent`} (the run was ${stopped}).`
+      : `No answer was received for ${items(notSent)} in the run.`;
+  const causes = [allFailed, noScores, notSent].filter((k) => k > 0).length;
   return [
     `${w.Many} (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
     isEntries(run.snapshot.prompt)
@@ -387,20 +476,26 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
       : 'The model returned free-text responses.',
     reps > 1
       ? run.snapshot.prompt.outputMode === 'structured'
-        ? `Each ${w.one} was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.`
+        ? `Each ${w.one} was annotated ${reps} times; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.${ties}`
         : `Each ${w.one} was annotated ${reps} times; numbers in the answers were combined by the median, other values by majority vote.`
       : '',
     failed
-      ? `${failed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and were excluded${meta.corpus.n_texts_in_run > meta.corpus.n_texts_with_usable_labels ? `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} ${w.many} without a label` : ''}.`
+      ? `${n(failed)} of ${n(total)} request${total === 1 ? '' : 's'} did not return a usable annotation (an API error, a refusal or an answer that could not be read) and ${was(failed)} excluded${allFailed ? `, leaving ${items(allFailed)} without a label` : ''}.`
       : '',
-    noScores
-      ? `${noScores.toLocaleString('en-US')} ${noScores === 1 ? `${w.one} was` : `${w.many} were`} answered without scores (e.g. in prose) and ${noScores === 1 ? 'was' : 'were'} excluded${failed ? '' : `, leaving ${(meta.corpus.n_texts_in_run - meta.corpus.n_texts_with_usable_labels).toLocaleString('en-US')} of ${meta.corpus.n_texts_in_run.toLocaleString('en-US')} ${w.many} without a label`}.`
-      : '',
+    // Answers without scores: with several per text, left out when combining (n of the ok answers); a text with no
+    // answer that has scores is excluded.
+    reps > 1 && withoutScores
+      ? `${n(withoutScores)} of the ${n(meta.requests.ok)} answers gave no scores (e.g. ${withoutScores === 1 ? 'it was' : 'they were'} written in prose) and ${was(withoutScores)} left out when the answers were combined${noScores ? `; ${items(noScores)} had no answer with scores and ${was(noScores)} excluded` : ''}.`
+      : noScores
+        ? `${items(noScores)} ${was(noScores)} answered without scores (e.g. in prose) and ${was(noScores)} excluded.`
+        : '',
+    notSent ? notSentText : '',
+    causes > 1 ? `Altogether, ${n(unlabelled)} of the ${items(c.n_texts_in_run)} in the run have no label.` : '',
     removed
-      ? `${removed.toLocaleString('en-US')} annotated ${removed === 1 ? w.one : w.many} ${removed === 1 ? 'was' : 'were'} later removed from the study and ${removed === 1 ? 'is' : 'are'} not included in N or the results.`
+      ? `${n(removed)} annotated ${removed === 1 ? w.one : w.many} ${was(removed)} later removed from the study; ${removed === 1 ? 'it is' : 'they are'} not included in N or the agreement figures (${removed === 1 ? 'its' : 'their'} requests remain in the request and token totals and in the per-request results).`
       : '',
     retried
-      ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer ${retried === 1 ? 'was' : 'were'} re-sent with identical settings${retriedAs}.`
+      ? `${retried.toLocaleString('en-US')} request${retried === 1 ? '' : 's'} without a usable answer (failed, or not sent before the run was stopped) ${retried === 1 ? 'was' : 'were'} then sent with identical settings${retriedAs}.`
       : '',
     `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${cached ? ' with prompt caching' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
   ]
@@ -413,11 +508,17 @@ const CSV_NOTE = 'The CSV files are for analysis software: they keep every value
 
 function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof supplementaryMetadata>, agr: ReturnType<typeof agreementForRun>, opts: SupplementaryOptions): string {
   const w = words(run.snapshot.prompt);
+  const items = (k: number) => `${k.toLocaleString('en-US')} ${k === 1 ? w.one : w.many}`;
+  const withoutScores = meta.requests.answers_without_scores ?? 0;
+  const removed = meta.corpus.n_texts_removed_from_study_since;
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
     `Supplementary materials for the LLM-based annotation (run #${run.number}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.`,
     '',
+    ...(runInProgress(run)
+      ? [`**This run was not finished when these materials were exported** (${run.status === 'submitted' ? 'its batch was still being processed' : 'it was still running'}): they describe the results so far.`, '']
+      : []),
     '## Summary',
     '',
     '| | |',
@@ -429,7 +530,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| Max output tokens | ${meta.model.max_output_tokens} |`,
     `| ${w.Many} with a usable annotation | ${meta.corpus.n_texts_with_usable_labels} of ${meta.corpus.n_texts_in_run} |`,
     `| Annotations per ${w.one} | ${meta.options.replicates_per_text} |`,
-    `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed} |`,
+    `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed}${withoutScores ? ` (${withoutScores} ok answer${withoutScores === 1 ? '' : 's'} gave no scores and ${withoutScores === 1 ? 'was' : 'were'} left out)` : ''} |`,
     ...(meta.requests.replaced_by_retries > 0
       ? [`| Failed attempts replaced by Retry failed | ${meta.requests.replaced_by_retries} (their tokens are included in the token totals; their logs are kept) |`]
       : []),
@@ -449,12 +550,25 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     for (const a of agr) {
       const s = a.stats;
       lines.push(
-        `| ${a.field} | ${a.source === 'model' ? 'model' : a.source} | ${a.compared_with} | ${s.n} (of ${a.nLabelled}) | ${s.percentAgreement === null ? '—' : (s.percentAgreement * 100).toFixed(1) + '%' + ci(s.ci.percentAgreement, true)} | ${fmtStat(s.cohenKappa)}${ci(s.ci.cohenKappa)} | ${fmtStat(s.krippendorffAlpha)}${ci(s.ci.krippendorffAlpha)} (${s.level}) | ${fmtStat(s.gwetAC1)}${ci(s.ci.gwetAC1)} |`,
+        `| ${a.field} | ${a.source === 'model' ? 'model' : a.source} | ${a.compared_with} | ${s.n} (of ${a.nLabelled}${s.leftOut.n ? `; ${s.leftOut.n} ${s.level === 'nominal' ? 'not a category' : 'not on the scale'}` : ''}) | ${s.percentAgreement === null ? '—' : (s.percentAgreement * 100).toFixed(1) + '%' + ci(s.ci.percentAgreement, true)} | ${fmtStat(s.cohenKappa)}${ci(s.ci.cohenKappa)} | ${fmtStat(s.krippendorffAlpha)}${ci(s.ci.krippendorffAlpha)} (${s.level}) | ${fmtStat(s.gwetAC1)}${ci(s.ci.gwetAC1)} |`,
       );
     }
+    // The run's texts with no result (not sent, or no answer came back) that have a label in a compared column: they
+    // count as labelled (and in the human–human rows), but results.csv and data/corpus.csv leave them out.
+    const sentIds = new Set(d.results.filter((r) => r.runId === run.id).map((r) => r.docId));
+    const inRunIds = new Set(run.docIds);
+    const labelCols = [...new Set(agr.flatMap((a) => (a.source === 'model' ? [a.compared_with] : [a.source, a.compared_with])))];
+    const labelledNoResult = d.docs.filter((x) => inRunIds.has(x.id) && !sentIds.has(x.id) && labelCols.some((c) => (x.meta[c] ?? '').trim() !== '')).length;
+    const humanRows = agr.some((a) => a.source !== 'model');
     lines.push(
       '',
-      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). "Of labelled": ${w.many} with a human label; those without a usable model answer are not compared. Rows with a column name under Annotations compare two human label columns (human–human baseline), on the same ${w.many} as the model rows (this run’s ${w.many}).`,
+      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column. Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number or outside the scale (${run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers, the range of the model’s scores' : 'the codebook’s'}), e.g. NA, 9 or 99 (“not on the scale”)${agr.some((a) => a.level === 'nominal') ? ', or not one of the codebook’s categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
+        (humanRows
+          ? ` Rows with a column name under Annotations compare two human label columns (human–human baseline) on this run’s ${w.many}, as the model rows are, also those without a usable model answer.`
+          : '') +
+        (labelledNoResult
+          ? ` ${items(labelledNoResult)} of this run with labels ${labelledNoResult === 1 ? 'has' : 'have'} no result (not sent, or no answer came back): ${labelledNoResult === 1 ? 'its labels count' : 'their labels count'} as labelled${humanRows ? ' and in the human–human rows' : ''}, but ${labelledNoResult === 1 ? 'it is' : 'they are'} not in this package.`
+          : ''),
       '',
     );
   }
@@ -475,7 +589,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '| `prompt/output_schema.json` | JSON schema the responses had to follow |',
     '| `prompt/codebook.md`, `codebook.json` | Annotation fields, types and allowed values |',
     `| \`results/results.csv\` | One row per ${w.one}${opts.includeTexts ? ` (with ${w.one === 'entry' ? 'its details' : 'text'})` : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
-    '| `results/results_by_replicate.csv` | One row per request, with status, tokens and timing |',
+    `| \`results/results_by_replicate.csv\` | One row per request, with status, tokens and timing${removed ? `; also the requests for the ${items(removed)} removed from the study since, marked “(deleted …)”` : ''} |`,
   );
   if (agr.length) lines.push('| `results/agreement.csv` | Agreement statistics |');
   if (opts.includeTexts) lines.push(`| \`data/corpus.csv\` | The annotated ${w.many} and their metadata |`);
@@ -503,7 +617,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   return lines.join('\n');
 }
 
-function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefined, opts: ResearchOptions): string {
+function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefined, folders: Map<string, string>, opts: ResearchOptions): string {
   const w = words(d.study.prompt);
   const rows: [string, string][] = [
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
@@ -521,12 +635,14 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ['`results/agreement.csv`', 'Agreement between model fields and matching metadata columns (only if such columns exist)'],
   );
   if (latest) {
-    rows.push([`\`results/results_${runFolder(latest)}.xlsx\``, 'Excel workbook for the latest run']);
+    rows.push([`\`results/results_${folders.get(latest.id)}.xlsx\``, 'Excel workbook for the latest run']);
     rows.push([
       '`scripts/`',
-      `Python script reproducing run #${latest.number} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${runFolder(latest)}/results_long.csv\`)`,
+      `Python script reproducing run #${latest.number} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${folders.get(latest.id)}/results_long.csv\`)`,
     ]);
   }
+  // Runs that share a number (given by earlier versions in two tabs): their folders end in the start of the run's id.
+  const shared = d.runs.filter((r) => folders.get(r.id) !== runFolderBase(r));
   return [
     `# ${d.study.name}: research repository`,
     '',
@@ -541,6 +657,9 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     '|---|---|',
     ...rows.map(([a, b]) => `| ${a} | ${b} |`),
     '',
+    ...(shared.length
+      ? [`Some runs share a number (${[...new Set(shared.map((r) => `#${r.number}`))].join(', ')}; given twice by an earlier version when the app was open in two tabs): each one’s folder ends in the start of its id (\`id\` in its run.json).`, '']
+      : []),
     ...(latest ? [`${CSV_NOTE} To read the results in Excel, open the .xlsx workbook instead.`, ''] : [CSV_NOTE, '']),
     'Token counts: Anthropic reports input tokens excluding cached tokens; OpenAI reports input tokens including cached tokens.',
     '',
@@ -581,9 +700,21 @@ export async function buildComparisonReport(
   const fieldsB = new Map(comparableFields(runB, viewsB.values()).map((f) => [f.key, f]));
   // Plain-text scores: the range seen in either run, so the figures don't depend on which run is first.
   const fields = comparableFields(runA, viewsA.values()).flatMap((f) => (fieldsB.has(f.key) ? [combineFields(f, fieldsB.get(f.key))] : []));
-  const inA = new Set(runA.docIds);
-  const both = docs.filter((d) => inA.has(d.id) && runB.docIds.includes(d.id));
+  // Texts annotated in both runs: with a result (usable or failed) in each, not those a run never sent (e.g. one
+  // cancelled or stopped part way).
+  const sent = (views: typeof viewsA, run: Run) => new Set(run.docIds.filter((id) => views.has(id) && views.get(id)!.status !== 'none'));
+  const [sentA, sentB] = [sent(viewsA, runA), sent(viewsB, runB)];
+  const both = docs.filter((d) => sentA.has(d.id) && sentB.has(d.id));
   const name = (r: Run) => `${r.snapshot.model.model} (run #${r.number})`;
+  // For the Notes: a run with texts it never sent (cancelled, stopped or not finished); they are not compared.
+  const unsentNote = (run: Run, sentSet: Set<string>) => {
+    const own = new Set(run.docIds);
+    const total = docs.filter((d) => own.has(d.id)).length;
+    const missing = total - sentSet.size;
+    return missing > 0
+      ? [{ note: `Run #${run.number} has no result for ${missing.toLocaleString('en-US')} of its ${total.toLocaleString('en-US')} ${w.many} (e.g. the run was cancelled, stopped or not finished); they are not compared.` }]
+      : [];
+  };
 
   // Per field: the texts with a usable value in both runs.
   const compared = fields.map((f, i) => {
@@ -592,7 +723,6 @@ export async function buildComparisonReport(
     for (const d of both) {
       const va = viewsA.get(d.id)!;
       const vb = viewsB.get(d.id)!;
-      if (va.status === 'none' || vb.status === 'none') continue;
       const x = normalizeLabel(fieldValue(runA, va.values, f.key), f.yesNo);
       const y = normalizeLabel(fieldValue(runB, vb.values, f.key), f.yesNo);
       if (x && y) items.push({ doc: d, x, y });
@@ -669,9 +799,15 @@ export async function buildComparisonReport(
       const diff = numeric && !leftOut ? Number(y) - Number(x) : null;
       const mid = all.midpoint;
       const opposite = numeric && mid !== null && ((Number(x) < mid && Number(y) > mid) || (Number(x) > mid && Number(y) < mid));
+      // By the size of the difference, as in the Summary (2 or more points; within 1 point). Combined labels from an
+      // even number of answers can be half points: 0.5 is "less than 1 point", 1.5 "between 1 and 2 points".
+      const size = diff === null ? null : Math.abs(diff);
       const category = leftOut
         ? (isNum(x) && isNum(y) ? 'not on the scale' : 'not a number')
-        : x === y ? (numeric ? (Number(x) === 0 ? 'agree (zero)' : 'agree (non-zero)') : 'agree') : opposite ? 'opposite direction' : diff !== null && Math.abs(diff) >= 2 ? '2+ points' : numeric ? '1 point' : 'differ';
+        : x === y ? (numeric ? (Number(x) === 0 ? 'agree (zero)' : 'agree (non-zero)') : 'agree')
+          : opposite ? 'opposite direction'
+            : size === null ? 'differ'
+              : size >= 2 - 1e-9 ? '2+ points' : size > 1 + 1e-9 ? 'between 1 and 2 points' : size >= 1 - 1e-9 ? '1 point' : 'less than 1 point';
       return {
         doc,
         row: {
@@ -692,7 +828,7 @@ export async function buildComparisonReport(
       };
     });
   });
-  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, '1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4, 'not on the scale': 5, 'not a number': 5 };
+  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, 'between 1 and 2 points': 2, '1 point': 2, 'less than 1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4, 'not on the scale': 5, 'not a number': 5 };
   review.sort((p, q) => rank[p.row.category] - rank[q.row.category] || Math.abs(q.row.difference ?? 0) - Math.abs(p.row.difference ?? 0));
 
   // Exploratory: the same figures per group (e.g. per era); small groups give wide intervals.
@@ -724,7 +860,7 @@ export async function buildComparisonReport(
     run: `#${r.number}${r.label ? ` (${r.label})` : ''}`,
     provider: r.snapshot.model.provider,
     model: r.snapshot.model.model,
-    model_reported_by_api: [...new Set(results.filter((x) => x.runId === r.id).map((x) => x.modelReported).filter(Boolean))].join(', '),
+    model_reported_by_api: [...new Set(results.filter((x) => x.runId === r.id && x.status === 'ok').map((x) => x.modelReported).filter(Boolean))].join(', '),
     effort: r.snapshot.model.effort || 'model default',
     max_output_tokens: String(r.snapshot.model.maxOutputTokens),
     prompt_version: `v${r.snapshot.promptVersion} (${r.snapshot.promptHash})`,
@@ -753,6 +889,8 @@ export async function buildComparisonReport(
 
   addSheet(wb, 'Notes', [
     { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those annotated in both runs with a usable value for the field.` },
+    ...unsentNote(runA, sentA),
+    ...unsentNote(runB, sentB),
     { note: `Exact agreement: share of ${w.many} with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
     { note: `"At least one non-zero" rows repeat the statistics on ${w.many} where at least one run gave a score other than 0, because shared zeros inflate agreement.` },
     { note: 'Weighted kappa (linear or quadratic weights by the distance between values over the codebook scale; plain-text runs: over the range of scores seen in either run), Gwet\'s AC2 (linear weights) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories. AC1/AC2 stay stable when one score (e.g. 0) dominates, where kappa can drop sharply.' },

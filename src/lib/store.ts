@@ -417,6 +417,15 @@ const nameOf = (x: { docId: string; meta: Record<string, string> }) => x.meta.fi
  * (e.g. while a folder was still being read), nothing is added.
  */
 export async function addDocs(items: { docId: string; text: string; meta: Record<string, string>; source: string }[], studyId?: string) {
+  // One addition at a time (e.g. a folder dropped while a paste is being added): each sees the texts the one before
+  // added, so nothing is added twice or gets an ID already in use.
+  const turn = addQueue.then(() => addDocsNow(items, studyId));
+  addQueue = turn.catch(() => undefined);
+  return turn;
+}
+let addQueue: Promise<unknown> = Promise.resolve();
+
+async function addDocsNow(items: { docId: string; text: string; meta: Record<string, string>; source: string }[], studyId?: string) {
   const cur = currentStudy();
   if (!cur || !items.length) return;
   if (studyId && cur.id !== studyId) {
@@ -668,11 +677,14 @@ export function remainingDocs(st: Study, docs: Doc[], runs: Run[], results: Resu
   const unsure = runs.filter((r) => same.has(r.id) && (r.batch?.uploadUnknown || r.batch?.uploading));
   const unknownIds = new Set(unsure.flatMap((r) => r.docIds));
   const left = docs.filter((d) => !done.has(d.id));
+  const heldBack = left.filter((d) => !pending.has(d.id) && unknownIds.has(d.id));
+  const held = new Set(heldBack.map((d) => d.id));
   return {
     todo: left.filter((d) => !pending.has(d.id) && !unknownIds.has(d.id)),
     waiting: left.filter((d) => pending.has(d.id)).length,
-    unknown: left.filter((d) => !pending.has(d.id) && unknownIds.has(d.id)).length,
-    unknownRuns: unsure.map((r) => r.number),
+    unknown: heldBack.length,
+    // (Only the runs that hold back one of these texts.)
+    unknownRuns: unsure.filter((r) => r.docIds.some((id) => held.has(id))).map((r) => r.number),
   };
 }
 
@@ -1099,6 +1111,11 @@ async function submitBatches(
 
 type Task = { doc: Doc; replicate: number; part: Record<string, unknown> };
 
+/** What the frozen settings hold but the adapter leaves out when sending (the retired `fallbacks` of day-one runs). */
+function omittedFrom(run: Run): Pick<ResultLog, 'omitted'> {
+  return run.snapshot.model.provider === 'anthropic' && 'fallbacks' in run.snapshot.requestBase ? { omitted: ['fallbacks'] } : {};
+}
+
 /** Requests for a run's texts × replicates (those `include` accepts), built from the run's frozen settings. */
 function buildTasks(run: Run, include: (docId: string, replicate: number) => boolean): Task[] {
   const docsById = new Map(state.docs.map((d) => [d.id, d]));
@@ -1178,7 +1195,7 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
         shared = sharedFailure(e, !!retry);
       }
       const result = makeResult(run, t.doc, t.replicate, requestedAt, outcome, error, Math.round(performance.now() - started));
-      const log: ResultLog = { id: result.id, runId: run.id, studyId: run.studyId, requestPart: t.part, response: outcome?.response ?? { error } };
+      const log: ResultLog = { id: result.id, runId: run.id, studyId: run.studyId, requestPart: t.part, response: outcome?.response ?? { error }, ...omittedFrom(run) };
       try {
         await dbApi.putResult(result, log);
       } catch (e) {
@@ -1539,6 +1556,7 @@ async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: stri
         studyId: run.studyId,
         requestPart: { custom_id: line.customId, ...part },
         response: line.ok ? line.outcome.response : line.response ?? { error: line.error },
+        ...omittedFrom(run),
       };
       await dbApi.putResult(result, log);
       stored.push(result);
