@@ -76,7 +76,8 @@ export async function getRun(id: string): Promise<Run | undefined> {
 /**
  * Store a result and its log. When a retry replaces an earlier, failed attempt stored under the same id, that
  * attempt's log is kept as `${id}#${attempt}` (with its outcome and token use), so every request sent stays on
- * record, and its token use is added to `r.replacedUsage`; the earlier result is returned (null if there was none).
+ * record, and its token use is added to `r.replacedUsage` (its request time to `r.replacedAt`); the earlier result is
+ * returned (null if there was none).
  * `r.attempt` is set accordingly. `asToday`: reads the earlier attempt by today's rules (an answer an older version
  * stored as "ok" may count as failed now), so its log says why it was replaced.
  */
@@ -93,6 +94,8 @@ export async function putResult(r: Result, log: ResultLog | null, asToday?: (pre
     r.attempt = n + 1;
     const before = prev.replacedUsage;
     r.replacedUsage = Object.fromEntries(Object.entries(prev.usage).map(([k, v]) => [k, v + (before?.[k as keyof typeof before] ?? 0)])) as Result['usage'];
+    // (And when it was sent, so a retry's requests can still be counted once a later retry has replaced them.)
+    r.replacedAt = [...(prev.replacedAt ?? []), prev.requestedAt];
     const prevLog = await logs.get(r.id);
     const seen = { ...prev };
     asToday?.(seen);
@@ -115,7 +118,7 @@ export async function putResult(r: Result, log: ResultLog | null, asToday?: (pre
         completedAt: prev.completedAt,
       },
     });
-  } else if (prev?.attempt) [r.attempt, r.replacedUsage] = [prev.attempt, prev.replacedUsage];
+  } else if (prev?.attempt) [r.attempt, r.replacedUsage, r.replacedAt] = [prev.attempt, prev.replacedUsage, prev.replacedAt];
   await results.put(r);
   if (log) await logs.put(log);
   await tx.done;

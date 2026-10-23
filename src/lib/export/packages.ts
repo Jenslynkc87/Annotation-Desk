@@ -201,7 +201,12 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[], results: Result[]) 
       doc: pending[0].doc,
       requests: jsonlBlob(pending.map((x) => ({ ...head(x), request: requestAsSent(run, x.l, x.attempt) }))),
       responses: jsonlBlob(
-        pending.map((x) => ({ ...head(x), ...(x.l.replaced ? { status: x.l.replaced.status, error: x.l.replaced.error } : {}), response: x.l.response })),
+        // (A replaced attempt's outcome, with the reason an answer could not be read, as in the CSVs' parse_error.)
+        pending.map((x) => ({
+          ...head(x),
+          ...(x.l.replaced ? { status: x.l.replaced.status, error: x.l.replaced.error, parse_error: x.l.replaced.parseError ?? null } : {}),
+          response: x.l.response,
+        })),
       ),
     });
     pending = [];
@@ -226,18 +231,24 @@ function jsonlBlob(items: unknown[]): Blob {
   return new Blob(items.map((x) => JSON.stringify(x) + '\n'), { type: 'application/jsonl' });
 }
 
+/**
+ * A run's prompt, system prompt, codebook and output schema. A plain-text run has no schema and no fields (its snapshot
+ * still holds the editor's, which were not sent): codebook.md says so, and output_schema.json and codebook.json are
+ * left out.
+ */
 function promptFiles(zip: JSZip, run: Run) {
   const p = run.snapshot.prompt;
   zip.file('prompt.txt', effectiveTemplate(p.userTemplate, p.subject));
   if (p.system.trim()) zip.file('system_prompt.txt', p.system);
-  zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
   zip.file('codebook.md', codebookMarkdown(run));
+  if (p.outputMode !== 'structured') return;
+  zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
   zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
 }
 
-function scriptFiles(zip: JSZip, study: Study, run: Run, exportedAt: string) {
+function scriptFiles(zip: JSZip, study: Study, run: Run, exportedAt: string, runs: Run[]) {
   zip.file('annotate_template.py', SCRIPT_TEMPLATE);
-  zip.file('annotate.py', fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, exportedAt)));
+  zip.file('annotate.py', fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, exportedAt, runs)));
   zip.file('requirements.txt', requirementsTxt(run));
 }
 
@@ -291,7 +302,7 @@ export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): P
   const latest = finished[finished.length - 1];
   if (latest) {
     results.file(`results_${folders.get(latest.id)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
-    scriptFiles(root.folder('scripts')!, d.study, latest, exportedAt);
+    scriptFiles(root.folder('scripts')!, d.study, latest, exportedAt, d.runs);
   }
   root.file('README.md', researchReadme(d, exportedAt, latest, folders, opts));
   const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
@@ -323,7 +334,7 @@ export async function buildSupplementary(d: ExportData, run: Run, opts: Suppleme
   if (agr.length) res.file('agreement.csv', toCsv(agreementRows(agr, runName(run, d.runs))));
   if (opts.includeTexts) root.folder('data')!.file('corpus.csv', toCsv(corpusRows(runDocs, true)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs')!, run, runDocs, rs);
-  scriptFiles(root.folder('scripts')!, d.study, run, exportedAt);
+  scriptFiles(root.folder('scripts')!, d.study, run, exportedAt, d.runs);
   root.file('README.md', supplementaryReadme(d, run, meta, agr, opts));
   const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
   return { blob, name: `${name}.zip` };
@@ -356,12 +367,14 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   const inRun = run.docIds.filter((id) => present.has(id));
   const withResults = new Set(rs.map((r) => r.docId));
   const okDocs = new Set(answered);
-  // With several annotations per text: texts with results for only some of them (a run stopped part way through a
-  // text), and how many of their requests have no result.
+  // With several annotations per text: labelled texts with results for only some of them (a run stopped part way
+  // through a text), and how many of their requests have no result. (A text whose answers all failed, or gave no
+  // scores, has no label: it is counted among the texts without one.)
   const reps = run.snapshot.options.replicates;
   const perText = new Map<string, number>();
   for (const r of rs) perText.set(r.docId, (perText.get(r.docId) ?? 0) + 1);
-  const partly = inRun.filter((id) => withResults.has(id) && perText.get(id)! < reps);
+  const labelled = new Set(usable);
+  const partly = inRun.filter((id) => labelled.has(id) && perText.get(id)! < reps);
   // Plain-text runs whose answers give scores as JSON: ok answers without them (e.g. in prose). With several answers
   // per text, such an answer is left out when they are combined, like a failed one, but it still counts as ok.
   const withoutScores = scoreKeys.length ? ok.filter((r) => !flattenJsonResponse(r.values[TEXT_RESPONSE_KEY])).length : 0;
@@ -379,6 +392,9 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     study_notes: d.study.description.trim() || null,
     run: {
       number: run.number,
+      // As the tables and README name it ("5-ab12cd34" for runs that share a number), and its id.
+      name: String(runName(run, d.runs)),
+      id: run.id,
       label: run.label,
       mode: run.mode === 'batch' ? 'batch API' : 'immediate requests',
       batch_id: run.batch ? (run.batch.parts ?? [run.batch]).map((p) => p.batchId).join('; ') : null,
@@ -401,7 +417,13 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       temperature: m.temperature ?? 'model default',
       max_output_tokens: m.maxOutputTokens,
     },
-    prompt: { version: run.snapshot.promptVersion, sha256_prefix: run.snapshot.promptHash, output_mode: run.snapshot.prompt.outputMode, rationale_requested: run.snapshot.prompt.includeRationale },
+    // (A plain-text run asked for no rationale, whatever its snapshot's hidden codebook setting says.)
+    prompt: {
+      version: run.snapshot.promptVersion,
+      sha256_prefix: run.snapshot.promptHash,
+      output_mode: run.snapshot.prompt.outputMode,
+      rationale_requested: run.snapshot.prompt.outputMode === 'structured' && run.snapshot.prompt.includeRationale,
+    },
     options: { replicates_per_text: run.snapshot.options.replicates, prompt_caching: cachingLabel(run) },
     request_settings: run.snapshot.requestBase,
     corpus: {
@@ -461,7 +483,7 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
   const reps = run.snapshot.options.replicates;
   const dates = [meta.requests.first_requested_at, meta.requests.last_completed_at].filter(Boolean).map((x) => x!.slice(0, 10));
-  const period = dates.length ? (dates[0] === dates[1] ? `on ${dates[0]}` : `between ${dates[0]} and ${dates[1]}`) : '';
+  const period = dates.length ? (dates.length < 2 || dates[0] === dates[1] ? `on ${dates[0]}` : `between ${dates[0]} and ${dates[1]}`) : '';
   const effortName = m.provider === 'anthropic' ? 'effort' : 'reasoning effort';
   const settings = [
     m.effort ? `${effortName} "${m.effort}"` : `the provider's default ${effortName} (not set explicitly)`,
@@ -520,13 +542,16 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
     run.mode !== 'batch' ? '' : retry.asBatch === 'all' ? ' in a new batch' : retry.asBatch === 'none' ? ' as individual requests' : ', individually or in a new batch';
   const howMany = !retry.lowerBound && !retry.interrupted ? `${n(k)} request${k === 1 ? '' : 's'}` : k ? `At least ${n(k)} request${k === 1 ? '' : 's'}` : 'Requests';
   const planned = `the app version used for the run recorded only the number planned for the ${retry.legacy === 1 ? 'retry' : 'retries'} made with it, ${n(retry.planned)}`;
+  const u = retry.unanswered;
   const legacyNote =
-    (retry.lowerBound ? (k ? ` (counted from the stored answers: ${planned})` : ` (how many is not known: ${planned}, and no answer to them is stored)`) : '') +
-    (retry.interrupted ? ' (a retry was interrupted by the page closing: requests under way then got no recorded answer and are not counted)' : '');
+    (retry.lowerBound ? (k ? ` (counted from the stored answers: ${planned})` : ` (how many is not known: ${planned}, and no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'})`) : '') +
+    (retry.interrupted ? ' (a retry was interrupted by the page closing: requests under way then got no recorded answer and are not counted)' : '') +
+    // (Cancel, or a result that could not be saved: sent, so counted, but with no answer.)
+    (u ? ` (a retry was stopped while ${n(u)} of ${u === 1 ? 'them was' : 'them were'} under way: ${u === 1 ? 'it' : 'they'} got no recorded answer)` : '');
   const retryText =
-    retrying && !k && !retry.lowerBound
+    retrying && !k && !retry.lowerBound && !retry.interrupted
       ? `Requests without a usable answer (failed, or not sent before the run was stopped) were being sent again with identical settings${retriedAs} when this was exported`
-      : k || retry.lowerBound
+      : k || retry.lowerBound || retry.interrupted
         ? `${howMany} without a usable answer (failed, or not sent before the run was stopped) ${k === 1 ? 'was' : 'were'} sent again with identical settings${retriedAs}${legacyNote}${retrying ? ', and the retry was still under way when this was exported' : ''}`
         : '';
   return [
@@ -575,7 +600,9 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
-    `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.`,
+    `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.` +
+      // (Runs that share a number: given twice by an earlier version open in two tabs.)
+      (sharesNumber(run, d.runs) ? ` Another run of the study has the same number (#${run.number}), given twice by an earlier version open in two tabs: this one is named by its number and the start of its id (\`run.id\` in metadata.json).` : ''),
     '',
     ...(runInProgress(run)
       ? [
@@ -632,7 +659,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     const humanRows = agr.some((a) => a.source !== 'model');
     lines.push(
       '',
-      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column (a missing-value marker such as NA counts as no value). Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number, or outside the scale (${run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers, far outside the range of the model’s scores' : 'the codebook’s'}), e.g. a word or 99 (“not on the scale”)${agr.some((a) => notCategory(a.stats)) ? ', or not one of the codebook’s categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
+      `Brackets: 95% bootstrap intervals (2,000 resamples of ${w.many}). “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column (a missing-value marker such as NA counts as no value). Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number, or outside the scale (${run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers whose values all lie within −10…10, a rating scale: more than 3 points, or half the range of the model’s scores if more, beyond that range and the labels near it; with larger numbers, e.g. percentages or years, no number is left out' : 'the codebook’s'}), e.g. a word or 99 (“not on the scale”)${agr.some((a) => notCategory(a.stats)) ? ', or not one of the codebook’s categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
         (humanRows
           ? ` Rows with a column name under Annotations compare two human label columns (human–human baseline) on this run’s ${w.many}, as the model rows are, also those without a usable model answer.`
           : '') +
@@ -656,14 +683,18 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '| `metadata.json` | Machine-readable record of model, settings, dates, counts and token use |',
     `| \`prompt/prompt.txt\` | The prompt sent with each ${w.one}; \`{{text}}\` marks where ${w.one === 'entry' ? 'the entry’s details were' : 'the text was'} inserted |`,
     ...(run.snapshot.prompt.system.trim() ? ['| `prompt/system_prompt.txt` | System prompt sent with every request |'] : []),
-    '| `prompt/output_schema.json` | JSON schema the responses had to follow |',
-    '| `prompt/codebook.md`, `codebook.json` | Annotation fields, types and allowed values |',
+    ...(run.snapshot.prompt.outputMode === 'structured'
+      ? ['| `prompt/output_schema.json` | JSON schema the responses had to follow |', '| `prompt/codebook.md`, `codebook.json` | Annotation fields, types and allowed values |']
+      : ['| `prompt/codebook.md` | Says that the model returned free text: there were no fields and no output schema |']),
     `| \`results/results.csv\` | One row per ${w.one}${opts.includeTexts ? ` (with ${w.one === 'entry' ? 'its details' : 'text'})` : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
     `| \`results/results_by_replicate.csv\` | One row per request, with status, tokens and timing${removed ? `; also the requests for the ${items(removed)} removed from the study since, marked “(deleted …)”` : ''} |`,
   );
   if (agr.length) lines.push('| `results/agreement.csv` | Agreement statistics |');
   if (opts.includeTexts) lines.push(`| \`data/corpus.csv\` | The annotated ${w.many} and their metadata |`);
-  if (opts.includeLogs) lines.push('| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response |');
+  if (opts.includeLogs)
+    lines.push(
+      `| \`logs/requests.jsonl\`, \`responses.jsonl\` | Every request body and full API response${meta.requests.replaced_by_retries > 0 ? '; a request that Retry failed sent again has a line for each attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error' : ''} |`,
+    );
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
     '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
@@ -693,12 +724,16 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
     ['`study-backup.json`', `Backup (settings, ${w.many}, runs, results; without the request/response logs${opts.includeLogs ? ', which are under `runs/`' : ''}), re-importable via Studies → Import study backup`],
     ['`corpus/corpus.csv`, `corpus.jsonl`', `All ${w.many} with metadata`],
-    ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), output schema, codebook'],
+    ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), codebook, and for structured output the output schema and codebook.json'],
     ['`runs/run-NN/run.json`', 'Frozen run configuration (model, settings, prompt, exact shared request body)'],
     ['`runs/run-NN/results_long.csv`', 'One row per request: annotations, rationale, reasoning summary, status, tokens, timing'],
     ['`runs/run-NN/results_wide.csv`', `One row per ${w.one}: aggregated annotations`],
   ];
-  if (opts.includeLogs) rows.push(['`runs/run-NN/requests.jsonl`, `responses.jsonl`', 'Every request body sent and every raw API response']);
+  if (opts.includeLogs)
+    rows.push([
+      '`runs/run-NN/requests.jsonl`, `responses.jsonl`',
+      'Every request body sent and every raw API response; a request that Retry failed sent again has a line for each attempt (same doc_id and replicate; `attempt` 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error',
+    ]);
   rows.push(
     ['`results/runs.csv`', 'Overview of all runs'],
     ['`results/results_all_runs_long.csv`', 'All responses from all runs in one table'],
@@ -789,6 +824,11 @@ export async function buildComparisonReport(
       ? [{ note: `Run #${runName(run, runs)} has no result for ${missing.toLocaleString('en-US')} of its ${total.toLocaleString('en-US')} ${w.many} (e.g. the run was cancelled, stopped or not finished); they are not compared.` }]
       : [];
   };
+  // A run still being sent, or its batch (or that of its Retry failed) not back yet: the figures are those so far.
+  const unfinished = (r: Run) =>
+    !runInProgress(r) ? '' : r.status === 'submitted' ? (retryUnderWay(r) ? 'its Retry failed batch was still being processed' : 'its batch was still being processed') : retryInProgress(r) ? 'Retry failed was still sending requests' : 'it was still running';
+  const unfinishedNote = (run: Run) =>
+    unfinished(run) ? [{ note: `Run #${runName(run, runs)} was not finished when this report was made (${unfinished(run)}): the figures are those of its results so far and may change once it is done.` }] : [];
 
   // Per field: the texts with a usable value in both runs.
   const compared = fields.map((f, i) => {
@@ -945,6 +985,7 @@ export async function buildComparisonReport(
     prompt_version: `v${r.snapshot.promptVersion} (${r.snapshot.promptHash})`,
     mode: r.mode === 'batch' ? 'batch API' : 'immediate requests',
     started: r.createdAt,
+    status: unfinished(r) ? `not finished: ${unfinished(r)}` : r.status,
     texts_in_run: String(r.docIds.length - removedSince(r)),
     texts_with_results: String((r === runA ? sentA : sentB).size),
     ...(removed ? { texts_removed_from_study_since: String(removedSince(r)) } : {}),
@@ -974,6 +1015,8 @@ export async function buildComparisonReport(
     { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those annotated in both runs with a usable value for the field.` },
     ...unsentNote(runA, sentA),
     ...unsentNote(runB, sentB),
+    ...unfinishedNote(runA),
+    ...unfinishedNote(runB),
     { note: `Exact agreement: share of ${w.many} with the same value.${tolerance > 0 ? ` Within ${tolerance} point${tolerance === 1 ? '' : 's'}: share whose scores differ by at most that much.` : ''} Differ by 2 or more points and opposite direction (one below the scale midpoint, the other above): serious disagreements.` },
     { note: `"At least one non-zero" rows repeat the statistics on ${w.many} where at least one run gave a score other than 0, because shared zeros inflate agreement.` },
     { note: 'Weighted kappa (linear or quadratic weights by the distance between values over the codebook scale; plain-text runs: over the range of scores seen in either run), Gwet\'s AC2 (linear weights) and Krippendorff\'s alpha give partial credit for near misses; Cohen\'s kappa and Gwet\'s AC1 treat values as categories. AC1/AC2 stay stable when one score (e.g. 0) dominates, where kappa can drop sharply.' },

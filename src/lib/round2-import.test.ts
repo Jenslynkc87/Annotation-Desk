@@ -192,6 +192,8 @@ describe('a results file exported from this app, added as labels', () => {
   });
   it('leaves other sheets alone, including one with only a coder’s column named like the field', () => {
     expect(modelAnswerColumns(sheet(['file', 'race', 'race_explanation']), [structured], structuredResults)).toEqual([]);
-    expect(modelAnswerColumns(sheet(['file', 'race_gold', 'n_ok', 'n_error']), [structured], structuredResults)).toEqual([]);
+    // (Round four: the run's own columns alone still mark an export, until they are deleted too.)
+    expect(modelAnswerColumns(sheet(['file', 'race_gold', 'n_ok', 'n_error']), [structured], structuredResults)).toEqual(['n_ok', 'n_error']);
+    expect(modelAnswerColumns(sheet(['file', 'race_gold']), [structured], structuredResults)).toEqual([]);
   });
 });

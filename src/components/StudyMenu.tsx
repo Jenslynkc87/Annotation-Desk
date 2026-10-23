@@ -12,6 +12,7 @@ import {
   selectStudy,
   setImporting,
   sharedBatches,
+  sharedUnknownUpload,
   storageError,
   toast,
   unknownUpload,
@@ -19,6 +20,7 @@ import {
 } from '../lib/store';
 import { words } from '../lib/subject';
 import { fmtDateTime } from '../lib/util';
+import { runName } from '../lib/view';
 import { copyElsewhere, OTHER_STUDY_HERE, quoted } from './RunsView';
 import { Icon, Menu, Modal } from './ui';
 
@@ -130,15 +132,27 @@ export function StudyMenu() {
                   }
                 }
                 const left = kept.size;
-                // Batch uploads of unknown outcome may have reached the provider: looked up there and cancelled if found.
-                const unsure = s.runs.filter((r) => unknownUpload(r)).map((r) => `#${r.number}`);
+                // Batch uploads of unknown outcome may have reached the provider: looked up there and cancelled if found,
+                // except one another study here shares (a copy, or the study it was copied from): left to it.
+                const unsure: string[] = [];
+                const leftUploads: string[] = [];
+                const sharers = new Set<string>();
+                for (const r of s.runs.filter((x) => unknownUpload(x))) {
+                  const others = await sharedUnknownUpload(r).catch(() => [] as string[]);
+                  others.forEach((x) => sharers.add(x));
+                  (others.length ? leftUploads : unsure).push(`#${runName(r, s.runs)}`);
+                }
+                const runsWord = (list: string[]) => `run${list.length === 1 ? '' : 's'} ${list.join(', ')}`;
                 const note =
                   (cancelled ? ` ${cancelled} batch${cancelled === 1 ? ' is' : 'es are'} still processing and will be cancelled. ${copyElsewhere(cancelled)}` : '') +
                   (left
                     ? ` ${left === 1 ? 'A batch' : `${left} batches`} still processing ${left === 1 ? 'is' : 'are'} left running: ${quoted([...copies])} (${OTHER_STUDY_HERE}) also ${copies.size === 1 ? 'waits' : 'wait'} for ${left === 1 ? 'it' : 'them'}.`
                     : '') +
                   (unsure.length
-                    ? ` A batch upload of run${unsure.length === 1 ? '' : 's'} ${unsure.join(', ')} may have reached the provider: ${unsure.length === 1 ? 'it is' : 'they are'} looked up there first and cancelled if found.`
+                    ? ` A batch upload of ${runsWord(unsure)} may have reached the provider: ${unsure.length === 1 ? 'it is' : 'they are'} looked up there first and cancelled if found.`
+                    : '') +
+                  (leftUploads.length
+                    ? ` A batch upload of unknown outcome of ${runsWord(leftUploads)} is left for ${quoted([...sharers])} (${OTHER_STUDY_HERE}), which ${sharers.size === 1 ? 'shares' : 'share'} that upload.`
                     : '');
                 if (confirm(`Delete “${cur.name}” with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
                   void removeStudy(cur.id);

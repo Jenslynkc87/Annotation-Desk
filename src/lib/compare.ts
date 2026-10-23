@@ -1,7 +1,7 @@
 // Which fields of a run agreement can be computed on, and their values per text.
 import type { Level } from './metrics';
 import { fieldLabel, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from './prompt';
-import type { Run } from './types';
+import type { Result, Run } from './types';
 import type { DocView } from './view';
 
 export interface ComparableField {
@@ -18,6 +18,26 @@ export interface ComparableField {
    */
   range?: [number, number];
   yesNo: boolean;
+}
+
+/**
+ * Each answer's JSON values, read once (an answer doesn't change), so the Workbench can look again on every update of
+ * a run: the keys with a value, in order, and each value as a number (NaN for text). Not the text itself (e.g. the
+ * explanations): kept for every answer of a full corpus, that would double the memory the answers take.
+ */
+const numbersOf = new WeakMap<Result, { raw: string | undefined; keys: string[] | null; nums: number[] }>();
+// (Answers mostly have the same keys: one list for those in a row.)
+let lastKeys: string[] = [];
+function answerNumbers(r: Result): { keys: string[]; nums: number[] } | null {
+  const raw = r.values[TEXT_RESPONSE_KEY];
+  let c = numbersOf.get(r);
+  if (!c || c.raw !== raw) {
+    const flat = flattenJsonResponse(raw);
+    let keys = flat ? Object.keys(flat).filter((k) => flat[k].trim() !== '') : null;
+    if (keys) keys = lastKeys = keys.length === lastKeys.length && keys.every((k, i) => k === lastKeys[i]) ? lastKeys : keys;
+    numbersOf.set(r, (c = { raw, keys, nums: keys ? keys.map((k) => toNumber(flat![k])) : [] }));
+  }
+  return c.keys ? (c as { keys: string[]; nums: number[] }) : null;
 }
 
 /**
@@ -40,24 +60,24 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
   }
   // Read from the separate answers, not the combined ones: the median of two answers can fall between whole
   // numbers (e.g. 1.5), which must not turn a field of whole-number scores into an interval field.
-  const values = new Map<string, string[]>();
+  // (Each key's values as numbers, NaN for text.)
+  const values = new Map<string, number[]>();
   for (const view of views) {
     if (view.run?.id !== run.id) continue;
     for (const r of view.results) {
       if (r.status !== 'ok') continue;
-      const flat = flattenJsonResponse(r.values[TEXT_RESPONSE_KEY]);
-      if (!flat) continue;
-      for (const [k, v] of Object.entries(flat)) {
-        if (v.trim() === '') continue;
+      const answer = answerNumbers(r);
+      if (!answer) continue;
+      answer.keys.forEach((k, i) => {
         const list = values.get(k);
-        if (list) list.push(v);
-        else values.set(k, [v]);
-      }
+        if (list) list.push(answer.nums[i]);
+        else values.set(k, [answer.nums[i]]);
+      });
     }
   }
   // A field of scores, even if a few answers are not numbers (e.g. "NA", left out and reported by `agreement`).
   return [...values.entries()]
-    .map(([key, vs]) => [key, vs.map(toNumber).filter(Number.isFinite)] as const)
+    .map(([key, xs]) => [key, xs.filter(Number.isFinite)] as const)
     .filter(([key, nums]) => nums.length > 0 && nums.length >= (values.get(key)?.length ?? 0) / 2)
     .map(([key, nums]) => {
       const ordinal = nums.every(Number.isInteger);
@@ -72,11 +92,15 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
     });
 }
 
+const isNumber = (s: string) => s.trim() !== '' && Number.isFinite(Number(s));
+/** A codebook scale of numbers: an ordinal scale, or category codes that are all numbers. */
+const numericCodebook = (f: ComparableField) => !f.scaleSeen && f.allowed.length > 0 && f.allowed.every(isNumber);
+
 /**
  * The same field in two runs (e.g. in a comparison), so the result doesn't depend on which run comes first: the
  * values of both runs' scales (e.g. two codebooks, 0…3 and −3…3), and for plain-text scores, which have no
  * codebook, every whole number in the range seen in either run (and that range, from the lowest to the highest
- * answer of either run).
+ * answer of either run). A codebook of numbers and plain-text scores: the codebook's scale (see below).
  */
 export function combineFields(a: ComparableField, b: ComparableField | undefined): ComparableField {
   if (!b) return a;
@@ -87,6 +111,28 @@ export function combineFields(a: ComparableField, b: ComparableField | undefined
     scaleSeen && ranges.length ? [Math.min(...ranges.map((r) => r[0])), Math.max(...ranges.map((r) => r[1]))] : undefined;
   const { range: _range, ...rest } = a;
   const base = { ...rest, level, scaleSeen, ...(range ? { range } : {}), yesNo: a.yesNo && b.yesNo };
+  // A codebook of numbers on one side, plain-text scores on the other: the codebook's scale at whatever level results
+  // (also interval, when one plain-text answer was 2.5), so Gwet's q, the split of a half point, the weights and the
+  // midpoint are the codebook's. Where the plain-text answers reach beyond it, it is widened to the whole numbers of
+  // their range (for a codebook of whole numbers), else to that range's ends, so no answer of the model is left out.
+  const coded = numericCodebook(a) && b.scaleSeen ? a : numericCodebook(b) && a.scaleSeen ? b : null;
+  if (coded) {
+    const other = coded === a ? b : a;
+    const points = coded.allowed.map(Number);
+    const [lo, hi] = [Math.min(...points), Math.max(...points)];
+    const seen = other.range ?? (other.allowed.length ? [Math.min(...other.allowed.map(Number)), Math.max(...other.allowed.map(Number))] : null);
+    const extra: number[] = [];
+    if (seen) {
+      const whole = points.every(Number.isInteger);
+      const [from, to] = whole ? [Math.floor(seen[0]), Math.ceil(seen[1])] : seen;
+      if (whole && Math.max(hi, to) - Math.min(lo, from) <= 100) {
+        for (let x = from; x < lo; x++) extra.push(x);
+        for (let x = hi + 1; x <= to; x++) extra.push(x);
+      } else extra.push(...[from, to].filter((x) => x < lo || x > hi));
+    }
+    const allowed = [...coded.allowed, ...extra.map(String)];
+    return { ...base, allowed: [...new Set(allowed)].sort((x, y) => Number(x) - Number(y)) };
+  }
   if (level === 'interval' || (!a.allowed.length && !a.scaleSeen) || (!b.allowed.length && !b.scaleSeen)) return { ...base, allowed: [] };
   if (!a.allowed.length || !b.allowed.length) return { ...base, allowed: [] };
   const union = [...new Set([...a.allowed, ...b.allowed])];

@@ -100,9 +100,10 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     expect(methods).toContain('At least 60 requests without a usable answer');
     expect(methods).not.toContain('120 requests');
     expect(meta.requests).toMatchObject({ retried: 60, replaced_by_retries: 3 });
-    // (The old retry's own answers were all replaced: its number is not known, only the total's lower bound.)
+    // (The old retry's own answers were all replaced, before their request times were kept on the results (round
+    // four, G22): its number is not known, only the total's lower bound.)
     expect(meta.requests.retried_note).toBe(
-      'Annotation Desk 0.1.0, used for the run, recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, the number sent is not known (no answer to them remains); with the run’s other retry, at least 60 in all.',
+      'Annotation Desk 0.1.0, used for the run, recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, the number sent is not known (no stored answer dates from it); with the run’s other retry, at least 60 in all.',
     );
   });
 
@@ -111,7 +112,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     expect(retriedRequests(run, [])).toMatchObject({ requests: 0, lowerBound: true, planned: 60 });
   });
 
-  it('an old retry that sent everything it planned is reported as it is; batch retries and newer builds are taken at their word', async () => {
+  it('an old retry that sent everything it planned is reported as it is; newer builds are taken at their word', async () => {
     const run = legacy();
     run.status = 'completed';
     run.error = null;
@@ -123,8 +124,10 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     expect(meta.requests.retried_note).toBeUndefined();
     // (Their earlier, failed attempts were overwritten by that version: the tokens may be too low.)
     expect(meta.tokens.note).toBeDefined();
+    // (A batch retry of that version is counted from its answers too (round four, G0/G2): one of its batches may never
+    // have gone up.)
     const batch = mkRun('b2', 2, [], stancePrompt, { mode: 'batch', retries: [{ at: retryAt, requests: 5, asBatch: true }] }, 1, '0.1.0');
-    expect(retriedRequests(batch, [])).toMatchObject({ requests: 5, lowerBound: false });
+    expect(retriedRequests(batch, [])).toMatchObject({ requests: 0, lowerBound: true, planned: 5 });
     const newer = mkRun('b3', 3, [], stancePrompt, { retries: [{ at: retryAt, requests: 7 }] }, 1, '0.1.0+b9fd933 (2026-10-23)');
     expect(retriedRequests(newer, [])).toMatchObject({ requests: 7, lowerBound: false, tokensIncomplete: false });
   });

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { buildBackup } from '../lib/export/backup';
 import { buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from '../lib/export/packages';
-import { labelPairs, runName } from '../lib/export/tables';
+import { labelPairs } from '../lib/export/tables';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
-import { retryInProgress, runInProgress } from '../lib/view';
+import { retryInProgress, runInProgress, runName, runTitle } from '../lib/view';
 import { Icon } from './ui';
 
 function exportData(): ExportData {
@@ -77,8 +77,7 @@ export function ExportView() {
               {!withResults.length && <option value="">No runs with results yet</option>}
               {[...withResults].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
-                  Run #{runName(r, runs)}
-                  {r.label ? ` · ${r.label}` : ''} · {r.scope} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model} · {fmtDateTime(r.createdAt)}
+                  Run {runTitle(r, runs)} · {r.scope} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model} · {fmtDateTime(r.createdAt)}
                   {runInProgress(r) ? ' · still running' : ''}
                 </option>
               ))}

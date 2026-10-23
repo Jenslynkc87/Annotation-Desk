@@ -6,8 +6,7 @@ import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabe
 import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
-import { slug } from '../util';
-import { buildDocViews, replacedAttempts, retriedRequests, runInProgress, type DocView, type RetriedRequests } from '../view';
+import { buildDocViews, replacedAttempts, retriedRequests, runIdTag, runInProgress, runName, sharesNumber, type DocView, type RetriedRequests } from '../view';
 
 export type Row = Record<string, string | number | null>;
 
@@ -232,13 +231,19 @@ export interface AgreementRow {
 const NOT_LABEL_WORDS = new Set(['explanation', 'explanations', 'reasoning', 'rationale', 'note', 'notes', 'comment', 'comments', 'memo', 'confidence', 'certainty', 'flag', 'flags']);
 /** Words that mark metadata about a text's author, not a label for the text (author_gender for a gender field). */
 const AUTHOR_WORDS = new Set(['author', 'authors']);
-/** Words around a field's name that mark a column of human labels for it (race_gold, human_race, race_coder2). */
-const LABEL_MARKER = /^(gold|human|coder|rater|annotator|pilot)\d*$/;
+/** The reasons `labelColumnsFor` gives for columns named after a field that hold no labels for any field. */
+export const NOTE_OR_RATING = 'a note or rating';
+export const ABOUT_AUTHOR = 'about the author';
+/**
+ * Words around a field's name that mark a column of human labels for it (race_gold, human_race, race_coder2), also
+ * saying whose or which labels they are (race_expert_gold, race_final_gold, gold_standard_race, human_coded_race).
+ */
+const LABEL_MARKER = /^(gold|human|coder|rater|annotator|pilot|expert|final|consensus|standard|coded|reference|adjudicated|manual)\d*$/;
 
 /**
  * The fields that label columns' own names point to: race_negative_gold or gold_race_negative → race_negative (the
  * name without its marker words, when two or more words remain). So such a column belongs to that longer field even
- * where no prompt or run names it, and is not taken for race.
+ * where no prompt or run names it, and is not taken for race (see `labelColumnsFor`).
  */
 function impliedFields(columns: string[]): string[] {
   const out = new Set<string>();
@@ -301,7 +306,10 @@ export function labelColumnsFor(
   const f = typeof field === 'string' ? null : field;
   const key = typeof field === 'string' ? field : field.key;
   const all = metaColumns(docs);
-  const longer = [...knownFields, ...impliedFields(all)].filter((g) => g.toLowerCase() !== key.toLowerCase() && g.length > key.length);
+  // A field only a column's name points to counts when it extends this one at the end (race_negative for race), not
+  // when it merely ends in it (standard_race, from gold_standard_race, stays with race).
+  const k = key.toLowerCase();
+  const longer = [...knownFields.filter((g) => g.length > key.length), ...impliedFields(all).filter((g) => g.startsWith(`${k}_`))].filter((g) => g.toLowerCase() !== k);
   const columns: string[] = [];
   const skipped: { column: string; reason: string }[] = [];
   for (const c of all) {
@@ -309,8 +317,8 @@ export function labelColumnsFor(
     if (rest === null) continue;
     const owner = longer.find((g) => nameRest(c, g) !== null);
     let reason: string | null = null;
-    if ((isExplanationKey(c.toLowerCase()) && !isExplanationKey(key.toLowerCase())) || rest.split('_').some((w) => NOT_LABEL_WORDS.has(w))) reason = 'a note or rating';
-    else if (rest.split('_').some((w) => AUTHOR_WORDS.has(w))) reason = 'about the author';
+    if ((isExplanationKey(c.toLowerCase()) && !isExplanationKey(key.toLowerCase())) || rest.split('_').some((w) => NOT_LABEL_WORDS.has(w))) reason = NOTE_OR_RATING;
+    else if (rest.split('_').some((w) => AUTHOR_WORDS.has(w))) reason = ABOUT_AUTHOR;
     else if (owner) reason = `belongs to ${owner}`;
     else if (f) {
       // A missing-value marker (e.g. "NA" for an uncoded text) is no label, unless the field has it as a category.
@@ -337,6 +345,13 @@ export function preferredGoldColumn(field: string, columns: string[]): string | 
     columns.find((c) => (nameRest(c, f) ?? '').split('_').some((w) => w === 'gold' || w === 'human')) ??
     columns[0]
   );
+}
+
+/** The field a column is named after: the longest of `fields` it extends (race_negative for race_negative_gold). */
+export function namedField(column: string, fields: string[]): string | undefined {
+  let best: string | undefined;
+  for (const f of fields) if (nameRest(column, f) !== null && (!best || f.length > best.length)) best = f;
+  return best;
 }
 
 /** The keys holding a number in one answer, kept per result (an answer doesn't change), so each is read once. */
@@ -375,7 +390,9 @@ export function knownFieldNames(study: Study | null, runs: Run[], extra: string[
 
 /**
  * The fields of a run agreement can be computed on, each with the label columns that belong to it, and the columns
- * named after a field that are not used, with the reason (e.g. "mostly not values of race").
+ * named after a field that are not used, with the reason (e.g. "mostly not values of race"). `valueDocs`: the texts
+ * a column's values are judged on (by default the run's); `known`: `knownFieldNames(study, allRuns, [], results)`,
+ * if already at hand.
  */
 export function labelPairs(
   run: Run,
@@ -385,11 +402,12 @@ export function labelPairs(
   study: Study | null = null,
   views: Map<string, DocView> = buildDocViews(docs, allRuns, results, run.id),
   fields: ComparableField[] = comparableFields(run, views.values()),
+  { valueDocs, known: knownAlready }: { valueDocs?: Doc[]; known?: string[] } = {},
 ): { fields: ComparableField[]; pairs: { field: string; column: string }[]; skipped: { field: string; column: string; reason: string }[] } {
-  const known = knownFieldNames(study, allRuns, fields.map((f) => f.key), results);
+  const known = knownAlready ? [...new Set([...knownAlready, ...fields.map((f) => f.key)])] : knownFieldNames(study, allRuns, fields.map((f) => f.key), results);
   // Whether a column holds mostly a field's values is judged on the run's texts, which its agreement is computed on.
   const inRun = new Set(run.docIds);
-  const runDocs = docs.filter((d) => inRun.has(d.id));
+  const runDocs = valueDocs ?? docs.filter((d) => inRun.has(d.id));
   const found = fields.map((f) => ({ field: f.key, ...labelColumnsFor(f, docs, known, runDocs) }));
   // A column of a longer field of this run (gender_role_gold, skipped for gender) is explained by that field's own
   // entry (a pair, or its reason for leaving the column out), not by "belongs to gender_role".
@@ -410,8 +428,8 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
   const { fields, pairs } = labelPairs(run, docs, allRuns, results, study, views);
   const inRun = new Set(run.docIds);
   const setup = (field: string) => fields.find((f) => f.key === field)!;
-  // (Plain-text scores: the human–human rows too are on the scale grown from the run's answers, `f.range`, so only
-  // labels far off it depend on the model.)
+  // (Plain-text scores: the human–human rows too are on the scale grown from the run's answers, `f.range`; it takes in
+  // labels within 3 points, so only codes far off it, e.g. 9 or 99 next to −3…3, depend on the model.)
   const stats = (xs: string[], ys: string[], f: ComparableField) => agreement(xs, ys, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen, range: f.range });
   for (const { field, column } of pairs) {
     const f = setup(field);
@@ -488,28 +506,21 @@ export function agreementRows(rows: AgreementRow[], runNumber: number | string):
   }));
 }
 
-/** Runs that share their number with another one (given twice by versions before October 22, 2026, open in two tabs). */
-export const sharesNumber = (run: Run, runs: Run[]) => runs.some((r) => r.id !== run.id && r.number === run.number);
-
-/** The start of a run's id: tells apart runs that share a number (also in their folder names). */
-export const runIdTag = (run: Run) => slug(run.id.slice(0, 8));
-
-/** A run as the tables name it: its number, or for runs that share one, the number and the start of its id ("5-ab12cd34"). */
-export function runName(run: Run, runs: Run[]): number | string {
-  return sharesNumber(run, runs) ? `${run.number}-${runIdTag(run)}` : run.number;
-}
+// (Kept in view.ts, which the screens use too, and passed on from here.)
+export { runIdTag, runName, sharesNumber };
 
 /**
- * For a run whose retries a version before October 22, 2026 made: what its counts leave out ('' if nothing), about the
- * requests sent and the tokens, and both in one. That version recorded the number of requests a retry planned, and
- * overwrote the failed attempts a retry replaced.
+ * What a run's retry counts leave out ('' if nothing), about the requests sent and the tokens, and both in one. For
+ * retries a version before October 22, 2026 made: it recorded the number of requests a retry planned, and overwrote
+ * the failed attempts a retry replaced. For a retry stopped while requests were under way: by the page closing (those
+ * are not counted), or by Cancel or a failed save (counted as sent, with no answer).
  */
 export function retryNotes(run: Run, retry: RetriedRequests): { requests: string; tokens: string; both: string } {
   const version = `Annotation Desk ${run.snapshot.appVersion}, used for the run,`;
   const n = (k: number) => k.toLocaleString('en-US');
   // (With other retries, which recorded what they sent, also the total: a lower bound too.)
   const requests = retry.lowerBound
-    ? `recorded for Retry failed only the number of requests planned (${n(retry.planned)}), not the number sent: counted from the stored answers, ${retry.legacySent ? `at least ${n(retry.legacySent)} ${retry.legacySent === 1 ? 'was' : 'were'} sent` : 'the number sent is not known (no answer to them remains)'}${retry.others ? `; with the run’s other ${retry.others === 1 ? 'retry' : 'retries'}, at least ${n(retry.requests)} in all` : ''}`
+    ? `recorded for Retry failed only the number of requests planned (${n(retry.planned)}), not the number sent: counted from the stored answers, ${retry.legacySent ? `at least ${n(retry.legacySent)} ${retry.legacySent === 1 ? 'was' : 'were'} sent` : `the number sent is not known (no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'})`}${retry.others ? `; with the run’s other ${retry.others === 1 ? 'retry' : 'retries'}, at least ${n(retry.requests)} in all` : ''}`
     : '';
   const tokens = retry.tokensIncomplete
     ? 'did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries'
@@ -519,8 +530,17 @@ export function retryNotes(run: Run, retry: RetriedRequests): { requests: string
   const cut = retry.interrupted
     ? `A Retry failed of this run was interrupted (the page was closed while it was sending): it counts the requests answered; up to ${n(run.snapshot.options.concurrency)} more may have been sent without an answer being recorded.`
     : '';
+  // Requests sent when Cancel (or a failed save) stopped a retry: counted, but they left no result and no token count.
+  const u = retry.unanswered;
+  const stopped = u
+    ? `${n(u)} ${u === 1 ? 'request' : 'requests'} sent by Retry failed ${u === 1 ? 'was' : 'were'} stopped (Cancel, or a result that could not be saved) before ${u === 1 ? 'its answer was' : 'their answers were'} stored: counted as sent, ${u === 1 ? 'it left no result (its text keeps any earlier one)' : 'they left no result (their texts keep any earlier one)'}, and ${u === 1 ? 'its' : 'their'} token use (if any) is not in the token counts.`
+    : '';
   const join = (...parts: string[]) => parts.filter(Boolean).join(' ');
-  return { requests: join(requests && `${version} ${requests}.`, cut), tokens: tokens && `${version} ${tokens}.`, both: join(both && `${version} ${both}.`, cut) };
+  return {
+    requests: join(requests && `${version} ${requests}.`, cut, stopped),
+    tokens: join(tokens && `${version} ${tokens}.`, stopped),
+    both: join(both && `${version} ${both}.`, cut, stopped),
+  };
 }
 
 export function runSummaryRows(runs: Run[], results: Result[]): Row[] {

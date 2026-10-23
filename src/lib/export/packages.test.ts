@@ -195,10 +195,10 @@ describe('request and response logs in the supplementary package', () => {
     expect(responses.map((l) => [l.doc_id, l.replicate, l.attempt])).toEqual(expected);
     expect(requests.map((l) => [l.doc_id, l.replicate, l.attempt])).toEqual(expected);
     expect(requests[0].request).toEqual({ model: 'm', messages: [{ role: 'user', content: docs[0].id }] });
-    // Replaced attempts carry their outcome; the current one doesn't need to.
+    // Replaced attempts carry their outcome (with the parse error, round four G23); the current one doesn't need to.
     expect(responses.slice(2, 5)).toEqual([
       { doc_id: 'art_1', replicate: 1, attempt: 1, response: { answer: 'first' } },
-      { doc_id: 'art_1', replicate: 2, attempt: 1, status: 'error', error: 'overloaded', response: { answer: 'error' } },
+      { doc_id: 'art_1', replicate: 2, attempt: 1, status: 'error', error: 'overloaded', parse_error: null, response: { answer: 'error' } },
       { doc_id: 'art_1', replicate: 2, attempt: 2, response: { answer: 'second' } },
     ]);
 

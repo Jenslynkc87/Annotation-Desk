@@ -70,12 +70,13 @@ function compressed(n: number, seed: number): { gold: string[]; model: string[] 
 }
 
 describe('the scale grown from the range of the model’s answers', () => {
-  it('takes in values next to the range (step: half its width, at least 1), and chains', () => {
+  // (Round four: the step is 3 points, or half the range's width if more; it was half the width, at least 1.)
+  it('takes in values near the range (step: 3 points, or half its width if more), and chains', () => {
     expect(grownScale([-2, 3], [-3, 9, 33, 99])).toEqual([-3, 3]);
     expect(grownScale([0, 2], [-1, -2, -3, 3])).toEqual([-3, 3]); // a pilot's 0…2: −1, −2, −3 chain
-    expect(grownScale([0, 2], [-3, 3])).toEqual([0, 3]); // −3 alone is too far
-    expect(grownScale([0, 0], [1, 99, -1])).toEqual([-1, 1]); // one value: step 1
-    expect(grownScale([0.2, 3.7], [5, 9])).toEqual([0.2, 5]); // not whole: step 1.75
+    expect(grownScale([0, 2], [-3, 3])).toEqual([-3, 3]); // −3 is 3 points off (was too far with step 1)
+    expect(grownScale([0, 0], [1, 99, -1])).toEqual([-1, 1]); // one value: step 3, 99 still out
+    expect(grownScale([0.2, 3.7], [5, 9])).toEqual([0.2, 5]); // not whole: step 3, 9 is 4 off 5
   });
 });
 
@@ -182,7 +183,12 @@ describe('plain-text JSON scores: a missing-value code far off the answers (F2, 
   });
 
   it('says where the scale comes from, and which labels outside the answers were kept', () => {
-    expect(leftOutReason('ordinal', [-3, 3], true)).toBe('a label isn’t a number or lies far outside the model’s answers (the scale, −3 to 3, takes in the labels next to them)');
+    expect(leftOutReason('ordinal', [-3, 3], true)).toBe('a label isn’t a number or lies far outside the model’s answers (the scale, −3 to 3, takes in the labels near them)');
+    expect(leftOutReason('ordinal', [-3, 3], true, 3)).toBe(
+      'a label isn’t a number or lies far outside the model’s answers (the scale, −3 to 3, takes in the labels within 3 points of them or of each other)',
+    );
+    // Answers beyond −100…100 (e.g. years): only labels that aren't numbers are left out.
+    expect(leftOutReason('ordinal', undefined, true)).toBe('a label isn’t a number');
     expect(leftOutReason('ordinal', [-3, 3])).toBe('a label isn’t a number or is outside the scale (−3 to 3)');
     expect(outsideAnswersNote({ n: 12, values: ['-3'], range: [-2, 3] }, { one: 'text', many: 'texts' })).toBe(
       'Labels outside the range of the model’s answers (−2 to 3) were kept: −3 (12 texts).',

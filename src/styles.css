@@ -114,7 +114,7 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
 /* ---------- forms ---------- */
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .field > label, .label { font-weight: 600; font-size: 13.5px; }
-.hint { font-size: 13px; color: var(--muted); line-height: 1.45; }
+.hint { font-size: 13px; color: var(--muted); line-height: 1.45; overflow-wrap: break-word; }
 .hint.warn, .hint .warn { color: var(--warn); }
 .hint.tight { margin-top: -4px; }
 .hint.err { color: var(--err); }
@@ -128,12 +128,12 @@ code, .mono { font-family: var(--mono); font-size: 13px; }
   padding: 7px 10px; font-size: 15px;
 }
 .input, .select { height: 36px; }
-.select { padding-right: 6px; }
+.select { padding-right: 6px; max-width: 100%; }
 .input:focus, .select:focus, .textarea:focus { outline: 2px solid color-mix(in srgb, var(--navy) 30%, transparent); border-color: var(--navy); }
 .textarea { resize: vertical; line-height: 1.5; }
 .textarea.prompt { min-height: 220px; font-size: 14.5px; }
 .input.small, .select.small { height: 32px; padding: 4px 8px; font-size: 13.5px; }
-.check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 14px; }
+.check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; font-size: 14px; overflow-wrap: anywhere; }
 .check input { margin-top: 3px; accent-color: var(--navy); }
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); overflow: hidden; align-self: flex-start; background: var(--card); }
 .seg button { border: 0; background: var(--card); padding: 7px 12px; cursor: pointer; font-size: 14px; color: var(--muted); }
@@ -212,7 +212,7 @@ table.data.estimate-table .num { text-align: right; font-variant-numeric: tabula
 .progress { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 12px; }
 .progress > div { height: 100%; background: var(--navy); transition: width .25s; }
 .progress-label { font-size: 13px; color: var(--muted); margin-top: 6px; display: flex; justify-content: space-between; gap: 8px; }
-.notice { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; background: var(--navy-050); color: var(--ink); }
+.notice { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; background: var(--navy-050); color: var(--ink); overflow-wrap: break-word; }
 .notice.warn { background: var(--warn-bg); }
 .notice.err { background: var(--err-bg); }
 
@@ -256,7 +256,9 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .modal-head { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
 .modal-head h3 { margin: 0; font-size: 16px; }
 .modal-body { padding: 18px 20px; }
-.modal-foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
+.modal-foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+/* A button naming a long column (Remove “…”, Mark … as …) wraps instead of pushing Cancel off a narrow screen. */
+.modal-foot .btn { white-space: normal; overflow-wrap: anywhere; }
 .close { margin-left: auto; }
 
 .textblock { white-space: pre-wrap; word-break: break-word; background: color-mix(in srgb, var(--bg) 60%, var(--card)); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; max-height: 340px; overflow-y: auto; }

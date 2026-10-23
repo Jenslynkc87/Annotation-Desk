@@ -271,17 +271,24 @@ function linesAt(text: string, positions: number[], cr = false): number[] {
 function readDelimited(name: string, text: string, delimiter: string, above = 0): ParsedTable {
   const src = text.replace(/^\uFEFF/, '');
   const cells: string[][] = [];
-  // Where each row starts (its first character that isn't a space or line break: blank lines are skipped), and the
-  // position of each quotation mark Papa finds unclosed.
+  // Where each row starts (its first character that isn't a space or line break), and the position of each
+  // quotation mark Papa finds unclosed.
   const starts: number[] = [];
   const quoteAt: number[] = [];
   let cursor = 0;
   let cr = false;
+  // Blank rows (also rows of only delimiters or empty quotes, as spreadsheets save blank rows: ",,") are skipped here
+  // rather than by Papa, so the cursor moves past them too. The delimiter is detected as Papa does when it skips them.
+  const d = delimiter || Papa.parse<string[]>(src, { preview: 1, skipEmptyLines: 'greedy' }).meta.delimiter;
   Papa.parse<string[]>(src, {
     header: false,
-    skipEmptyLines: 'greedy',
-    delimiter,
+    skipEmptyLines: false,
+    delimiter: d,
     step: (r) => {
+      if (r.data.join('').trim() === '') {
+        cursor = r.meta.cursor;
+        return;
+      }
       let i = cursor;
       while (i < src.length && /\s/.test(src[i])) i++;
       cells.push(r.data);
@@ -325,9 +332,10 @@ function readDelimited(name: string, text: string, delimiter: string, above = 0)
  * per line). A cell is in quotes when it holds a line break or a quotation mark (doubled inside the quotes), and its
  * closing quotation mark ends the cell; any other quotation mark is part of the text, e.g. a cell that starts with
  * "The Old Man" or "Heroes". What lies between two quotation marks that holds a tab as well is several cells, not one
- * (e.g. ditto marks (") in two rows of a column), unless `tabs` (Excel also quotes a cell that holds a tab).
- * `lines`: the line each row starts on (from 1). `open`: the lines of a quotation mark at the start of a cell that is
- * not closed on its own line and doesn't make a quoted cell (read as written).
+ * (e.g. ditto marks (") in two rows of a column), unless `tabs` and it stays on one line (Excel also quotes a cell
+ * that holds a tab). Nor is one that starts or ends with a line break or tab (two ditto marks, or one and a later
+ * inch mark: 15"). `lines`: the line each row starts on (from 1). `open`: the lines of a quotation mark at the start
+ * of a cell that is not closed on its own line and doesn't make a quoted cell (read as written).
  */
 function readCells(text: string, tabs = false): { rows: string[][]; lines: number[]; open: number[] } {
   const rows: string[][] = [];
@@ -359,11 +367,15 @@ function readCells(text: string, tabs = false): { rows: string[][]; lines: numbe
       }
       const closed = j < n && endOfCell(j + 1);
       const tab = v.includes('\t');
-      if (closed && (v.includes('\n') || doubled || (tabs && tab)) && (tabs || !tab)) {
+      const nl = v.includes('\n');
+      // A quotation mark alone in its cell (a ditto mark) starts or ends a span with a tab or line break, and a span
+      // across several rows holds both: not a cell.
+      const edge = /^\s*[\t\n]|[\t\n]\s*$/.test(v);
+      if (closed && !edge && (nl || doubled || (tabs && tab)) && (!tab || (tabs && !nl))) {
         cell = v;
         line += v.split('\n').length - 1;
         i = j + 1;
-      } else if (j >= n || v.includes('\n')) open.push(line);
+      } else if (j >= n || nl) open.push(line);
     }
     if (cell === null) {
       let j = i;
@@ -409,38 +421,44 @@ export function parsePastedTable(text: string): ParsedTable {
     const { columns, keep, problems: names } = nameColumns(head, lines);
     return { name: 'pasted', columns, rows: lines.map((r) => Object.fromEntries(keep.map((i, j) => [columns[j], r[i] ?? '']))), problems: [...problems, ...names] };
   };
+  const openNote = (open: number[]) => {
+    const at = open.map((l) => l + above);
+    return at.length
+      ? [
+          `A value starts with a quotation mark (") that is not closed at the end of a line (line ${at.slice(0, 5).join(', ')}${at.length > 5 ? ', …' : ''}), so it was kept as written, ` +
+            'one value per line. Check the row count: a value with a line break must be in quotes, with any quotation mark in it doubled ("say ""hi""").',
+        ]
+      : [];
+  };
   if (!body.includes('\t')) {
     // Typed with commas (or semicolons) between the values; otherwise one column (e.g. names copied from a single
     // column in Excel, which puts no tab on the clipboard): one value per line, so “Bohr, Niels” stays one name,
     // except a cell Excel put in quotes because it holds a line break.
     if (/[,;]/.test(/^[^\r\n]*/.exec(body)![0])) return readDelimited('pasted', body, '', above);
     const { rows, open } = readCells(body);
-    const at = open.map((l) => l + above);
-    return table(rows, at.length
-      ? [
-          `A value starts with a quotation mark (") that is not closed at the end of a line (line ${at.slice(0, 5).join(', ')}${at.length > 5 ? ', …' : ''}), so it was kept as written, ` +
-            'one value per line. Check the row count: a value with a line break must be in quotes, with any quotation mark in it doubled ("say ""hi""").',
-        ]
-      : []);
+    return table(rows, openNote(open));
   }
   // Read as written (a row per line, a cell per tab), unless that doesn't give every row as many cells as there are
   // column names and Excel's quoting does (a cell in quotes holds a line break, a quotation mark or, if nothing else
-  // fits, a tab). So quotation marks as text, e.g. ditto marks (") or a title that starts with one, never join rows.
-  // If none fits, the reading as written or Excel's quoting without tabs, whichever leaves fewer rows that don't
-  // (quoted cells holding tabs could swallow whole rows).
+  // fits, a tab on one line). So quotation marks as text, e.g. ditto marks (") or a title that starts with one, never
+  // join rows. If none fits, the one that leaves the fewest rows that don't (the first of them on a tie).
   const misfits = (rows: string[][]) => rows.flatMap((r, k) => (k > 0 && !blank(r) && r.length !== rows[0].length ? [k] : []));
   const literal = body.split(/\r?\n/).map((l) => l.split('\t'));
-  const readings = [{ rows: literal, lines: literal.map((_, k) => k + 1) }, readCells(body), readCells(body, true)];
+  const readings = [{ rows: literal, lines: literal.map((_, k) => k + 1), open: [] }, readCells(body), readCells(body, true)];
   const bad = readings.map((r) => misfits(r.rows));
   const best = bad.findIndex((b) => !b.length);
-  const k = best >= 0 ? best : bad[1].length < bad[0].length ? 1 : 0;
+  const k = best >= 0 ? best : bad.reduce((m, b, i) => (b.length < bad[m].length ? i : m), 0);
   const mismatch = bad[k].map((r) => readings[k].lines[r] + above);
-  return table(readings[k].rows, mismatch.length
-    ? [
-        `${mismatch.length} row${mismatch.length === 1 ? ' has' : 's have'} more or fewer cells than there are column names (line ${mismatch.slice(0, 5).join(', ')}${mismatch.length > 5 ? ', …' : ''}), ` +
-          'so some values may be under the wrong column. Check those rows.',
-      ]
-    : []);
+  return table(readings[k].rows, [
+    ...(mismatch.length
+      ? [
+          `${mismatch.length} row${mismatch.length === 1 ? ' has' : 's have'} more or fewer cells than there are column names (line ${mismatch.slice(0, 5).join(', ')}${mismatch.length > 5 ? ', …' : ''}), ` +
+            'so some values may be under the wrong column. Check those rows.',
+        ]
+      : []),
+    // One column (a cell in it holds a tab): a quotation mark read as written changes only the row count.
+    ...(readings[k].rows[0]?.length === 1 ? openNote(readings[k].open) : []),
+  ]);
 }
 
 /** Guess which column holds the text: the one with the longest average content. */

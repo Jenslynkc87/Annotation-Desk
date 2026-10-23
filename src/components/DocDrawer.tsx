@@ -87,7 +87,7 @@ export function DocDrawer({
             <select className="select small" style={{ width: 'auto', marginLeft: 'auto' }} value={runId ?? ''} onChange={(e) => setRunId(e.target.value)}>
               {runsForDoc.map((r) => (
                 <option key={r.id} value={r.id}>
-                  Run {runTitle(r)} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model}
+                  Run {runTitle(r, runs)} · prompt v{r.snapshot.promptVersion} · {r.snapshot.model.model}
                 </option>
               ))}
             </select>
@@ -133,6 +133,7 @@ function FragmentKV({ k, v }: { k: string; v: string }) {
 
 function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; showRep: boolean }) {
   const [log, setLog] = useState<ResultLog | null | undefined>(undefined);
+  const runs = useStore((s) => s.runs);
   const fields = outputFields(run.snapshot.prompt);
   const loadLog = async () => setLog((await getLog(r.id)) ?? null);
 
@@ -195,7 +196,7 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
             <dd className="mono">{r.responseId || '—'}</dd>
             <dt>Run</dt>
             <dd>
-              {runTitle(run)} · {run.mode === 'batch' ? 'batch' : 'immediate'} · prompt v{run.snapshot.promptVersion} ({run.snapshot.promptHash})
+              {runTitle(run, runs)} · {run.mode === 'batch' ? 'batch' : 'immediate'} · prompt v{run.snapshot.promptVersion} ({run.snapshot.promptHash})
             </dd>
           </dl>
           {r.rawText && (

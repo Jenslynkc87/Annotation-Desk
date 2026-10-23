@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { isMissingLabel } from '../lib/metrics';
-import { fieldLabel, isYesNoField, normalizeLabel, outputFields, toNumber } from '../lib/prompt';
+import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
+import { labelValue, namedField } from '../lib/export/tables';
+import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
+import { fieldLabel, isYesNoField, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
 import { batchParts, batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
-import type { Doc, Variable } from '../lib/types';
+import type { Doc, Run, Variable } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
-import { buildDocViews, runTitle, type RunFilter } from '../lib/view';
+import { buildDocViews, runName, runTitle, type DocView, type RunFilter } from '../lib/view';
 import { words, isEntries } from '../lib/subject';
 import { CorpusImport } from './CorpusImport';
 import { CostEstimate, EstimateLink, remainingRule } from './CostEstimate';
@@ -39,14 +41,24 @@ export function validFilters(
 /**
  * Which labels "Disagree with" (and the highlighting) compares, by the Agreement panel's rule (`agreement`): a
  * missing-value marker such as "NA" never; on a scale only numbers on it, with categories only the categories (or
- * a tie of them), unless most labelled pairs fall outside (then the values are compared as they are). `pairs`:
- * the (normalized) model value and label of each text that has both.
+ * a tie of them), unless most labelled pairs fall outside (then the values are compared as they are). Scores in
+ * plain-text answers (a `ComparableField` with `scaleSeen`): on the range of the model's answers grown through the
+ * labels near it (`grownScale`; any number when the answers go beyond −10…10). `pairs`: the (normalized) model
+ * value and label of each text that has both.
  */
-export function comparableLabel(field: Variable | undefined, pairs: [string, string][]): (v: string) => boolean {
+export function comparableLabel(field: Variable | ComparableField | undefined, pairs: [string, string][]): (v: string) => boolean {
   let fits: ((v: string) => boolean) | null = null;
   // (On a scale or numeric codes, as in `agreement`: a number off it is always left out; only mostly words are compared as they are.)
   let onNumbers = false;
-  if (field?.type === 'ordinal' || field?.type === 'number') {
+  if (field && 'key' in field) {
+    if (field.scaleSeen) {
+      onNumbers = true;
+      const r = field.range;
+      const values = pairs.flat().map(toNumber).filter(Number.isFinite);
+      const [lo, hi] = ratingRange(r) ? grownScale(r, values) : [-Infinity, Infinity];
+      fits = (v) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
+    }
+  } else if (field?.type === 'ordinal' || field?.type === 'number') {
     onNumbers = true;
     const scale = field.type === 'ordinal' ? field.values.map((x) => toNumber(x)).filter(Number.isFinite) : [];
     const lo = scale.length >= 2 ? Math.min(...scale) : -Infinity;
@@ -146,15 +158,40 @@ function TextsAndResults() {
     if (viewedRun) for (const x of outputFields(viewedRun.snapshot.prompt)) if (!f.includes(x)) f.push(x);
     return f;
   }, [study.prompt, runFilter, runs]);
-  const compareField = fields[0];
-  const compareYesNo = isYesNoField(study.prompt, compareField);
+  const viewedRun = runFilter === 'latest' ? null : (runs.find((r) => r.id === runFilter) ?? null);
   // Display names: look the key up in the current prompt, then in the viewed run's prompt.
   const promptOf = (key: string) => {
-    const viewedRun = runFilter === 'latest' ? null : runs.find((r) => r.id === runFilter);
     const inCurrent = study.prompt.variables.some((v) => v.name === key);
     return inCurrent || !viewedRun ? study.prompt : viewedRun.snapshot.prompt;
   };
   const fieldName = (key: string) => fieldLabel(promptOf(key), key);
+  // Plain-text runs whose answers are JSON (the owner's layout): their scores, read inside the answers, as in the
+  // Agreement panel (`comparableFields`). Those of the run being viewed; in "Latest result per text" with a plain-text
+  // prompt, those of the plain-text runs shown (their ranges joined, as for two runs in the panel).
+  const scoreFields = useMemo(() => {
+    const textRuns = viewedRun
+      ? viewedRun.snapshot.prompt.outputMode === 'text'
+        ? [viewedRun]
+        : []
+      : study.prompt.outputMode === 'text'
+        ? [...new Set([...views.values()].map((v) => v.run).filter((r): r is Run => !!r && r.snapshot.prompt.outputMode === 'text'))]
+        : [];
+    const byKey = new Map<string, ComparableField>();
+    for (const run of textRuns) for (const f of comparableFields(run, views.values())) byKey.set(f.key, combineFields(f, byKey.get(f.key)));
+    return [...byKey.values()];
+  }, [viewedRun, study.prompt.outputMode, views]);
+  // The score compared with a column: the one the column is named after (race for race_gold), else the first.
+  const scoreFor = (col: string) => scoreFields.find((x) => x.key === namedField(col, scoreFields.map((y) => y.key))) ?? scoreFields[0];
+  const scoreField = scoreFields.length ? scoreFor(compareCol) : undefined;
+  // Otherwise the first field shown (the viewed run's first, if it is structured and lacks the current prompt's).
+  const ownFields = viewedRun?.snapshot.prompt.outputMode === 'structured' ? outputFields(viewedRun.snapshot.prompt) : null;
+  const compareField = scoreField?.key ?? (ownFields?.length && !ownFields.includes(fields[0]) ? ownFields[0] : fields[0]);
+  const compareYesNo = !scoreField && isYesNoField(promptOf(compareField), compareField);
+  // The compared value of a text, read inside the JSON answer for a plain-text run (also under a structured prompt).
+  const modelValue = (v: DocView) =>
+    normalizeLabel(compareField === TEXT_RESPONSE_KEY || !v.run ? (v.values[compareField] ?? '') : fieldValue(v.run, v.values, compareField), compareYesNo);
+  // A label: for scores, a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
+  const labelOf = (d: Doc) => (scoreField ? labelValue(d.meta[compareCol], scoreField) : normalizeLabel(d.meta[compareCol], compareYesNo));
   const compareVar = promptOf(compareField).variables.find((v) => v.name === compareField);
   // Labels the comparison leaves out, as the Agreement panel does (e.g. "NA", or a number off the scale).
   const comparable = useMemo(() => {
@@ -162,12 +199,13 @@ function TextsAndResults() {
     if (compareCol)
       for (const d of docs) {
         const v = views.get(d.id)!;
-        const val = normalizeLabel(v.values[compareField], compareYesNo);
-        const gold = normalizeLabel(d.meta[compareCol], compareYesNo);
+        const val = modelValue(v);
+        const gold = labelOf(d);
         if (v.status !== 'none' && v.status !== 'error' && val && gold) pairs.push([val, gold]);
       }
-    return comparableLabel(compareVar, pairs);
-  }, [docs, views, compareCol, compareField, compareYesNo, compareVar]);
+    return comparableLabel(scoreField ?? compareVar, pairs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docs, views, compareCol, compareField, compareYesNo, compareVar, scoreField]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -183,14 +221,15 @@ function TextsAndResults() {
       if (statusFilter === 'mismatch') {
         // Only texts with both a model value and a label (as the highlighted cells), not every unlabelled one, and
         // not those whose label the comparison leaves out (e.g. "NA").
-        const val = normalizeLabel(v.values[compareField], compareYesNo);
-        const gold = normalizeLabel(d.meta[compareCol], compareYesNo);
+        const val = modelValue(v);
+        const gold = labelOf(d);
         if (!compareCol || v.status === 'none' || v.status === 'error' || !val || !gold || val === gold || !comparable(val) || !comparable(gold)) return false;
       }
       if (!q) return true;
       return d.docId.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) || Object.values(v.values).some((x) => x.toLowerCase().includes(q));
     });
-  }, [docs, views, query, statusFilter, metaFilter, compareCol, compareField, compareYesNo, comparable]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docs, views, query, statusFilter, metaFilter, compareCol, compareField, compareYesNo, comparable, scoreField]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
   const curPage = Math.min(page, pageCount - 1);
@@ -369,18 +408,33 @@ function TextsAndResults() {
             // Batches that ended but whose results could not be saved are not checked again until the owner asks.
             const waiting = batchParts(r).filter((p) => p.status === 'submitted');
             const notSaved = waiting.filter((p) => p.saveFailed).length;
+            // (Results stored, but not the run's record of them: say so, not that the results were lost.)
+            const recordOnly = notSaved > 0 && waiting.filter((p) => p.saveFailed).every((p) => p.resultsSaved);
             const running = waiting.filter((p) => !p.saveFailed);
+            // A batch of the run being uploaded from this page (its first, or a Retry failed's) has not ended: it
+            // just hasn't been accepted yet.
+            const uploading = !!r.batch?.uploading && !running.length;
             return (
               <div className="notice" key={r.id} style={{ marginTop: 10 }}>
                 <div className="row">
                   <span>
-                    {running.length ? `Batch run ${runTitle(r)} is processing (${running.map((p) => p.lastStatus).join('; ') || 'submitted'}). ` : `Batch run ${runTitle(r)} has ended. `}
+                    {running.length
+                      ? `Batch run ${runTitle(r, runs)} is processing (${running.map((p) => p.lastStatus).join('; ') || 'submitted'}). `
+                      : uploading
+                        ? `Batch run ${runTitle(r, runs)}: a batch is being uploaded (see above). `
+                        : `Batch run ${runTitle(r, runs)} has ended. `}
                     {notSaved
-                      ? `${running.length ? `The results of ${notSaved === 1 ? 'a batch that ended' : `${notSaved} batches that ended`}` : 'Its results'} could not be saved: free some space, then click Check now.`
+                      ? recordOnly
+                        ? `${running.length ? `The results of ${notSaved === 1 ? 'a batch that ended were' : `${notSaved} batches that ended were`}` : 'Its results were'} saved, but the run’s record of them could not be: free some space, then click Check now.`
+                        : `${running.length ? `The results of ${notSaved === 1 ? 'a batch that ended' : `${notSaved} batches that ended`}` : 'Its results'} could not be saved: free some space, then click Check now.`
                       : r.batch && keys[r.batch.provider]
-                        ? 'Results appear here automatically while this page is open.'
+                        ? `${uploading ? 'Once the provider has accepted it, results' : 'Results'} appear here automatically while this page is open.`
                         : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
                     {running.length > 0 && 'Unfinished requests expire 24 hours after submission.'}
+                    {/* Retry failed, which looks for such an upload at the provider first, is offered only once the run's batches have ended. */}
+                    {r.batch?.uploadUnknown &&
+                      (running.length > 0 || notSaved > 0) &&
+                      ` Another batch upload of this run may or may not have reached the provider. Retry failed (under Runs & agreement), which looks for it there first, is offered once ${running.length ? (running.length > 1 ? 'these batches have ended' : 'this batch has ended') : 'these results are saved'}; Delete looks for it too, and cancels it if found.`}
                   </span>
                   <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
                     Check now
@@ -417,16 +471,22 @@ function TextsAndResults() {
               <option value="latest">Latest result per {w.one}</option>
               {[...runs].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
-                  Run {runTitle(r)} · prompt v{r.snapshot.promptVersion}
+                  Run {runTitle(r, runs)} · prompt v{r.snapshot.promptVersion}
                 </option>
               ))}
             </select>
             {metaColumns.length > 0 && fields.length > 0 && (
-              <select className="select small" style={{ width: 'auto' }} value={compareCol} onChange={(e) => setCompareCol(e.target.value)} title={`Compare ${fieldName(compareField)} with a metadata column (e.g. human labels)`}>
+              <select
+                className="select small"
+                style={{ width: 'auto' }}
+                value={compareCol}
+                onChange={(e) => setCompareCol(e.target.value)}
+                title={`Compare ${scoreFields.length > 1 ? 'a score (the one a column is named after, else the first)' : fieldName(compareField)} with a metadata column (e.g. human labels)`}
+              >
                 <option value="">Compare with…</option>
                 {metaColumns.map((c) => (
                   <option key={c} value={c}>
-                    {fieldName(compareField)} vs {c}
+                    {scoreFields.length ? scoreFor(c).key : fieldName(compareField)} vs {c}
                   </option>
                 ))}
               </select>
@@ -517,6 +577,11 @@ function TextsAndResults() {
                 {pageDocs.map((d) => {
                   const v = views.get(d.id)!;
                   const gold = compareCol ? d.meta[compareCol] ?? '' : '';
+                  // The compared value and label, and the cell that shows the value (a plain-text run's whole answer
+                  // when its score has no column of its own).
+                  const [nv, ng] = compareCol ? [modelValue(v), labelOf(d)] : ['', ''];
+                  const cmp = nv && ng && comparable(nv) && comparable(ng) ? (nv === ng ? 'match' : 'mismatch') : '';
+                  const cmpCell = v.run?.snapshot.prompt.outputMode === 'text' && !fields.includes(compareField) ? TEXT_RESPONSE_KEY : compareField;
                   return (
                     <tr
                       key={d.id}
@@ -533,16 +598,15 @@ function TextsAndResults() {
                         <div className="snippet">{entries ? d.text.split('\n').join(' · ') : d.text.slice(0, 300)}</div>
                       </td>
                       {fields.map((f, i) => {
-                        const val = v.values[f] ?? '';
-                        const [nv, ng] = [normalizeLabel(val, compareYesNo), normalizeLabel(gold, compareYesNo)];
-                        const cmp = compareCol && f === compareField && val && gold && comparable(nv) && comparable(ng) ? (nv === ng ? 'match' : 'mismatch') : '';
+                        // (A plain-text run's score under a structured prompt's column of the same name.)
+                        const val = v.values[f] ?? (v.run && f !== TEXT_RESPONSE_KEY ? fieldValue(v.run, v.values, f) : '');
                         return (
                           <td key={f}>
                             {v.status === 'error' ? (
                               // One badge per failed text, not one per column.
                               i === 0 && <span className="badge err">failed</span>
                             ) : (
-                              <span className={`val ${cmp}`} title={v.consistency[f] !== undefined ? `${Math.round(v.consistency[f] * 100)}% of the annotations agree` : undefined}>
+                              <span className={`val ${f === cmpCell ? cmp : ''}`} title={v.consistency[f] !== undefined ? `${Math.round(v.consistency[f] * 100)}% of the annotations agree` : undefined}>
                                 {f === 'response' ? <span className="snippet" style={{ fontWeight: 400 }}>{val}</span> : val || (v.status === 'none' ? '' : '—')}
                                 {v.consistency[f] !== undefined && v.consistency[f] < 1 && <span className="badge warn" style={{ marginLeft: 6 }}>{Math.round(v.consistency[f] * 100)}%</span>}
                               </span>
@@ -553,8 +617,8 @@ function TextsAndResults() {
                       {compareCol && <td className="val">{gold}</td>}
                       <td>
                         {v.run ? (
-                          <span className={`badge ${v.status === 'partial' ? 'warn' : 'muted'}`} title={`Run ${runTitle(v.run)} · prompt v${v.run.snapshot.promptVersion} · ${v.run.snapshot.model.model}`}>
-                            #{v.run.number} · v{v.run.snapshot.promptVersion}
+                          <span className={`badge ${v.status === 'partial' ? 'warn' : 'muted'}`} title={`Run ${runTitle(v.run, runs)} · prompt v${v.run.snapshot.promptVersion} · ${v.run.snapshot.model.model}`}>
+                            #{runName(v.run, runs)} · v{v.run.snapshot.promptVersion}
                           </span>
                         ) : (
                           <span className="hint">—</span>

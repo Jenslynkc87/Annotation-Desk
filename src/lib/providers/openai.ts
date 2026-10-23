@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { BatchFailedError, type BatchLine, type BatchStatus, type CallOutcome, type ListedBatch, type ModelInfo, type ProviderAdapter, type RequestInputs } from './types';
+import { BatchFailedError, CLOCK_MARGIN_MS, type BatchLine, type BatchStatus, type CallOutcome, type ListedBatch, type ModelInfo, type ProviderAdapter, type RequestInputs } from './types';
 
 function client(apiKey: string) {
   // Calls go straight from the browser to OpenAI; the key never touches another server.
@@ -214,7 +214,7 @@ export const openaiAdapter: ProviderAdapter = {
   },
 
   async listRecentBatches(apiKey, sinceIso) {
-    const since = Date.parse(sinceIso) - 120_000;
+    const since = Date.parse(sinceIso) - CLOCK_MARGIN_MS;
     const out: ListedBatch[] = [];
     // Newest first: stop at the first batch created before the upload began.
     for await (const b of client(apiKey).batches.list({ limit: 20 })) {
@@ -226,6 +226,7 @@ export const openaiAdapter: ProviderAdapter = {
         inputFileId: b.input_file_id,
         status: b.status,
         metadata: (b.metadata ?? undefined) as Record<string, string> | undefined,
+        ...(['cancelling', 'cancelled', 'expired'].includes(b.status) ? { stopped: true } : {}),
       });
     }
     return out;

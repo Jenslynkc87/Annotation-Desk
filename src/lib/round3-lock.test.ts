@@ -90,7 +90,9 @@ describe('a waiting tab never asks on its own (F41, F96)', () => {
   it('a window merely in view does not take the app while the working tab reloads', async () => {
     const { locks, state, ask } = setup({ otherHolds: true, focused: false });
     void ask();
-    await vi.advanceTimersByTimeAsync(10);
+    // (At page load it asks again a few times for a moment, round four G25.)
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(locks.requests).toBe(4);
     // The working tab is reloaded: the lock is free for a moment, then taken again by the reloaded page.
     for (let i = 0; i < 30; i++) {
       locks.holder = null;
@@ -98,7 +100,7 @@ describe('a waiting tab never asks on its own (F41, F96)', () => {
       locks.holder = 'other';
       await vi.advanceTimersByTimeAsync(1920);
     }
-    expect(locks.requests).toBe(1);
+    expect(locks.requests).toBe(4);
     expect(state.started).toBe(0);
     expect(state.otherTab).toBe(true);
   });
@@ -115,14 +117,17 @@ describe('a waiting tab never asks on its own (F41, F96)', () => {
   });
 
   it('stops asking once the user leaves this tab, and asks a few times at most', async () => {
-    const left = setup({ otherHolds: true, focused: true });
+    const left = setup({ otherHolds: true, focused: false });
+    void left.ask();
+    await vi.advanceTimersByTimeAsync(2000); // the request at page load and its few repeats (round four G25)
+    left.state.focused = true; // the user switches to this tab
     void left.ask();
     await vi.advanceTimersByTimeAsync(20);
-    left.state.focused = false; // the user clicks into the working window to reload it
+    left.state.focused = false; // then clicks into the working window to reload it
     left.locks.holder = null;
     await vi.advanceTimersByTimeAsync(10_000);
     expect(left.state.started).toBe(0);
-    expect(left.locks.requests).toBe(1);
+    expect(left.locks.requests).toBe(5);
 
     const stays = setup({ otherHolds: true, focused: true });
     void stays.ask();

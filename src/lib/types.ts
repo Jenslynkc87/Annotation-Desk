@@ -150,8 +150,10 @@ export interface Run {
    *  `counted: 'sent'`: written by a version that counts the requests sent (from October 23, 2026); an entry
    *  without it in a run of the published version (bare appVersion such as "0.1.0") holds the planned count.
    *  `interrupted`: the page closed while this retry was being sent, so `requests` counts those answered (a few
-   *  more, at most the concurrency, may have gone out without an answer being recorded). */
-  retries?: { at: string; requests: number; asBatch?: boolean; counted?: 'sent'; interrupted?: boolean }[];
+   *  more, at most the concurrency, may have gone out without an answer being recorded; kept with 0 too).
+   *  `unanswered`: of the requests sent, those stopped before their answer was stored (Cancel, or a result that
+   *  could not be saved; from October 23, 2026): sent, so counted, but their token use (if any) is not known. */
+  retries?: { at: string; requests: number; asBatch?: boolean; counted?: 'sent'; interrupted?: boolean; unanswered?: number }[];
   /** Failed attempts replaced by a retry (from October 22, 2026): their number and token use, which the
    *  results no longer show (their logs are kept, see ResultLog.attempt). */
   replaced?: { requests: number; usage: Usage };
@@ -187,6 +189,8 @@ export interface BatchPart {
   /** Its results arrived but could not be stored (e.g. the browser's storage is full): not fetched again until
    *  the owner checks the run by hand. */
   saveFailed?: string;
+  /** With `saveFailed`: its results were stored, only the run's record of them could not be saved. */
+  resultsSaved?: boolean;
 }
 
 export interface Usage {
@@ -222,6 +226,9 @@ export interface Result {
   attempt?: number;
   /** The token use of those earlier, replaced attempts (paid for too), kept with the result so it can't get lost. */
   replacedUsage?: Usage;
+  /** When each of those attempts was sent, oldest first (attempts replaced from October 23, 2026 on; an attempt
+   *  replaced before then is only in its log), so a retry's requests can be counted after a later retry replaced them. */
+  replacedAt?: string[];
 }
 
 /** Heavy per-result data, loaded on demand. */

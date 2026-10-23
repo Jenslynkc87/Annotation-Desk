@@ -11,7 +11,7 @@ import {
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
-import { clearPlan, guessKeyColumn, isResultsTableColumn, matchLabels, modelAnswerColumns } from '../lib/import/labels';
+import { clearPlan, guessKeyColumn, matchLabels, resultsTable } from '../lib/import/labels';
 import { templatePlaceholders } from '../lib/prompt';
 import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
 import { isEntries, words } from '../lib/subject';
@@ -511,6 +511,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
   const prompt = useStore((s) => currentStudy(s)!.prompt);
+  const saved = useStore((s) => currentStudy(s)!.savedPrompts);
   const [keyCol, setKeyCol] = useState(() => guessKeyColumn(docs, table));
   // Texts the sheet doesn't list keep their values, unless asked (e.g. a corrected sheet for all texts).
   const [removeUnlisted, setRemoveUnlisted] = useState(false);
@@ -521,15 +522,25 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
     () => docs.filter((d) => !m.updates.has(d.id) && !m.untouched.has(d.id) && m.replaced.some((c) => (d.meta[c] ?? '') !== '')).length,
     [docs, m],
   );
-  // A results file exported from this app: its answer columns are the model's, not human labels.
-  const modelCols = useMemo(() => modelAnswerColumns(table, runs, results, m.updates), [table, runs, results, m]);
-  const answerCols = modelCols.filter((c) => !isResultsTableColumn(c));
+  // A results file exported from this app: its answer columns are the model's, not human labels (field names from the
+  // runs and from the current and saved prompts, so also before a run or after one is deleted).
+  const exported = useMemo(
+    () => resultsTable(table, runs, results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)]),
+    [table, runs, results, m, prompt, saved],
+  );
+  // Its other columns not yet in this study: one may hold the answers of a field named differently now.
+  const others = m.columns.filter((c) => !exported.columns.includes(c) && !m.replaced.includes(c));
+  // Answer columns whose values were not shown to be the model's (e.g. a coder's own labels beside the model's
+  // explanations): named as such, never as the model's.
+  const unconfirmed = exported.answers.filter((c) => !exported.copied.includes(c));
+  const toDelete = exported.columns.filter((c) => !unconfirmed.includes(c));
   const removedBy = (c: string) => [...clear.values()].filter((cols) => cols.includes(c)).length;
   const inPrompt = useMemo(() => promptColumns(prompt, runs), [prompt, runs]);
   const emptied = m.replaced.filter((c) => inPrompt.has(c) && removedBy(c) > 0);
   const list = (xs: string[]) => `${xs.slice(0, 5).join(', ')}${xs.length > 5 ? ', …' : ''}`;
+  const plural = (xs: string[]) => (xs.length === 1 ? '' : 's');
   const [one, many] = entries ? ['entry', 'entries'] : ['text', 'texts'];
-  const blocked = m.conflicts.length > 0 || modelCols.length > 0;
+  const blocked = m.conflicts.length > 0 || exported.columns.length > 0;
   // Several rows for texts that the study has twice under one name (John Smith, John Smith_2) need other advice.
   const sameName = m.sameName;
   const otherConflicts = m.conflicts.filter((k) => !sameName.some((x) => x.key === k));
@@ -570,12 +581,75 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
         For the {many} it lists, a column that is already there gets this sheet’s values: a blank cell leaves no value (“NA” keeps {entries ? 'an entry' : 'a text'} out
         of the comparison). {entries ? 'Entries' : 'Texts'} it doesn’t list keep theirs.
       </p>
-      {modelCols.length > 0 && (
+      {exported.columns.length > 0 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
-          <strong>This is a results file exported from Annotation Desk.</strong> Its columns {list(answerCols)} hold the model’s answers, which are already in this
-          study (under <em>Runs &amp; agreement</em>); added here, they would count as {entries ? 'your own answers' : 'human labels'}. To add{' '}
-          {entries ? 'your answers' : 'human labels'}, use a sheet with only your own columns (the {entries ? 'ID' : 'file name or ID'} and your{' '}
-          {entries ? 'answers' : 'labels'}), or delete the {modelCols.length > answerCols.length ? 'model’s and the run’s' : 'model’s'} columns from this sheet ({modelCols.join(', ')}) and add it again.
+          <strong>This is a results file exported from Annotation Desk</strong>:{' '}
+          {exported.strong.length > 0 ? (
+            <>
+              it has the column{plural(exported.strong)} {list(exported.strong)}, which only those files have.
+            </>
+          ) : (
+            <>
+              its column{plural(exported.copied)} {list(exported.copied)} {exported.copied.length === 1 ? 'holds' : 'hold'} the model’s answers stored in this study,
+              for nearly every {one} it lists
+              {exported.shared.length > 0 && (
+                <>
+                  , and it has the column{plural(exported.shared)} {list(exported.shared)} those files have
+                </>
+              )}
+              .
+            </>
+          )}{' '}
+          {exported.answers.length === 0 ? (
+            <>
+              None of its columns is named like a field of this study (e.g. a field renamed since, or a file from another study), so the app can’t tell which
+              of them hold the model’s answers; added here, they would count as {entries ? 'your own answers' : 'human labels'}.
+            </>
+          ) : exported.copied.length > 0 ? (
+            <>
+              {exported.strong.length > 0 ? (
+                <>
+                  Its column{plural(exported.copied)} {list(exported.copied)} {exported.copied.length === 1 ? 'holds' : 'hold'} the model’s answers, which are
+                  already in this study (under <em>Runs &amp; agreement</em>); added
+                </>
+              ) : (
+                'Added'
+              )}{' '}
+              here, they would count as {entries ? 'your own answers' : 'human labels'}.
+              {unconfirmed.length > 0 && (
+                <>
+                  {' '}
+                  Its column{plural(unconfirmed)} {list(unconfirmed)} {unconfirmed.length === 1 ? 'is' : 'are'} named like this study’s fields: in such a file{' '}
+                  {unconfirmed.length === 1 ? 'it holds' : 'they hold'} the model’s answers too.
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              Its column{plural(exported.answers)} {list(exported.answers)} {exported.answers.length === 1 ? 'is' : 'are'} named like this study’s fields: in such
+              a file {exported.answers.length === 1 ? 'it holds' : 'they hold'} the model’s answers, which added here would count as {entries ? 'your own answers' : 'human labels'}.
+            </>
+          )}{' '}
+          To add {entries ? 'your answers' : 'human labels'}, use a sheet with only your own columns (the {entries ? 'ID' : 'file name or ID'} and your{' '}
+          {entries ? 'answers' : 'labels'}), or delete from this sheet{' '}
+          {exported.answers.length === 0 ? (
+            <>
+              the run’s columns ({exported.columns.join(', ')}) and every column with the model’s answers
+              {others.length > 0 && <> (among {list(others)})</>}
+            </>
+          ) : (
+            <>
+              the {exported.copied.length === 0 ? 'run’s' : toDelete.length > exported.copied.length ? 'model’s and the run’s' : 'model’s'} columns (
+              {toDelete.join(', ')})
+              {unconfirmed.length > 0 && (
+                <>
+                  , and {unconfirmed.join(', ')} unless {unconfirmed.length === 1 ? 'it holds' : 'they hold'} your own {entries ? 'answers' : 'labels'}
+                </>
+              )}
+              {others.length > 0 && <>, and any of its other columns ({list(others)}) that holds the model’s answers (e.g. of a field named differently now)</>}
+            </>
+          )}
+          , then add it again.
         </div>
       )}
       {table.problems?.map((p) => (

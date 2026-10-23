@@ -176,7 +176,8 @@ describe('a batch that went up while the run could not be saved', () => {
     await store.checkBatch(runId, true);
     const shown = runById(runId);
     expect(shown.status).toBe('submitted');
-    expect(store.batchParts(shown).map((x) => [x.status, !!x.saveFailed, x.lastStatus])).toEqual([['submitted', true, 'ended; results not saved']]);
+    // (Its results were saved, only the run's record was not: round four G19.)
+    expect(store.batchParts(shown).map((x) => [x.status, !!x.saveFailed, x.lastStatus])).toEqual([['submitted', true, 'ended; run record not saved']]);
     const said = toasts().slice(before);
     expect(said.some((t) => t.includes('finished'))).toBe(false);
     expect(said.filter((t) => t.includes('could not be saved'))).toHaveLength(1);
@@ -648,8 +649,9 @@ describe('batch results that could not be saved because storage is full', () => 
     vi.spyOn(dbApi, 'putRun').mockRejectedValue(quotaError());
     await store.checkBatch(lastRun().id, true);
     const said = toasts().filter((t) => t.startsWith(`Batch run #${lastRun().number}:`) && t.includes('could not be saved'));
+    // (The results were saved, only the run's record was not: round four G19.)
     expect(said).toEqual([
-      `Batch run #${lastRun().number}: the results arrived but could not be saved, because this browser's storage is full; free disk space, or export a backup and delete old runs or studies. Then click Check now on the Workbench (Check under Runs & agreement).`,
+      `Batch run #${lastRun().number}: its results were saved, but the run’s own record could not be saved, because this browser's storage is full; free disk space, or export a backup and delete old runs or studies. Then click Check now on the Workbench (Check under Runs & agreement).`,
     ]);
   });
 });

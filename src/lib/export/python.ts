@@ -2,6 +2,7 @@
 // The template marks every study-specific value as {{PLACEHOLDER}}; `fillScript` inserts the values.
 import { effectiveTemplate } from '../prompt';
 import type { Run, Study } from '../types';
+import { runName } from '../view';
 
 /** Split a run's shared request body into readable parts + the remaining settings. */
 export function splitRequestBase(run: Run) {
@@ -391,7 +392,8 @@ if __name__ == "__main__":
     main()
 `;
 
-export function scriptValues(study: Study, run: Run, exportedAt: string): Record<string, string> {
+/** `runs`: the study's runs, so a run that shares its number with another is named as in the exports (`runName`). */
+export function scriptValues(study: Study, run: Run, exportedAt: string, runs: Run[] = [run]): Record<string, string> {
   const { settings, cacheControl } = splitRequestBase(run);
   const p = run.snapshot.prompt;
   const fields = p.outputMode === 'structured' ? p.variables.map((v) => v.name) : ['response'];
@@ -400,7 +402,7 @@ export function scriptValues(study: Study, run: Run, exportedAt: string): Record
   return {
     APP_VERSION: __APP_VERSION__,
     STUDY_NAME: docLine(study.name),
-    RUN_DESCRIPTION: docLine(`#${run.number}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}${madeWith}; exported ${exportedAt}`),
+    RUN_DESCRIPTION: docLine(`#${runName(run, runs)}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}${madeWith}; exported ${exportedAt}`),
     FALLBACK_NOTE:
       provider === 'anthropic' && run.snapshot.requestBase.fallbacks != null
         ? "\n        The original run used Anthropic's refusal fallback (a beta feature since\n        removed), which this script does not reproduce."

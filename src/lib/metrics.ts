@@ -22,13 +22,14 @@ export interface Agreement {
   /**
    * Texts left out, and some of those labels. On a scale: a label that wasn't a number (e.g. "NA") or was outside
    * the scale (e.g. 99): the codebook's, or for plain-text scores the range of the model's answers grown through the
-   * labels next to it (see `agreement`); `range` is the scale's lowest and highest value. With codebook categories
+   * labels near it (see `agreement`); `range` is the scale's lowest and highest value. With codebook categories
    * that aren't numbers: a label that isn't one of them (nor a tie of them).
    */
   leftOut: { n: number; values: string[]; range?: [number, number] };
   /**
    * Plain-text scores: texts kept although a label lies outside the range of the model's answers (`range`), because it
-   * is next to that range or to another label on the scale (e.g. a −3 when the model answered −2…3); the values, in order.
+   * is near that range or another label on the scale (e.g. a −3 when the model answered −2…3), or because the answers
+   * are larger numbers than a rating scale's (e.g. years); the values, in order.
    */
   outsideAnswers?: { n: number; values: string[]; range: [number, number] };
   percentAgreement: number | null;
@@ -387,12 +388,22 @@ function scaleMidpoint(scale: number[], observed: number[]): number | null {
 
 /**
  * Plain-text scores: the scale labels may be on, grown from the range of the model's answers. A value whose distance to
- * the scale is at most `step` (half the range's width, at least 1 point) joins it and extends it, so labels next to the
- * range (or next to another label on the scale) are kept, e.g. a −3 when the model answered −2…3, while a code far
- * off (9, 33 or 99) is not.
+ * the scale is at most `step` (3 points, or half the range's width if more) joins it and extends it, so labels near the
+ * range (or near another label on the scale) are kept, e.g. every label of −3…3 when the model only ever answered 0,
+ * while a code far off (9, 33 or 99 next to −3…3) is not.
  */
+export const scaleStep = ([lo, hi]: [number, number]) => Math.max(3, (hi - lo) / 2);
+
+/**
+ * Plain-text scores whose answers all lie within −RATING_LIMIT…RATING_LIMIT are taken as a rating scale (−3…3, 1…7,
+ * 0…10), where a far-off number is a missing-value code; beyond it (percentages, years, counts) any number may be a
+ * real label, so none is left out for its distance.
+ */
+export const RATING_LIMIT = 10;
+export const ratingRange = (r: [number, number] | null | undefined): r is [number, number] => !!r && r[0] >= -RATING_LIMIT - 1e-9 && r[1] <= RATING_LIMIT + 1e-9;
+
 export function grownScale([lo, hi]: [number, number], values: number[]): [number, number] {
-  const step = Math.max(1, (hi - lo) / 2);
+  const step = scaleStep([lo, hi]);
   const sorted = [...new Set(values)].sort((a, b) => a - b);
   for (const x of sorted) {
     if (x <= hi) continue;
@@ -413,8 +424,9 @@ export function grownScale([lo, hi]: [number, number], values: number[]): [numbe
  * `withIntervals` false: leave out the bootstrap intervals (the slow part), e.g. to show the figures first.
  * `scaleSeen`: plain-text scores, with no codebook. `range`: the lowest and highest of the model's answers (else the
  * lowest and highest number in `allowed`, which is then every whole number of that range). The scale is that range
- * grown through the labels next to it (`grownScale`); it sets the weights and which labels are left out, but not the
- * scale's midpoint (which decides "opposite direction").
+ * grown through the labels near it (`grownScale`); it sets the weights and which labels are left out, but not the
+ * scale's midpoint (which decides "opposite direction"). Only when every answer lies within −10…10 (a rating scale,
+ * `ratingRange`): with larger numbers (percentages, years, counts) no number is left out for its distance.
  */
 export function agreement(
   a: string[],
@@ -432,26 +444,29 @@ export function agreement(
   // own (one such cell would otherwise turn every statistic nominal), as long as most values are numbers.
   // So is a number outside the scale (e.g. a missing-value code such as 9 or 99, or a typo such as 30 for 3),
   // which would otherwise stretch the scale every weight is measured on: the codebook's scale, or for plain-text
-  // scores (`scaleSeen`) the range of the model's answers grown through the labels next to it. Codebook values
-  // that are all numbers are a scale at every level, so at the nominal level too a combined label between two of
-  // them (a 1.5 median) is compared, as a disagreement. With codebook categories that aren't numbers, a label that
-  // is neither a category nor a tie of categories ("a | b") is left out. Those left out are reported. Mostly words
-  // (e.g. "2 (moderate)"): compared as categories instead. A missing-value marker such as "NA" or "N/A" that isn't
-  // itself a category is always left out (and reported), even where most labels are such markers.
+  // scores (`scaleSeen`) the range of the model's answers grown through the labels near it (answers within −10…10
+  // only). Codebook values that are all numbers are a scale at every level, so at the nominal level too a combined
+  // label between two of them (a 1.5 median) is compared, as a disagreement. With codebook categories that aren't
+  // numbers, a label that is neither a category nor a tie of categories ("a | b") is left out. Those left out are
+  // reported. Mostly words (e.g. "2 (moderate)"): compared as categories instead. A missing-value marker such as
+  // "NA" or "N/A" that isn't itself a category is always left out (and reported), even where most labels are such
+  // markers.
   const leftOut: Agreement['leftOut'] = { n: 0, values: [] };
   let outsideAnswers: Agreement['outsideAnswers'];
   const numericCodebook = !scaleSeen && allowed.length > 0 && allowed.every(isNum);
   const allowedNums = allowed.filter(isNum).map(Number);
-  // Plain-text scores: the range of the model's answers, and the scale grown from it.
+  // Plain-text scores: the range of the model's answers, and the scale grown from it. Numbers beyond −10…10
+  // (percentages, years, counts) are no rating scale: no label is left out for its distance from them.
   const seed: [number, number] | null = !scaleSeen
     ? null
     : range ?? (allowedNums.length ? [Math.min(...allowedNums), Math.max(...allowedNums)] : null);
+  const byDistance = ratingRange(seed);
   let block: [number, number] | null = null;
   let fits: ((v: string) => boolean) | null = null;
   // Numbers judged on a scale (plain-text scores, a codebook scale, or numeric codes): a number off it is always left out.
   let onNumbers = false;
   if (scaleSeen) {
-    if (seed) {
+    if (seed && byDistance) {
       const values: number[] = [];
       for (const [x, y] of pairs) for (const v of [x, y]) if (isNum(v)) values.push(Number(v));
       block = grownScale(seed, values);

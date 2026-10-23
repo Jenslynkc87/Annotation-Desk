@@ -2,6 +2,7 @@
 import { aggregate, type Aggregation } from './metrics';
 import { flattenJsonResponse, isExplanationKey, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY, toNumber } from './prompt';
 import type { Doc, PromptSpec, Result, Run } from './types';
+import { slug } from './util';
 
 export type RunFilter = 'latest' | string; // 'latest' or a run id
 
@@ -173,32 +174,43 @@ export interface RetryCount {
   unrecorded?: boolean;
   /** The page closed while it was being sent: `requests` are those answered (a few more may have gone out). */
   interrupted?: boolean;
+  /** Of `requests`, those stopped (Cancel, a failed save) before an answer was stored. */
+  unanswered?: number;
 }
 
 /**
  * What each "Retry failed" of a run sent. Versions before October 22, 2026 (bare build id) recorded the number
- * planned, also when the retry was stopped early (60 for 5 sent): for their individual requests, the answers stored
- * from the retry's start until the next retry are counted. That is a lower bound, since those versions overwrote an
- * attempt a retry replaced (and a later retry may have replaced this one's). A batch went up whole, so its number
- * stands. An immediate retry still being sent: its answers so far.
+ * planned before sending, also when the retry was stopped early (60 for 5 sent) or, as a batch, only some of its
+ * batches went up (a later upload failed, or the page closed during it): the requests sent from the retry's start
+ * until the next retry are counted, from the stored answers and the earlier attempts a later retry replaced
+ * (`replacedAt`). That is a lower bound, since those versions overwrote an attempt a retry replaced (and attempts
+ * replaced before October 23, 2026 are only in the logs); such a batch retry whose batches are not back yet counts
+ * the answers so far (none at first). An immediate retry still being sent: its answers so far.
  */
 export function retryCounts(run: Run, results: Result[]): RetryCount[] {
   const entries = [...(run.retries ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+  if (!entries.length) return [];
   const legacy = BARE_VERSION.test(run.snapshot.appVersion);
-  const mine = results.filter((r) => r.runId === run.id);
-  const within = (i: number) => mine.filter((r) => r.requestedAt >= entries[i].at && (i + 1 >= entries.length || r.requestedAt < entries[i + 1].at));
+  // Every request a result records, each with its attempt number: the earlier attempts later retries replaced (those
+  // whose request time it kept, from October 23, 2026), then its own.
+  const sends = results.flatMap((r) => {
+    if (r.runId !== run.id) return [];
+    const n = r.attempt ?? 1;
+    const before = r.replacedAt ?? [];
+    return [...before.map((at, j) => ({ at, attempt: n - before.length + j })), { at: r.requestedAt, attempt: n }];
+  });
+  const within = (i: number) => sends.filter((s) => s.at >= entries[i].at && (i + 1 >= entries.length || s.at < entries[i + 1].at));
   return entries.map((e, i) => {
     const asBatch = !!e.asBatch;
     if (legacy && !e.counted) {
-      // (Results that record no earlier attempt: whatever they replaced, that version didn't keep.)
+      // (Requests that record no earlier attempt: whatever they replaced, that version didn't keep.)
       const found = within(i);
-      const unrecorded = found.some((r) => (r.attempt ?? 1) < 2) || (!asBatch && found.length < e.requests);
+      const unrecorded = found.some((s) => s.attempt < 2) || (!asBatch && found.length < e.requests);
       // (Never more than it planned.)
-      const sent = Math.min(found.length, e.requests);
-      return asBatch ? { at: e.at, asBatch, requests: e.requests, unrecorded } : { at: e.at, asBatch, requests: sent, planned: e.requests, unrecorded };
+      return { at: e.at, asBatch, requests: Math.min(found.length, e.requests), planned: e.requests, unrecorded };
     }
     if (!asBatch && i === entries.length - 1 && retryInProgress(run)) return { at: e.at, asBatch, requests: within(i).length };
-    return { at: e.at, asBatch, requests: e.requests, ...(e.interrupted ? { interrupted: true } : {}) };
+    return { at: e.at, asBatch, requests: e.requests, ...(e.interrupted ? { interrupted: true } : {}), ...(e.unanswered ? { unanswered: e.unanswered } : {}) };
   });
 }
 
@@ -218,6 +230,8 @@ export interface RetriedRequests {
   asBatch: 'all' | 'none' | 'some';
   /** A retry was interrupted by the page closing: `requests` is then at least this many too. */
   interrupted: boolean;
+  /** Requests sent that were stopped (Cancel, a failed save) before an answer was stored: no result, no token count. */
+  unanswered: number;
 }
 
 /** The requests a run's retries sent, for the exports (see `retryCounts`). */
@@ -234,6 +248,7 @@ export function retriedRequests(run: Run, results: Result[]): RetriedRequests {
     tokensIncomplete: counts.some((c) => c.unrecorded),
     asBatch: counts.every((c) => c.asBatch) ? 'all' : counts.every((c) => !c.asBatch) ? 'none' : 'some',
     interrupted: counts.some((c) => c.interrupted),
+    unanswered: counts.reduce((s, c) => s + (c.unanswered ?? 0), 0),
   };
 }
 
@@ -257,6 +272,18 @@ export function runTokens(results: Result[], runId: string, replaced?: Run['repl
   return { input, output, cacheRead, cacheWrite, ok, failed };
 }
 
-export function runTitle(run: Run): string {
-  return `#${run.number}${run.label ? ` · ${run.label}` : ''}`;
+/** Runs that share their number with another one (given twice by versions before October 22, 2026, open in two tabs). */
+export const sharesNumber = (run: Run, runs: Run[]) => runs.some((r) => r.id !== run.id && r.number === run.number);
+
+/** The start of a run's id: tells apart runs that share a number (also in their folder names). */
+export const runIdTag = (run: Run) => slug(run.id.slice(0, 8));
+
+/** A run as the app and its exports name it: its number, or for runs that share one, the number and the start of its id ("5-ab12cd34"). */
+export function runName(run: Run, runs: Run[]): number | string {
+  return sharesNumber(run, runs) ? `${run.number}-${runIdTag(run)}` : run.number;
+}
+
+/** "#5 · label". `runs`: the study's runs, so runs that share a number are told apart as in the exports (`runName`). */
+export function runTitle(run: Run, runs?: Run[]): string {
+  return `#${runs ? runName(run, runs) : run.number}${run.label ? ` · ${run.label}` : ''}`;
 }

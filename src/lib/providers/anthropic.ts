@@ -8,7 +8,7 @@ import type {
   ProviderAdapter,
   RequestInputs,
 } from './types';
-import { ZERO_USAGE } from './types';
+import { CLOCK_MARGIN_MS, ZERO_USAGE } from './types';
 
 function client(apiKey: string) {
   // Calls go straight from the browser to Anthropic; the key never touches another server.
@@ -195,13 +195,18 @@ export const anthropicAdapter: ProviderAdapter = {
   },
 
   async listRecentBatches(apiKey, sinceIso) {
-    const since = Date.parse(sinceIso) - 120_000;
+    const since = Date.parse(sinceIso) - CLOCK_MARGIN_MS;
     const out: ListedBatch[] = [];
     // Newest first: stop at the first batch created before the upload began.
     for await (const b of client(apiKey).messages.batches.list({ limit: 20 })) {
       if (Date.parse(b.created_at) < since) break;
       const c = b.request_counts;
-      out.push({ batchId: b.id, createdAt: b.created_at, requests: c.processing + c.succeeded + c.errored + c.canceled + c.expired });
+      out.push({
+        batchId: b.id,
+        createdAt: b.created_at,
+        requests: c.processing + c.succeeded + c.errored + c.canceled + c.expired,
+        ...(b.cancel_initiated_at ? { stopped: true } : {}),
+      });
     }
     return out;
   },

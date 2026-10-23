@@ -2,7 +2,7 @@
 // Rows are matched to texts by ID or file name; the texts themselves are never changed.
 import { isMissingLabel } from '../metrics';
 import { flattenJsonResponse, isExplanationKey, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY } from '../prompt';
-import type { Doc, Result, Run } from '../types';
+import type { Doc, PromptSpec, Result, Run } from '../types';
 import { baseName, type ParsedTable } from './parse';
 
 export interface LabelMatch {
@@ -149,11 +149,12 @@ export function clearPlan(docs: Doc[], m: LabelMatch, keepUnlisted: boolean): Ma
 /** Columns of the results tables this app exports that no other sheet has (the run's and requests' details). */
 const EXPORT_COLUMNS = new Set([
   'run_label', 'prompt_version', 'prompt_hash', 'model_requested', 'model_reported', 'parse_error', 'stop_reason', 'input_tokens', 'output_tokens',
-  'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'latency_ms', 'requested_at', 'completed_at', 'response_id', 'reasoning_summary',
-  'n_ok', 'n_error',
+  'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens', 'response_id', 'reasoning_summary', 'n_ok', 'n_error',
 ]);
-/** Columns of those tables that another sheet may have too: they count only two or more together. */
-const SHARED_COLUMNS = new Set(['study', 'run', 'provider', 'replicate', 'status', 'error']);
+/** Columns of those tables that another sheet may have too (a coder's status, a date): never enough on their own. */
+const SHARED_COLUMNS = new Set(['study', 'run', 'provider', 'replicate', 'status', 'error', 'requested_at', 'completed_at', 'latency_ms']);
+/** Of those, the timing columns: latency_ms with one of the others is the exports' own. */
+const TIMING = new Set(['latency_ms', 'requested_at', 'completed_at']);
 
 /** Whether a column is one of the results tables' own (not an answer): status, tokens, n_ok, … */
 export function isResultsTableColumn(c: string): boolean {
@@ -163,40 +164,55 @@ export function isResultsTableColumn(c: string): boolean {
 /** A text as written in a cell, whatever its line ends. */
 const sameText = (s: string) => s.replace(/\r\n?/g, '\n').trim();
 
+/** A results table exported by this app, as `resultsTable` recognizes it. */
+export interface ResultsTable {
+  /** Every column to delete before the sheet can be added: the model's answers, then the table's own columns. [] for
+   *  any other sheet. */
+  columns: string[];
+  /** Columns named like a field of this study's prompts or runs (or a key of its plain-text answers). */
+  answers: string[];
+  /** Columns only these tables have (n_ok, prompt_hash, …, latency_ms with requested_at, a field's replicate
+   *  agreement). */
+  strong: string[];
+  /** Answer columns whose values are the model's answers stored in this study, for nearly every text the sheet lists. */
+  copied: string[];
+  /** The tables' other columns (status, run, …), which other sheets may have too. */
+  shared: string[];
+}
+
 /**
- * The columns of a results table exported by this app (Excel Results or By replicate sheet, results.csv,
- * results_long.csv, results_by_replicate.csv, …) that hold the model's answers, followed by the table's other own
- * columns (status, tokens, …), when `table` is one: it has one of the columns only those tables have (n_ok,
- * prompt_hash, response_id, stop_reason, …), two of their other ones (run, replicate, status, …), a field's
- * replicate agreement, or a model's explanation or rationale word for word (`matched`: the sheet's values per text,
- * as matchLabels gives them; e.g. a Results sheet whose n_ok and n_error were deleted). Added as labels, the model's
- * answers would count as human labels. [] for any other sheet, or one without answer columns.
+ * Whether `table` is a results table exported by this app (Excel Results or By replicate sheet, results.csv,
+ * results_long.csv, results_by_replicate.csv, …): it has a column only those tables have, or a column with the
+ * model's explanations word for word, or two of their other columns and a column with the model's answers
+ * (`matched`: the sheet's values per text, as matchLabels gives them). Added as labels, the model's answers would
+ * count as human labels. The answer columns are those named like a field of `runs` or `prompts` (the study's current
+ * and saved prompts, so also before any run, or after one is deleted).
  */
-export function modelAnswerColumns(table: ParsedTable, runs: Run[], results: Result[], matched?: Map<string, Record<string, string>>): string[] {
+export function resultsTable(table: ParsedTable, runs: Run[], results: Result[], matched?: Map<string, Record<string, string>>, prompts: PromptSpec[] = []): ResultsTable {
   const names = new Set<string>();
   // As the exports name them (a field called like one of the table's own columns gets "answer_").
   const add = (k: string) => (names.add(k), names.add(`answer_${k}`));
   const agreement = new Set<string>();
   const textRuns = new Set<string>();
-  for (const run of runs) {
-    const p = run.snapshot.prompt;
-    if (p.outputMode !== 'structured') {
-      names.add(TEXT_RESPONSE_KEY);
-      textRuns.add(run.id);
-      continue;
-    }
+  const addPrompt = (p: PromptSpec) => {
+    if (p.outputMode !== 'structured') return void names.add(TEXT_RESPONSE_KEY);
     for (const f of outputFields(p)) (add(f), agreement.add(`${f}_replicate_agreement`));
     if (p.includeRationale) names.add(RATIONALE_KEY);
+  };
+  for (const run of runs) {
+    addPrompt(run.snapshot.prompt);
+    if (run.snapshot.prompt.outputMode !== 'structured') textRuns.add(run.id);
   }
-  for (const a of agreement) names.add(a);
-  // An export by its columns alone: the tables' own columns, or a field's replicate agreement.
-  const own = table.columns.filter(isResultsTableColumn);
-  const byColumns = own.some((c) => EXPORT_COLUMNS.has(c)) || own.length >= 2 || table.columns.some((c) => agreement.has(c));
+  for (const p of prompts) addPrompt(p);
+  const timing = table.columns.includes('latency_ms') && table.columns.some((c) => c !== 'latency_ms' && TIMING.has(c));
+  const strong = table.columns.filter((c) => EXPORT_COLUMNS.has(c) || agreement.has(c) || (timing && TIMING.has(c)));
+  const shared = table.columns.filter((c) => SHARED_COLUMNS.has(c) && !strong.includes(c));
+  const likely = strong.length > 0 || shared.length >= 2;
   // Plain-text runs: the keys of the JSON answers (each its own column in the exports). Every sheet is checked and a
-  // big study has tens of thousands of answers, so only the keys that matter are looked for (any key in such an
-  // export; otherwise explanations, which may be copied word for word), and only in answers that could hold one:
-  // the key's name ends like the column's (nested keys are joined with _).
-  const open = new Set(table.columns.filter((c) => !names.has(c) && (byColumns || isExplanationKey(c.replace(/^answer_/, '')))));
+  // big study has tens of thousands of answers, so only the keys that matter are looked for (any key in a sheet that
+  // looks like an export; otherwise explanations, which may be copied word for word), and only in answers that could
+  // hold one: the key's name ends like the column's (nested keys are joined with _).
+  const open = new Set(table.columns.filter((c) => !names.has(c) && (likely || isExplanationKey(c.replace(/^answer_/, '')))));
   const tail = (c: string) => `${c.slice(c.lastIndexOf('_') + 1)}"`;
   for (const r of results) {
     if (!open.size) break;
@@ -208,22 +224,35 @@ export function modelAnswerColumns(table: ParsedTable, runs: Run[], results: Res
       open.delete(`answer_${k}`);
     }
   }
-  const answers = table.columns.filter((c) => names.has(c));
-  if (!answers.length) return [];
-  const exported = byColumns || copiesExplanations(answers, textRuns, results, matched);
-  return exported ? [...new Set([...answers, ...own])] : [];
+  const answers = table.columns.filter((c) => names.has(c) && !agreement.has(c) && !isResultsTableColumn(c));
+  // Explanations are compared on any sheet; other answers (short labels a coder may share) only on one that looks
+  // like an export.
+  const copied = copiedColumns(answers, textRuns, results, matched, likely);
+  const exported = strong.length > 0 || copied.some(isWordy) || (shared.length >= 2 && copied.length > 0);
+  if (!exported) return { columns: [], answers: [], strong: [], copied: [], shared: [] };
+  return { columns: [...answers, ...table.columns.filter((c) => strong.includes(c) || shared.includes(c))], answers, strong, copied, shared };
 }
 
+/** The columns of `table` to delete before it can be added as labels (`resultsTable`): [] for any other sheet. */
+export function modelAnswerColumns(table: ParsedTable, runs: Run[], results: Result[], matched?: Map<string, Record<string, string>>, prompts: PromptSpec[] = []): string[] {
+  return resultsTable(table, runs, results, matched, prompts).columns;
+}
+
+const keyOf = (c: string) => c.replace(/^answer_/, '');
+/** A column with the model's explanations: a field or JSON key named …_explanation or …_reasoning, the rationale, or a
+ *  plain-text answer. */
+const isWordy = (c: string) => c === RATIONALE_KEY || c === TEXT_RESPONSE_KEY || isExplanationKey(keyOf(c));
+
 /**
- * Whether a column with the model's explanations (a field or JSON key named …_explanation or …_reasoning, the
- * rationale, or a plain-text answer) holds them word for word: for 90% or more of its texts with a value (not a
- * missing-value marker such as NA), one of the model's answers for that text is the same, and not just a short
- * phrase anyone might write (e.g. "Not mentioned"): three different ones, or one of 20 characters or more.
+ * The columns that hold the model's answers stored in this study (`all`: any answer column, else only explanations).
+ * An explanation must be the same word for word for 90% or more of its texts with a value (not a missing-value marker
+ * such as NA), and not just a short phrase anyone might write (e.g. "Not mentioned"): three different ones, or one of
+ * 20 characters or more. Other answers (short labels that agree by chance more often): 95% or more of 10 or more
+ * texts, with two different values or more.
  */
-function copiesExplanations(columns: string[], textRuns: Set<string>, results: Result[], matched?: Map<string, Record<string, string>>): boolean {
-  const key = (c: string) => c.replace(/^answer_/, '');
-  const wordy = columns.filter((c) => c === RATIONALE_KEY || c === TEXT_RESPONSE_KEY || isExplanationKey(key(c)));
-  if (!matched?.size || !wordy.length) return false;
+function copiedColumns(columns: string[], textRuns: Set<string>, results: Result[], matched: Map<string, Record<string, string>> | undefined, all: boolean): string[] {
+  const check = columns.filter((c) => all || isWordy(c));
+  if (!matched?.size || !check.length) return [];
   const byDoc = new Map<string, Result[]>();
   for (const r of results) if (matched.has(r.docId)) (byDoc.get(r.docId) ?? byDoc.set(r.docId, []).get(r.docId)!).push(r);
   // Each JSON answer read once.
@@ -232,18 +261,24 @@ function copiesExplanations(columns: string[], textRuns: Set<string>, results: R
   const answersOf = (r: Result, c: string): string[] => {
     if (c === RATIONALE_KEY) return [r.rationale ?? ''];
     if (c === TEXT_RESPONSE_KEY) return [r.values[TEXT_RESPONSE_KEY] ?? ''];
-    return [r.values[key(c)] ?? '', r.values[c] ?? '', flatOf(r)[key(c)] ?? ''];
+    return [r.values[keyOf(c)] ?? '', r.values[c] ?? '', flatOf(r)[keyOf(c)] ?? ''];
   };
-  return wordy.some((c) => {
+  // (A number as a spreadsheet may write it: 2 and 2.0 are the same answer.)
+  const same = (a: string, v: string) => {
+    const x = sameText(a);
+    return x === v || (x !== '' && v !== '' && Number(x) === Number(v));
+  };
+  return check.filter((c) => {
+    const wordy = isWordy(c);
     const values = [...matched].map(([doc, v]) => [doc, sameText(v[c] ?? '')] as const).filter(([, v]) => v && !isMissingLabel(v));
     let missed = 0;
     const copied = new Set<string>();
     for (const [doc, v] of values) {
-      if ((byDoc.get(doc) ?? []).some((r) => answersOf(r, c).some((a) => sameText(a) === v))) copied.add(v);
-      // (No longer 90%: a coder's own sheet is told apart without reading the rest.)
-      else if (++missed > 0.1 * values.length) return false;
+      if ((byDoc.get(doc) ?? []).some((r) => answersOf(r, c).some((a) => same(a, v)))) copied.add(v);
+      // (No longer 90% or 95%: a coder's own sheet is told apart without reading the rest.)
+      else if (++missed > (wordy ? 0.1 : 0.05) * values.length) return false;
     }
-    return values.length > 0 && (copied.size >= 3 || [...copied].some((v) => v.length >= 20));
+    return wordy ? values.length > 0 && (copied.size >= 3 || [...copied].some((v) => v.length >= 20)) : values.length >= 10 && copied.size >= 2;
   });
 }
 

@@ -53,7 +53,14 @@ export interface ListedBatch {
   /** OpenAI: its status (e.g. "validating") and the metadata it was created with. */
   status?: string;
   metadata?: Record<string, string>;
+  /** Cancelled (or being cancelled) or expired: someone stopped it, so it is never taken for a lost upload by its
+   *  number of requests alone. */
+  stopped?: boolean;
 }
+
+/** How long before an upload began a batch it created may seem to have been created: the provider's clock may differ
+ *  from this computer's by some minutes. */
+export const CLOCK_MARGIN_MS = 600_000;
 
 /** For an upload: metadata to create the batch with (OpenAI; never keys or texts), and a call made as soon as the
  *  input file has arrived (OpenAI), before the batch is started, so the file is on record if no answer comes. */
@@ -91,7 +98,7 @@ export interface ProviderAdapter {
   ): Promise<CallOutcome>;
   submitBatch(apiKey: string, base: Record<string, unknown>, items: BatchItem[], opts?: SubmitOptions): Promise<BatchHandle>;
   checkBatch(apiKey: string, batchId: string): Promise<BatchStatus>;
-  /** Batches created since `sinceIso` (newest first; a couple of minutes' leeway for clock differences). */
+  /** Batches created since `sinceIso` (newest first; `CLOCK_MARGIN_MS` of leeway for clock differences). */
   listRecentBatches(apiKey: string, sinceIso: string): Promise<ListedBatch[]>;
   fetchBatchResults(apiKey: string, batchId: string): Promise<BatchLine[]>;
   cancelBatch(apiKey: string, batchId: string): Promise<void>;

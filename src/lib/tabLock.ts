@@ -1,14 +1,15 @@
 // One tab at a time: two tabs on the same data could send (and pay for) the same requests twice, or overwrite each
 // other's changes. The tab that runs the app holds a Web Lock until it is closed or reloaded. Another tab shows a
 // notice and asks for the lock again only when the user turns to it (switches to it, clicks in it, or clicks
-// "Open here"), never on a timer of its own: a window that is merely in view must not take the app from a tab that is
-// being reloaded (the lock is free for a moment during a reload).
+// "Open here"), and a few times in the moment right after it has loaded; it never polls: a window that is merely in
+// view must not take the app from a tab that is being reloaded (the lock is free for a moment during a reload).
 
 export const LOCK = 'annotation-desk-app';
 
 /**
  * Returns `ask`: asks for the app without waiting for it (true when this tab runs it). If refused, it asks again a
- * few times for a moment afterwards, but only while this tab keeps the focus.
+ * few times for a moment afterwards, but only while this tab keeps the focus; after the first call (the request at
+ * page load) also without it.
  */
 export function tabLock(
   locks: Pick<LockManager, 'request'>,
@@ -55,18 +56,25 @@ export function tabLock(
     return pending;
   };
   // Closing the working tab brings this one to the front a moment before the closed tab lets go of the lock (about
-  // 20 ms in Chrome): ask again shortly while this tab keeps the focus. A tab the user has left stops asking.
-  const ask = (tries: number): Promise<boolean> => {
+  // 20 ms in Chrome): ask again shortly while this tab keeps the focus. A tab the user has left stops asking. At page
+  // load, whether focused or not: a page loaded in place of the app's own page (another address of the app in the
+  // same tab) asks before the old page has let go.
+  const ask = (tries: number, atLoad: boolean): Promise<boolean> => {
     clearTimeout(again);
     return attempt().then((ok) => {
       if (!ok && tries > 1) {
         clearTimeout(again);
         again = setTimeout(() => {
-          if (focused()) void ask(tries - 1);
+          if (atLoad || focused()) void ask(tries - 1, atLoad);
         }, 500);
       }
       return ok;
     });
   };
-  return () => ask(4);
+  let loaded = false;
+  return () => {
+    const atLoad = !loaded;
+    loaded = true;
+    return ask(4, atLoad);
+  };
 }

@@ -22,7 +22,8 @@ window.addEventListener('unhandledrejection', (e) =>
   toast(`Something went wrong: ${isQuotaError(e.reason) ? storageError(e.reason) : errorMessage(e.reason) || 'unknown error'}`, 'error'),
 );
 
-// A waiting tab asks again only when the user turns to it: switches to it or clicks in it (or clicks Open here).
+// A waiting tab asks again only when the user turns to it: switches to it or clicks in it (or clicks Open here). The
+// first request (at page load) is asked again a few times for a moment (see lib/tabLock.ts).
 if (ask) {
   void ask();
   document.addEventListener('visibilitychange', () => {

@@ -1,25 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { agreement, fixed, fmtPct, fmtStat, type Agreement, type Level } from '../lib/metrics';
+import { agreement, fixed, fmtPct, fmtStat, scaleStep, type Agreement, type Level } from '../lib/metrics';
 import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
-import { cachingLabel, knownFieldNames, labelPairs, labelValue, preferredGoldColumn, runName } from '../lib/export/tables';
+import { ABOUT_AUTHOR, cachingLabel, knownFieldNames, labelPairs, labelValue, namedField, NOTE_OR_RATING, preferredGoldColumn, runName } from '../lib/export/tables';
 import {
   batchParts,
   cancelBatch,
-  cancelUnknownUpload,
   checkBatch,
   currentStudy,
-  deleteRunById,
   getState,
   isBusy,
+  removeRun,
   renameRun,
   retryableCount,
   retryFailed,
   sharedBatches,
+  sharedUnknownUpload,
   toast,
   unknownUpload,
   useStore,
@@ -46,6 +46,8 @@ export function RunsView() {
   const uploading = useStore((s) => !!s.submitting);
   const [inspect, setInspect] = useState<Run | null>(null);
   const sorted = [...runs].reverse();
+  // Each run's own results, sorted out once per change (during a run, results come in every quarter of a second).
+  const byRun = useMemo(() => resultsByRun(results), [results]);
 
   return (
     <div className="stack">
@@ -80,11 +82,12 @@ export function RunsView() {
               <tbody>
                 {sorted.map((r) => {
                   // (With the attempts a retry still under way has replaced so far.)
-                  const t = runTokens(results, r.id, replacedAttempts(r, results));
-                  const retry = retryableCount(r, results, docs);
+                  const own = byRun.get(r.id) ?? [];
+                  const t = runTokens(own, r.id, replacedAttempts(r, own));
+                  const retry = retryableCount(r, own, docs);
                   return (
                     <tr key={r.id}>
-                      <td className="mono">#{r.number}</td>
+                      <td className="mono">#{runName(r, runs)}</td>
                       <td>
                         <input
                           className="input small"
@@ -136,7 +139,7 @@ export function RunsView() {
                                 // A run with a batch upload of unknown outcome is not asked here: Retry failed first looks
                                 // for that batch (free), and asks before sending anything again if it isn't found.
                                 const asBatch = r.mode === 'batch';
-                                const what = `${retry.toLocaleString()} request${retry === 1 ? '' : 's'} in run #${r.number}`;
+                                const what = `${retry.toLocaleString()} request${retry === 1 ? '' : 's'} in run #${runName(r, runs)}`;
                                 if (asBatch && !r.batch?.uploadUnknown && !confirm(`Re-send ${what} as a new batch (half price; results usually within an hour, collected into the same run)?`)) return;
                                 if (!asBatch && retry > 50 && !confirm(`Re-send ${what} now (immediate requests, full price)?`)) return;
                                 void retryFailed(r.id);
@@ -179,19 +182,21 @@ export function RunsView() {
                                     : ` The batch is still running at the provider and will be cancelled. ${copyElsewhere()}`
                                   : '';
                               // A batch upload of unknown outcome may have reached the provider: looked up there and cancelled
-                              // if found (deleting the run also lets Remaining send these requests again).
+                              // if found (deleting the run also lets Remaining send these requests again). Not one another study
+                              // here shares (a copy of this study, or the study it was copied from): left to it.
                               const unknown = unknownUpload(r);
-                              const unsure = unknown
-                                ? ` A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'}) may have reached the provider: it is looked up there first and cancelled if found.`
+                              const sharers = unknown ? await sharedUnknownUpload(r).catch(() => [] as string[]) : [];
+                              const upload = unknown
+                                ? `A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'}) may have reached the provider`
                                 : '';
-                              if (!confirm(`Delete run #${r.number} and its ${t.ok + t.failed} results?${pending}${unsure} This cannot be undone.`)) return;
-                              // A batch that could not be cancelled would go on (and be charged) with nowhere to deliver its results: ask.
-                              const why = r.status === 'submitted' ? await cancelBatch(r.id, { keepShared: true }) : '';
-                              if (why && !confirm(`${why}\n\nDelete run #${r.number} anyway? A batch still running at the provider may be charged, and its results can't be collected here.`)) return;
-                              const look = unknown ? await cancelUnknownUpload(r) : { problem: '', cancelled: '' };
-                              if (look.problem && !confirm(`${look.problem} Deleting the run also lets Remaining send these requests again.\n\nDelete run #${r.number} anyway?`)) return;
-                              await deleteRunById(r.id);
-                              if (look.cancelled) toast(`The batch of that upload (${look.cancelled}) had reached the provider and was cancelled.`);
+                              const unsure = !unknown
+                                ? ''
+                                : sharers.length
+                                  ? ` ${upload}: it is left for ${quoted(sharers)} (${OTHER_STUDY_HERE}), which shares that upload and whose Retry failed finds it.`
+                                  : ` ${upload}: it is looked up there first and cancelled if found.`;
+                              if (!confirm(`Delete run #${runName(r, runs)} and its ${t.ok + t.failed} results?${pending}${unsure} This cannot be undone.`)) return;
+                              // The upload is looked up, and asked about, before anything is cancelled (see removeRun).
+                              await removeRun(r.id);
                             }}
                           >
                             Delete
@@ -210,7 +215,7 @@ export function RunsView() {
       {runs.length > 0 && <AgreementPanel />}
 
       {inspect && (
-        <Modal title={`Run #${inspect.number} settings`} onClose={() => setInspect(null)}>
+        <Modal title={`Run #${runName(inspect, runs)} settings`} onClose={() => setInspect(null)}>
           <dl className="kv">
             <dt>Provider / model</dt>
             <dd className="mono">
@@ -232,7 +237,12 @@ export function RunsView() {
                 <dd>
                   {/* Retries by the published version recorded the number planned, and an interrupted retry those answered: counted from the stored answers. */}
                   {retryCounts(inspect, results)
-                    .map((x) => `${x.interrupted || (x.planned !== undefined && x.requests < x.planned) ? 'at least ' : ''}${x.requests.toLocaleString('en-US')} request${x.requests === 1 ? '' : 's'} re-sent ${fmtDateTime(x.at)}`)
+                    .map((x) => {
+                      const lower = x.interrupted || (x.planned !== undefined && x.requests < x.planned);
+                      // (None found for a lower bound: how many is not known, not "at least 0".)
+                      const n = lower && !x.requests ? 'requests (number not known)' : `${lower ? 'at least ' : ''}${x.requests.toLocaleString('en-US')} request${x.requests === 1 ? '' : 's'}`;
+                      return `${n} re-sent ${fmtDateTime(x.at)}${x.unanswered ? ` (${x.unanswered.toLocaleString('en-US')} stopped without an answer)` : ''}`;
+                    })
                     .join('; ')}
                 </dd>
               </>
@@ -289,9 +299,41 @@ const namedAfter = (column: string, field: string) => {
   return c === f || c.startsWith(`${f}_`) || c.endsWith(`_${f}`);
 };
 
-/** The field names a run could have: its codebook's, or the score keys in its plain-text JSON answers (each answer read once). */
+/** Every run's results, by run id: sorted out once for each list of results (the store makes a new one on each change). */
+const byRunCache = new WeakMap<Result[], Map<string, Result[]>>();
+export function resultsByRun(results: Result[]): Map<string, Result[]> {
+  let m = byRunCache.get(results);
+  if (!m) {
+    m = new Map();
+    for (const r of results) {
+      const list = m.get(r.runId);
+      if (list) list.push(r);
+      else m.set(r.runId, [r]);
+    }
+    byRunCache.set(results, m);
+  }
+  return m;
+}
+const sameList = (a: Result[], b: Result[]) => a.length === b.length && a.every((r, i) => r === b[i]);
+
+/**
+ * The field names a run could have: its codebook's, or the score keys in its plain-text JSON answers, read from its own
+ * results and kept while they stay the same (so a finished run's answers aren't read again while another run goes).
+ */
+const namesCache = new WeakMap<Run, { list: Result[]; names: string[] }>();
 function fieldNamesOf(run: Run, results: Result[]): string[] {
-  return knownFieldNames(null, [run], [], results);
+  const list = resultsByRun(results).get(run.id) ?? [];
+  const c = namesCache.get(run);
+  if (c && sameList(c.list, list)) return c.names;
+  const names = knownFieldNames(null, [run], [], list);
+  namesCache.set(run, { list, names });
+  return names;
+}
+
+/** Every field name the study and its runs use (`knownFieldNames`), from each run's names above. */
+export function studyFieldNames(study: Study | null, runs: Run[], results: Result[]): string[] {
+  const prompts = study ? [study.prompt, ...(study.savedPrompts ?? []).map((x) => x.prompt)] : [];
+  return [...new Set([...prompts.flatMap((p) => p.variables.map((v) => v.name)), ...runs.flatMap((r) => fieldNamesOf(r, results))])];
 }
 
 /**
@@ -301,7 +343,7 @@ function fieldNamesOf(run: Run, results: Result[]): string[] {
 type RunData = { docs: Doc[]; list: Result[]; views: Map<string, DocView>; fields?: ComparableField[] };
 const runCache = new WeakMap<Run, RunData>();
 function runData(run: Run, docs: Doc[], results: Result[]): RunData {
-  const list = results.filter((r) => r.runId === run.id);
+  const list = resultsByRun(results).get(run.id) ?? [];
   const c = runCache.get(run);
   if (c && c.docs === docs && c.list.length === list.length && c.list.every((r, i) => r === list[i])) return c;
   const fresh: RunData = { docs, list, views: buildDocViews(docs, [run], list, run.id) };
@@ -316,7 +358,9 @@ function runFields(run: Run, docs: Doc[], results: Result[]): ComparableField[] 
 /**
  * Two label columns: the field both belong to (e.g. race_gold and race_coder2 → race), as in the exports'
  * human–human rows, with its scale, level and yes/no rule. Taken from the newest run that has such a field, so
- * a later run of another prompt (a pilot, a renamed field) doesn't lose it. Undefined when no run has one.
+ * a later run of another prompt (a pilot, a renamed field) doesn't lose it. The columns' values are judged on every
+ * text that has a label (as the panel compares them), not only that run's: a pilot on other texts still gives the
+ * field. Undefined when no run has one. `known`: `studyFieldNames`, if already at hand.
  */
 export function columnsFieldRun(
   colA: string,
@@ -325,11 +369,12 @@ export function columnsFieldRun(
   runs: Run[],
   docs: Doc[],
   results: Result[],
+  known: string[] = studyFieldNames(study, runs, results),
 ): { run: Run; fields: ComparableField[]; field: ComparableField } | undefined {
   for (const run of [...runs].reverse()) {
     // A quick look at the names first, so only a run that may have the field is read in full.
     if (!fieldNamesOf(run, results).some((n) => namedAfter(colA, n) && namedAfter(colB, n))) continue;
-    const { fields, pairs } = labelPairs(run, docs, runs, results, study, runData(run, docs, results).views, runFields(run, docs, results));
+    const { fields, pairs } = labelPairs(run, docs, runs, results, study, runData(run, docs, results).views, runFields(run, docs, results), { valueDocs: docs, known });
     const has = (key: string, col: string) => pairs.some((x) => x.field === key && x.column === col);
     const field = fields.find((x) => has(x.key, colA) && has(x.key, colB));
     if (field) return { run, fields, field };
@@ -338,10 +383,21 @@ export function columnsFieldRun(
 }
 
 /**
+ * A run and a label column: the field the exports pair the column with (`labelPairs`), else, for a column they leave out
+ * (e.g. placeholders on most of the run's texts), the longest field it is named after. A coder's note or rating, or a
+ * column about the author, belongs to none (undefined).
+ */
+export function columnFieldOf(column: string, { fields, pairs, skipped }: ReturnType<typeof labelPairs>): string | undefined {
+  const paired = pairs.find((x) => x.column === column)?.field;
+  if (paired || skipped.some((x) => x.column === column && (x.reason === NOTE_OR_RATING || x.reason === ABOUT_AUTHOR))) return paired;
+  return namedField(column, fields.map((x) => x.key));
+}
+
+/**
  * The Field menu's choice in effect. For two label columns, a field picked applies to the pair it was picked for
  * only: a new pair starts from the field its columns belong to (`columnsField`), or none. A run and a label column
- * that belongs to one of its fields (`columnField`, its key, as in the exports): the same, starting from that field.
- * Otherwise the pick (if any) applies, else the first field.
+ * that belongs to one of its fields (`columnField`, its key, as in the exports, or else the field it is named after):
+ * the same, starting from that field. Otherwise the pick (if any) applies, else the first field.
  */
 export function chosenField(
   pick: { pair: string; key: string } | null,
@@ -365,13 +421,15 @@ const signed = (x: number) => (x < 0 ? `−${-x}` : String(x));
 /**
  * Why labels were left out of the comparison, e.g. "a label isn’t a number or is outside the scale (−3 to 3)".
  * `seen`: scores in plain-text answers, whose scale is the range of the model's answers grown through the labels
- * next to it (`agreement`).
+ * within `step` points of it (`agreement`); without a range (answers beyond −10…10, e.g. percentages or years) only labels that
+ * aren't numbers are left out.
  */
-export function leftOutReason(level: Level, range?: [number, number], seen = false): string {
+export function leftOutReason(level: Level, range?: [number, number], seen = false, step?: number): string {
   if (level === 'nominal') return 'a label isn’t one of the field’s values';
   const r = range ? `${signed(range[0])} to ${signed(range[1])}` : '';
+  if (seen && !range) return 'a label isn’t a number';
   return seen
-    ? `a label isn’t a number or lies far outside the model’s answers (the scale${r ? `, ${r},` : ''} takes in the labels next to them)`
+    ? `a label isn’t a number or lies far outside the model’s answers (the scale, ${r}, takes in the labels ${step ? `within ${fixed(step, Number.isInteger(step) ? 0 : 1)} points of them or of each other` : 'near them'})`
     : `a label isn’t a number or is outside the scale${r ? ` (${r})` : ''}`;
 }
 
@@ -406,6 +464,8 @@ function AgreementPanel() {
   const liveResults = useStore((s) => s.results);
   const results = useThrottled(liveResults, 1000);
   const metaCols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
+  // Every field name the study and its runs use (to tell race from race_negative), once per update.
+  const known = useMemo(() => studyFieldNames(study, runs, results), [study, runs, results]);
   const latest = runs[runs.length - 1];
   const [aPicked, setA] = useState(encode({ kind: 'run', id: latest.id }));
   // Pre-select a label column only when it belongs to a field (e.g. sentiment ↔ sentiment_gold), the clearest first,
@@ -432,9 +492,9 @@ function AgreementPanel() {
   // Two label columns (e.g. two human coders): the field both belong to, from the newest run that has it, so that
   // its scale, level and yes/no rule apply, as in the exports.
   const columnsMatch = useMemo(
-    () => (srcA?.kind === 'meta' && srcB?.kind === 'meta' ? columnsFieldRun(srcA.col, srcB.col, study, runs, docs, results) : undefined),
+    () => (srcA?.kind === 'meta' && srcB?.kind === 'meta' ? columnsFieldRun(srcA.col, srcB.col, study, runs, docs, results, known) : undefined),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [a, b, study, runs, docs, results],
+    [a, b, study, runs, docs, results, known],
   );
   // Either side may be a label column; the field list comes from whichever side is a run (for two label columns:
   // from the run their field was found in, else the latest run).
@@ -457,11 +517,13 @@ function AgreementPanel() {
   const fieldsB = useMemo(() => (runB && viewsB ? runFields(runB, docs, results) : []), [runB, viewsB]);
   const fields = useMemo(() => ownFieldsA.map((x) => combineFields(x, fieldsB.find((y) => y.key === x.key))), [ownFieldsA, fieldsB]);
   const columnsField = bothColumns && columnsMatch ? fields.find((x) => x.key === columnsMatch.field.key) : undefined;
-  // A run and a label column: the field the column belongs to (race_gold → race), as the exports pair them.
+  // A run and a label column: the field the column belongs to (race_gold → race), as the exports pair them. A column
+  // the exports leave out but named after a field (e.g. placeholders on most of the run's texts): the longest field it
+  // is named after, not the first field (a coder's note or rating, or a column about the author, belongs to none).
   const column = srcB?.kind === 'meta' ? srcB.col : srcA?.kind === 'meta' ? srcA.col : '';
   const columnField = useMemo(
-    () => (bothColumns || !column || !runA || !viewsA ? undefined : labelPairs(runA, docs, runs, results, study, viewsA, ownFieldsA).pairs.find((x) => x.column === column)?.field),
-    [bothColumns, column, runA, viewsA, ownFieldsA, docs, runs, results, study],
+    () => (bothColumns || !column || !runA || !viewsA ? undefined : columnFieldOf(column, labelPairs(runA, docs, runs, results, study, viewsA, ownFieldsA, { known }))),
+    [bothColumns, column, runA, viewsA, ownFieldsA, docs, runs, results, study, known],
   );
   // A field picked in the menu, with the pair of sources it was picked for (see `chosenField`).
   const pair = `${a}\u0001${b}`;
@@ -542,14 +604,14 @@ function AgreementPanel() {
   // (A codebook scale of numbers applies at the nominal level too: then the reason is the scale's.)
   const leftOutText =
     `${fmtInt(stats.leftOut.n)} ${stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because ` +
-    `${leftOutReason(stats.leftOut.range ? 'interval' : level, stats.leftOut.range, !!cf?.scaleSeen)}: ${stats.leftOut.values.map((v) => `“${v}”`).join(', ')}${stats.leftOut.values.length === 5 ? ', …' : ''}.`;
+    `${leftOutReason(stats.leftOut.range ? 'interval' : level, stats.leftOut.range, !!cf?.scaleSeen, cf?.scaleSeen && cf.range ? scaleStep(cf.range) : undefined)}: ${stats.leftOut.values.map((v) => `“${v}”`).join(', ')}${stats.leftOut.values.length === 5 ? ', …' : ''}.`;
 
   const sourceOptions = (allowMeta: boolean) => (
     <>
       <optgroup label="Runs">
         {[...runs].reverse().map((r) => (
           <option key={r.id} value={encode({ kind: 'run', id: r.id })}>
-            Run {runTitle(r)} · v{r.snapshot.promptVersion} · {r.snapshot.model.model}
+            Run {runTitle(r, runs)} · v{r.snapshot.promptVersion} · {r.snapshot.model.model}
           </option>
         ))}
       </optgroup>
@@ -561,7 +623,7 @@ function AgreementPanel() {
             .flatMap((r) =>
               Array.from({ length: r.snapshot.options.replicates }, (_, i) => (
                 <option key={`${r.id}-${i}`} value={encode({ kind: 'rep', runId: r.id, rep: i + 1 })}>
-                  Run {runTitle(r)} · replicate {i + 1}
+                  Run {runTitle(r, runs)} · replicate {i + 1}
                 </option>
               )),
             )}
