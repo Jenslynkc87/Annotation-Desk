@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { dependentSamples, drawStratifiedSample, heldValue, orderStrata, sampleNote, takenNote } from '../lib/sample';
+import { dependentSamples, drawStratifiedSample, heldValue, leavesOutCurrent, orderStrata, sampleNote, takenNote } from '../lib/sample';
 import { currentStudy, markSample, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import { Modal, NumberField } from './ui';
@@ -41,6 +41,10 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   // differ from those of the recorded draw), and the later draws that left those texts out.
   const keeps = r.ids.filter((id) => markedNow.has(id)).length;
   const dependents = already && markedAs ? dependentSamples(notes, markedAs.column, markedAs.value, w) : [];
+  // Or this draw itself leaves them out (e.g. a fresh validation sample, leaving out the texts marked validation now).
+  const today = new Date().toISOString().slice(0, 10);
+  const self =
+    already > 0 && !!markedAs && !!exclude && leavesOutCurrent(notes, markedAs.column, markedAs.value, sampleNote({ ...markedAs, date: today, strata, exclude, seed }, r, w, notes), w);
   // File types (e.g. .md and .txt) in the sample versus the eligible texts, to check the mix is similar.
   const types = useMemo(() => {
     const ext = (f: string | undefined) => (f?.includes('.') ? f.slice(f.lastIndexOf('.') + 1).toLowerCase() : '');
@@ -166,6 +170,12 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
             The draw{dependents.length === 1 ? '' : 's'} of {dependents.join(' and ')} left out the {w.many} now marked {column} = {value}. So that{' '}
             {dependents.length === 1 ? 'it' : 'they'} can still be reproduced, the note of the draw that marked them stays in the study notes, marked as
             replaced.
+          </div>
+        )}
+        {self && (
+          <div>
+            This draw leaves out the {w.many} now marked {column} = {value}. So that it can be reproduced, the note of the draw that marked them stays in the
+            study notes, marked as replaced.
           </div>
         )}
       </div>

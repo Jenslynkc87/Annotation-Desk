@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { comparableFields, fieldValue, type ComparableField } from '../lib/compare';
+import { codebookField, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { labelValue, namedField } from '../lib/export/tables';
 import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
 import { fieldLabel, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
@@ -9,6 +9,7 @@ import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
 import { buildDocViews, runName, runTitle, type DocView, type RunFilter } from '../lib/view';
+import { useBuildingFor, waitForDownload } from '../lib/background';
 import { words, isEntries } from '../lib/subject';
 import { CorpusImport } from './CorpusImport';
 import { CostEstimate, EstimateLink, remainingRule } from './CostEstimate';
@@ -124,10 +125,12 @@ export function compareFieldFor(col: string, scoreFields: ComparableField[], cod
  * and whether the comparison counts them (`counts`). Each text is judged on the scale of the run that gave its value,
  * as the Agreement panel compares that run with the column: a structured run on its own codebook field (its scale, and
  * whether it is a yes/no field), a plain-text run on the range of its answers shown (`comparableFields`), grown through
- * the labels of its own texts (`comparableLabel`). Only texts with both a value and a label are listed.
+ * the labels of its own texts (`comparableLabel`). Labels are read as the panel reads them (`labelValue`, e.g. a coder's
+ * 1/0 against categories yes and no, or yes/no against values 0 and 1). Only texts with both a value and a label are
+ * listed.
  */
 export function compareRows(key: string, col: string, docs: Doc[], views: Map<string, DocView>): Map<string, { value: string; label: string; counts: boolean }> {
-  type Rule = { field?: ComparableField | Variable; yesNo: boolean; pairs: [string, string][]; rows: [string, string, string][] };
+  type Rule = { field?: ComparableField | Variable; read?: ComparableField; pairs: [string, string][]; rows: [string, string, string][] };
   const rules = new Map<string, Rule>();
   for (const d of docs) {
     const v = views.get(d.id);
@@ -136,12 +139,12 @@ export function compareRows(key: string, col: string, docs: Doc[], views: Map<st
     if (!rule) {
       const p = v.run.snapshot.prompt;
       const variable = p.outputMode === 'structured' ? p.variables.find((x) => x.name === key && x.type !== 'text') : undefined;
-      const field = p.outputMode === 'structured' ? variable : comparableFields(v.run, views.values()).find((f) => f.key === key);
-      rules.set(v.run.id, (rule = { field, yesNo: variable?.type === 'boolean', pairs: [], rows: [] }));
+      const read = variable ? codebookField(p, variable) : p.outputMode === 'structured' ? undefined : comparableFields(v.run, views.values()).find((f) => f.key === key);
+      rules.set(v.run.id, (rule = { field: variable ?? read, read, pairs: [], rows: [] }));
     }
-    const value = normalizeLabel(key === TEXT_RESPONSE_KEY ? (v.values[key] ?? '') : fieldValue(v.run, v.values, key), rule.yesNo);
-    // A label: for scores, a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
-    const label = rule.field && 'key' in rule.field ? labelValue(d.meta[col], rule.field) : normalizeLabel(d.meta[col], rule.yesNo);
+    const value = normalizeLabel(key === TEXT_RESPONSE_KEY ? (v.values[key] ?? '') : fieldValue(v.run, v.values, key), !!rule.read?.yesNo);
+    // A label: a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
+    const label = rule.read ? labelValue(d.meta[col], rule.read) : normalizeLabel(d.meta[col]);
     if (!value || !label) continue;
     rule.pairs.push([value, label]);
     rule.rows.push([d.id, value, label]);
@@ -329,6 +332,8 @@ function TextsAndResults() {
   const curPage = Math.min(page, pageCount - 1);
   const pageDocs = filtered.slice(curPage * PAGE, curPage * PAGE + PAGE);
   const pendingBatches = runs.filter((r) => r.status === 'submitted');
+  // A download of this study being built: its batch results are collected once it is done (the store waits too).
+  const building = useBuildingFor(study.id);
   const reps = study.options.replicates;
 
   // Texts deleted (e.g. with Delete all) leave the selection, so "Selected" never counts texts that are gone.
@@ -381,7 +386,7 @@ function TextsAndResults() {
         : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} requests to ${study.model.model}${reps > 1 ? ` (${ds.length.toLocaleString()} ${w.many} × ${reps} annotations)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} request${n === 1 ? '' : 's'} to ${study.model.model}${reps > 1 ? ` (${ds.length.toLocaleString()} ${w.many} × ${reps} annotations)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
     );
   };
 
@@ -529,7 +534,13 @@ function TextsAndResults() {
                     {/* Retry failed, which looks for such an upload at the provider first, is offered only once the run's batches have ended and are saved. */}
                     {r.batch?.uploadUnknown && (running.length > 0 || notSaved > 0) && unknownUploadNote(running.length, notSaved, recordOnly)}
                   </span>
-                  <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
+                  <button
+                    className="btn small"
+                    style={{ marginLeft: 'auto' }}
+                    disabled={!!building}
+                    title={building ? waitForDownload(building, 'check the batch') : undefined}
+                    onClick={() => checkBatch(r.id)}
+                  >
                     Check now
                   </button>
                 </div>

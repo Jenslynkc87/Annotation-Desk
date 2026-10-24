@@ -1,6 +1,6 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
-import { comparableFields, fieldValue, zeroOneScores, type ComparableField } from '../compare';
+import { comparableFields, fieldValue, zeroOneValues, type ComparableField } from '../compare';
 import { agreement, isMissingLabel, type Agreement, type Level } from '../metrics';
 import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields, toNumber } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
@@ -294,9 +294,9 @@ function nameRest(column: string, field: string): string | null {
 }
 
 /**
- * A label cell as it is compared and counted: trimmed and lower-cased (`normalizeLabel`; against plain-text scores of
- * 0 and 1, a yes or no as 1 or 0), and blank when it is a missing-value marker such as "NA" that isn't a value of the
- * field (so it counts neither as labelled nor as left out).
+ * A label cell as it is compared and counted: trimmed and lower-cased (`normalizeLabel`; against values 0 and 1, a yes
+ * or no as 1 or 0; against a Yes/no field, a 1 or 0 as yes or no), and blank when it is a missing-value marker such as
+ * "NA" that isn't a value of the field (so it counts neither as labelled nor as left out).
  */
 export function labelValue(raw: string | undefined, f: ComparableField): string {
   const v = readLabel(raw, f);
@@ -304,12 +304,13 @@ export function labelValue(raw: string | undefined, f: ComparableField): string 
 }
 
 /**
- * `normalizeLabel`; against plain-text scores of 0 and 1 ("flag": 1, `zeroOneScores`), a yes/no label (yes,
- * no, true, false, y, n) as 1 or 0, the other way round from a Yes/no field reading 1 and 0 as yes and no. (A coder's
- * "yes" next to the model's 1 would otherwise count as a disagreement.)
+ * `normalizeLabel`; against values 0 and 1 (plain-text scores of 0 and 1, "flag": 1, or a codebook of 0 and 1:
+ * `zeroOneValues`), a yes/no label (yes, no, true, false, y, n) as 1 or 0, the other way round from a Yes/no field (or
+ * categories yes and no) reading 1 and 0 as yes and no. (A coder's "yes" next to the model's 1 would otherwise count as
+ * a disagreement.)
  */
 function readLabel(raw: string | undefined, f: ComparableField): string {
-  if (zeroOneScores(f)) {
+  if (zeroOneValues(f)) {
     const yn = normalizeLabel(raw, true);
     if (yn === 'true' || yn === 'false') return yn === 'true' ? '1' : '0';
   }

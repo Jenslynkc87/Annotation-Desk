@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { useBuildingFor, waitForDownload } from '../lib/background';
 import { importBackup } from '../lib/export/backup';
 import {
   batchParts,
@@ -29,6 +30,9 @@ export function StudyMenu() {
   const current = useStore((s) => currentStudy(s));
   // While a run is being sent or uploaded, the open study must stay open (and in place).
   const busy = useStore((s) => isBusy(s));
+  // A download of the open study being built reads its stored results and logs as it goes: the study is not deleted
+  // meanwhile (the store refuses too).
+  const building = useBuildingFor(current?.id);
   const importing = useStore((s) => s.importing);
   const fileRef = useRef<HTMLInputElement>(null);
   const w = words({ subject: current?.prompt.subject });
@@ -107,10 +111,11 @@ export function StudyMenu() {
               {importing ? 'Importing a study backup…' : 'Import study backup (.json)…'}
             </button>
             <div className="menu-sep" />
+            {building && !busy && <div className="menu-note">{waitForDownload(building, 'delete the study')}</div>}
             <button
               className="menu-item"
               style={{ color: 'var(--err)' }}
-              disabled={busy}
+              disabled={busy || !!building}
               onClick={async () => {
                 close();
                 const s = getState();

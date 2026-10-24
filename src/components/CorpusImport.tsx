@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
+import { sortAddition } from '../lib/dedupe';
 import {
   ACCEPTED_EXTENSIONS,
   baseName,
@@ -13,7 +14,7 @@ import {
 } from '../lib/import/parse';
 import { clearPlan, guessKeyColumn, matchLabels, ownLikeColumn, resultsTable } from '../lib/import/labels';
 import { templatePlaceholders } from '../lib/prompt';
-import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, sortAddition, toast, useStore } from '../lib/store';
+import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
 import { isEntries, words } from '../lib/subject';
 import { runName } from '../lib/view';
 import type { Doc, PromptSpec, Run } from '../lib/types';
@@ -342,7 +343,7 @@ export function tableAddition(
   const base = baseName(table.name);
   const idOf = (r: Record<string, string>, i: number) => String(r[idCol || autoId] ?? '').trim() || `${base}_${i + 1}`;
   const items: NewDoc[] = rows.map((r, i) => ({ docId: idOf(r, i), text: textOf(r), meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])), source: table.name }));
-  const plan = sortAddition(items, stored);
+  const plan = sortAddition(items, stored, entry);
   const nAdded = entry && !shown.length ? rows.length : plan.kept.length;
   const seen = new Set<string>();
   const repeated = plan.kept.map((it) => it.docId).filter((x) => seen.has(x) || (seen.add(x), false));
@@ -559,7 +560,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
   // they are when the sheet is checked, not at every flush of a run's results (each check reads the answers of every
   // run, about a second in a big study): again when a run starts or ends.
   const exported = useMemo(
-    () => resultsTable(table, runs, getState().results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)], keyCol),
+    () => resultsTable(table, runs, getState().results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)], keyCol, m.replaced),
     [table, runs, m, prompt, saved, keyCol],
   );
   // Its other columns not yet in this study that may hold the model's answers (of a run not in this study, or a field

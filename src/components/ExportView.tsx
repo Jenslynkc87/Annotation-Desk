@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { endBackground, setBackgroundProgress, startBackground, useBackground, type BackgroundKind } from '../lib/background';
+import { endBackground, setBackgroundProgress, startBackground, useBackground, type BackgroundKind, type BuildChoices } from '../lib/background';
 import { buildBackup } from '../lib/export/backup';
 import { agreementData, agreementHere, buildExcel, buildResearchRepo, buildSupplementary, type AgreementFor, type ExportData } from '../lib/export/packages';
 import { labelPairs } from '../lib/export/tables';
 import type { AgreementJob, AgreementMessage } from '../lib/report.worker';
-import { currentStudy, getState, toast, useStore } from '../lib/store';
+import { batchChecksDone, currentStudy, getState, isBusy, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
 import { retryInProgress, runInProgress, runName, runOrder, runTitle } from '../lib/view';
@@ -67,42 +67,63 @@ const showStep = (step: string) => {
   return painted();
 };
 
-/** The study the download being built here is for: another study may be opened meanwhile. */
-let buildingFor = { id: '', name: '' };
+/** Said while a download that reads stored results and logs as it goes has to wait for a run being sent. */
+const SENDING = 'Wait until the run being sent has finished: this download reads the stored results and logs as it goes, so it would hold answers from before and after.';
+
+/** The downloads that read stored results and logs while they are built (the study backup, the research zip, and the
+ *  supplementary package with logs); the Excel workbook and the package without logs show the results so far. */
+const readsAsItGoes = (kind: BackgroundKind, picked: BuildChoices) => kind === 'backup' || kind === 'research' || (kind === 'supp' && !!picked.supp?.includeLogs);
 
 export function ExportView() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
   const docs = useStore((s) => s.docs);
-  // (In the order the runs were made, as in the exports: of runs that share a number, the one started last comes last.)
-  const withResults = [...runs].sort(runOrder).filter((r) => results.some((x) => x.runId === r.id));
-  // The run picked; until then the latest finished run with results (else the latest with results, e.g. once the
-  // first results arrive while this tab is open). Once shown it stays: a run that is still being sent doesn't take
-  // its place when its first results come in.
-  const [runId, setRunId] = useState('');
-  const run = withResults.find((r) => r.id === runId) ?? [...withResults].reverse().find((r) => !runInProgress(r)) ?? withResults[withResults.length - 1];
-  useEffect(() => {
-    if (run && run.id !== runId) setRunId(run.id);
-  }, [run, runId]);
   // The download being built (`startBackground`), kept outside this tab: leaving the tab and coming back still shows it
   // (the build goes on meanwhile), and a second one can't start before it is done. Its progress: the step it is on,
   // e.g. the file a zip is writing (a full corpus with logs takes many minutes).
   const building = useBackground();
   const study = useStore((s) => currentStudy(s))!;
-  // (One of another study: every button waits, none says it is building this study's.)
-  const otherStudy = building && building.kind !== 'report' && buildingFor.id !== study.id ? buildingFor.name : null;
+  // (One of another study, e.g. its comparison report: every button waits, none says it is building this study's.)
+  const otherStudy = building && building.study.id !== study.id ? building.study.name : null;
   const busy = otherStudy !== null ? 'other' : (building?.kind ?? '');
-  const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
-  const [researchLogs, setResearchLogs] = useState(true);
+  // Opened again during a build of this study: its run and options are shown, not the defaults (and can't be changed
+  // until it is done, so the screen matches what is being built).
+  const [choices] = useState<BuildChoices>(() => (building && !otherStudy ? (building.choices ?? {}) : {}));
+  const lock = (...kinds: BackgroundKind[]) => (kinds.includes(busy as BackgroundKind) ? { disabled: true, title: 'The download being built uses this choice: it can be changed once the file has been downloaded.' } : {});
+  // (In the order the runs were made, as in the exports: of runs that share a number, the one started last comes last.)
+  const withResults = [...runs].sort(runOrder).filter((r) => results.some((x) => x.runId === r.id));
+  // The run picked; until then the latest finished run with results (else the latest with results, e.g. once the
+  // first results arrive while this tab is open). Once shown it stays: a run that is still being sent doesn't take
+  // its place when its first results come in.
+  const [runId, setRunId] = useState(choices.runId ?? '');
+  const run = withResults.find((r) => r.id === runId) ?? [...withResults].reverse().find((r) => !runInProgress(r)) ?? withResults[withResults.length - 1];
+  useEffect(() => {
+    if (run && run.id !== runId) setRunId(run.id);
+  }, [run, runId]);
+  const [supp, setSupp] = useState(choices.supp ?? { includeTexts: false, includeRationales: true, includeLogs: false });
+  const [researchLogs, setResearchLogs] = useState(choices.researchLogs ?? true);
 
-  const go = async (kind: BackgroundKind, label: string, fn: () => Promise<void>) => {
+  const go = async (kind: BackgroundKind, label: string, fn: () => Promise<void>, picked: BuildChoices = {}) => {
+    // A download that reads the stored results and logs as it goes waits for a run or Retry failed being sent, so it
+    // doesn't hold answers from before and after it.
+    if (readsAsItGoes(kind, picked) && isBusy()) {
+      toast(SENDING, 'error');
+      return;
+    }
     // One download is built at a time (a second would compete with the first for memory and leave two files).
-    if (!startBackground(kind, label)) {
+    if (!startBackground(kind, label, { id: study.id, name: study.name || 'Untitled' }, picked)) {
       toast('Another download is still being built: try again when it is done.', 'error');
       return;
     }
-    buildingFor = { id: study.id, name: study.name || 'Untitled' };
     try {
+      // Batch results of this study being collected right now are stored first (the download reads them as stored;
+      // no new collecting starts until it is done).
+      await batchChecksDone(study.id);
+      // (The download takes the open study's data: another study opened meanwhile would be built instead.)
+      if (getState().currentId !== study.id) {
+        toast(`Nothing was downloaded: another study was opened before the ${label} of “${study.name || 'Untitled'}” could start. Open that study and download it again.`, 'error');
+        return;
+      }
       await fn();
     } catch (e) {
       toast(`Export failed: ${errorMessage(e)}`, 'error');
@@ -140,6 +161,8 @@ export function ExportView() {
     return { done: own.filter((id) => usable.has(id)).length, total: own.length };
   }, [run, docs, results]);
   const job = useStore((s) => s.job);
+  // A run or Retry failed being sent (or a batch being uploaded) from this page.
+  const sending = useStore((s) => isBusy(s));
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
 
   return (
@@ -148,7 +171,7 @@ export function ExportView() {
         <div>
           <div className="field" style={{ marginBottom: 6, maxWidth: 640 }}>
             <label htmlFor="exp-run">Run to report</label>
-            <select id="exp-run" className="select" value={run?.id ?? ''} onChange={(e) => setRunId(e.target.value)}>
+            <select id="exp-run" className="select" value={run?.id ?? ''} onChange={(e) => setRunId(e.target.value)} {...lock('excel', 'supp')}>
               {!withResults.length && <option value="">No runs with results yet</option>}
               {[...withResults].reverse().map((r) => (
                 <option key={r.id} value={r.id}>
@@ -171,7 +194,7 @@ export function ExportView() {
             {gold.length > 0 && <> Agreement is computed automatically for: {gold.join(', ')}.</>}
             {skipped.length > 0 && <> Not used for agreement: {skipped.join(', ')}.</>}
           </div>
-          {busy === 'report' && <div className="hint">A comparison report is being built (Runs &amp; agreement): the downloads below can start once it is done.</div>}
+          {busy === 'report' && <div className="hint">The {building!.label} is being built (Runs &amp; agreement): the downloads below can start once it is done.</div>}
           {otherStudy !== null && (
             <div className="hint">
               The {building!.label} of the study “{otherStudy}” is being built: the downloads below can start once it is done.
@@ -190,10 +213,15 @@ export function ExportView() {
             className="btn primary export-btn"
             disabled={!run || !!busy}
             onClick={() =>
-              go('excel', 'Excel workbook', async () => {
-                const blob = await buildExcel(exportData(), run!, { text: false, rationale: true, agreement: agreementInWorker, onProgress: showStep });
-                download(`${slug(study.name)}_run${runName(run!, runs)}_${dateStamp()}.xlsx`, blob);
-              })
+              go(
+                'excel',
+                `Excel workbook of run #${runName(run!, runs)}`,
+                async () => {
+                  const blob = await buildExcel(exportData(), run!, { text: false, rationale: true, agreement: agreementInWorker, onProgress: showStep });
+                  download(`${slug(study.name)}_run${runName(run!, runs)}_${dateStamp()}.xlsx`, blob);
+                },
+                { runId: run!.id },
+              )
             }
           >
             <Icon name="download" /> {busy === 'excel' ? 'Building…' : 'Download Excel'}
@@ -207,16 +235,22 @@ export function ExportView() {
           </div>
           <p className="hint">Everything, for your own archive: all runs, all prompt versions, corpus, full request/response logs, results, and a re-importable backup.</p>
           <label className="check">
-            <input type="checkbox" checked={researchLogs} onChange={(e) => setResearchLogs(e.target.checked)} /> Include full request and response logs
+            <input type="checkbox" checked={researchLogs} onChange={(e) => setResearchLogs(e.target.checked)} {...lock('research')} /> Include full request and response logs
           </label>
           <button
             className="btn primary export-btn"
-            disabled={!!busy || (!docs.length && !runs.length)}
+            disabled={!!busy || sending || (!docs.length && !runs.length)}
+            title={sending ? SENDING : undefined}
             onClick={() =>
-              go('research', 'research repository', async () => {
-                const { blob, name } = await buildResearchRepo(exportData(), { includeLogs: researchLogs, onProgress: showStep, agreement: agreementInWorker });
-                download(name, blob);
-              })
+              go(
+                'research',
+                'research repository',
+                async () => {
+                  const { blob, name } = await buildResearchRepo(exportData(), { includeLogs: researchLogs, onProgress: showStep, agreement: agreementInWorker });
+                  download(name, blob);
+                },
+                { researchLogs },
+              )
             }
           >
             <Icon name="download" /> {busy === 'research' ? 'Building…' : 'Download .zip'}
@@ -233,21 +267,21 @@ export function ExportView() {
             and a reproducible Python script (with a template marking every inserted value).
           </p>
           <label className="check">
-            <input type="checkbox" checked={supp.includeTexts} onChange={(e) => setSupp({ ...supp, includeTexts: e.target.checked })} />
+            <input type="checkbox" checked={supp.includeTexts} onChange={(e) => setSupp({ ...supp, includeTexts: e.target.checked })} {...lock('supp')} />
             <span>
               Include the {w.many}
               <div className="hint">Off by default: check copyright and privacy before sharing {w.many} publicly.</div>
             </span>
           </label>
           <label className="check">
-            <input type="checkbox" checked={supp.includeRationales} onChange={(e) => setSupp({ ...supp, includeRationales: e.target.checked })} />
+            <input type="checkbox" checked={supp.includeRationales} onChange={(e) => setSupp({ ...supp, includeRationales: e.target.checked })} {...lock('supp')} />
             <span>
               Include the model’s rationale
               <div className="hint">The separate rationale field. Fields of your codebook (e.g. explanations) are annotations and always included.</div>
             </span>
           </label>
           <label className="check">
-            <input type="checkbox" checked={supp.includeLogs} onChange={(e) => setSupp({ ...supp, includeLogs: e.target.checked })} />
+            <input type="checkbox" checked={supp.includeLogs} onChange={(e) => setSupp({ ...supp, includeLogs: e.target.checked })} {...lock('supp')} />
             <span>
               Include raw request/response logs
               <div className="hint">These contain the {w.many}.</div>
@@ -255,12 +289,18 @@ export function ExportView() {
           </label>
           <button
             className="btn primary export-btn"
-            disabled={!run || !!busy}
+            disabled={!run || !!busy || (sending && supp.includeLogs)}
+            title={sending && supp.includeLogs ? SENDING : undefined}
             onClick={() =>
-              go('supp', 'supplementary package', async () => {
-                const { blob, name } = await buildSupplementary(exportData(), run!, { ...supp, onProgress: showStep, agreement: agreementInWorker });
-                download(name, blob);
-              })
+              go(
+                'supp',
+                `supplementary package of run #${runName(run!, runs)}`,
+                async () => {
+                  const { blob, name } = await buildSupplementary(exportData(), run!, { ...supp, onProgress: showStep, agreement: agreementInWorker });
+                  download(name, blob);
+                },
+                { runId: run!.id, supp },
+              )
             }
           >
             <Icon name="download" /> {busy === 'supp' ? 'Building…' : 'Download .zip'}
@@ -277,7 +317,8 @@ export function ExportView() {
           </div>
           <button
             className="btn"
-            disabled={!!busy}
+            disabled={!!busy || sending}
+            title={sending ? SENDING : undefined}
             onClick={() =>
               go('backup', 'study backup', async () => {
                 const d = exportData();

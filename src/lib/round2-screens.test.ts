@@ -98,7 +98,7 @@ describe('Agreement panel: the field of two label columns (N34, N59, N67, N127, 
   it('names the scale when labels are left out as off the scale', () => {
     expect(leftOutReason('ordinal', [-3, 3])).toBe('a label isn’t a number or is outside the scale (−3 to 3)');
     expect(leftOutReason('interval')).toBe('a label isn’t a number or is outside the scale');
-    expect(leftOutReason('nominal')).toBe('a label isn’t one of the field’s values');
+    expect(leftOutReason('nominal')).toBe('a value isn’t one of the field’s values');
   });
 });
 

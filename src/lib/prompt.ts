@@ -274,5 +274,7 @@ export function normalizeLabel(v: string | undefined, yesNo = false): string {
   if (s === 'true' || s === 'yes' || (yesNo && (s === '1' || s === 'y'))) return 'true';
   if (s === 'false' || s === 'no' || (yesNo && (s === '0' || s === 'n'))) return 'false';
   if (!Number.isNaN(toNumber(s))) return String(toNumber(s));
+  // A majority tie of a yes/no field reads the same in every encoding ("no | yes", "0 | 1" → "false | true").
+  if (yesNo && s.includes(' | ')) return [...new Set(s.split(' | ').map((x) => normalizeLabel(x, true)))].sort().join(' | ');
   return s;
 }

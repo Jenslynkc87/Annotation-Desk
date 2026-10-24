@@ -194,7 +194,8 @@ export interface ResultsTable {
   /** The sheet's other columns (not named like a field, nor a label column for one, e.g. tone_gold), which may hold
    *  answers this study doesn't know by that name (a run not in it, a field renamed since); when the sheet has every
    *  field of one of this study's runs and holds answers stored here, only those shaped like a field's answers
-   *  (stance, stance_explanation). */
+   *  (stance, stance_explanation) or, unless the sheet holds a run's explanations here word for word, placed among an
+   *  export's own columns (before n_ok). */
   unknown: string[];
 }
 
@@ -214,7 +215,8 @@ function labelColumnOf(column: string, base: string): boolean {
  * (`matched`: the sheet's values per text, as matchLabels gives them). Added as labels, the model's answers would
  * count as human labels. The answer columns are those named like a field of `runs` or `prompts` (the study's current
  * and saved prompts, so also before any run, or after one is deleted). Only the columns that would be added are
- * judged: not `keyColumn`, which matches rows to texts (e.g. a survey's response_id), nor `file`.
+ * judged: not `keyColumn`, which matches rows to texts (e.g. a survey's response_id), nor `file`. `own`: the sheet's
+ * columns this study's texts already have (metadata, labels), which an export has among the run's columns too.
  */
 export function resultsTable(
   table: ParsedTable,
@@ -223,6 +225,7 @@ export function resultsTable(
   matched?: Map<string, Record<string, string>>,
   prompts: PromptSpec[] = [],
   keyColumn?: string,
+  own?: string[],
 ): ResultsTable {
   const cols = table.columns.filter((c) => c !== keyColumn && !PROTECTED.has(c));
   const names = new Set<string>();
@@ -250,19 +253,25 @@ export function resultsTable(
   // hold one: the key's name ends like the column's (nested keys are joined with _).
   const open = new Set(cols.filter((c) => !names.has(c) && (likely || isExplanationKey(c.replace(/^answer_/, '')))));
   const tail = (c: string) => `${c.slice(c.lastIndexOf('_') + 1)}"`;
-  // (The keys found, per run: the fields of its answers, as its exported columns name them.)
+  // (Each run's keys: the fields of its answers, as its exported columns name them, from its first 20 answers whatever
+  // the sheet has, so they don't depend on which run's answers come first; a run of prose answers costs 20 tries. None
+  // for a sheet with no column to look for.)
   const keysOf = new Map<string, Set<string>>();
-  for (const r of results) {
-    if (!open.size) break;
-    const raw = r.values[TEXT_RESPONSE_KEY];
-    if (!textRuns.has(r.runId) || !raw || ![...open].some((c) => raw.includes(tail(c)))) continue;
-    for (const k of Object.keys(flattenJsonResponse(raw) ?? {})) {
-      add(k);
-      open.delete(k);
-      open.delete(`answer_${k}`);
-      (keysOf.get(r.runId) ?? keysOf.set(r.runId, new Set()).get(r.runId)!).add(k);
+  const sampled = new Map<string, number>();
+  if (open.size)
+    for (const r of results) {
+      const raw = r.values[TEXT_RESPONSE_KEY];
+      if (!textRuns.has(r.runId) || !raw) continue;
+      const n = sampled.get(r.runId) ?? 0;
+      if (n >= 20 && (!open.size || ![...open].some((c) => raw.includes(tail(c))))) continue;
+      if (n < 20) sampled.set(r.runId, n + 1);
+      for (const k of Object.keys(flattenJsonResponse(raw) ?? {})) {
+        add(k);
+        open.delete(k);
+        open.delete(`answer_${k}`);
+        if (n < 20) (keysOf.get(r.runId) ?? keysOf.set(r.runId, new Set()).get(r.runId)!).add(k);
+      }
     }
-  }
   const answers = cols.filter((c) => names.has(c) && !agreement.has(c) && !isResultsTableColumn(c));
   // Explanations are compared on any sheet; other answers (short labels a coder may share) only on one that looks
   // like an export.
@@ -292,8 +301,18 @@ export function resultsTable(
     const of = keyOf(c).replace(/_(explanation|reasoning)$/, '');
     return of !== keyOf(c) && (label(of) || of.split('_').every((w) => LABEL_MARKER.test(w)));
   };
+  // Also then, when the study's own columns are known (`own`), a column the exports put before n_ok other than those
+  // (the run's fields and keys; the owner's columns come after n_error): e.g. the field of a deleted run with more fields
+  // than one here. (Not the texts' metadata renamed beside a field of its name, meta_tone, nor the exports' own ID
+  // column, doc_id, when the sheet is matched by its file column. Nor on a sheet with a run's explanations here word
+  // for word: that run's export, whose other columns are the owner's, e.g. tone_jk put beside tone.)
+  const before = new Set(
+    own && !copied.some(isWordy)
+      ? table.columns.slice(0, Math.max(0, table.columns.indexOf('n_ok'))).filter((c) => c !== 'doc_id' && !own.includes(c) && !c.startsWith('meta_'))
+      : [],
+  );
   const unknown = cols.filter(
-    (c) => !columns.includes(c) && !names.has(c) && !agreement.has(c) && (!complete || shaped(c)) && !label(c) && !ownNote(c),
+    (c) => !columns.includes(c) && !names.has(c) && !agreement.has(c) && (!complete || shaped(c) || before.has(c)) && !label(c) && !ownNote(c),
   );
   const sure = strong.some((c) => !ownLikeColumn(c)) || copied.some(isWordy);
   return { columns, answers, strong, copied, sameAs, shared, sure, unknown };

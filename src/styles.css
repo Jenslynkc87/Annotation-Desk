@@ -166,6 +166,8 @@ details.more > .more-body { padding-top: 8px; }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.ghost:hover:not(:disabled) { background: var(--navy-050); border-color: transparent; }
 .btn.small { padding: 4px 9px; font-size: 13px; }
+/* A button whose text can be long (e.g. a report's progress, with run names): wraps rather than widen the page. */
+.btn.wrap { white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .row.nowrap > .btn.small { height: 36px; padding: 0 12px; }
 .btn.icon { justify-content: center; }
 .btn.ghost.icon { padding: 4px; color: var(--muted); }

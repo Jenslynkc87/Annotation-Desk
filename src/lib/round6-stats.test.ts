@@ -247,7 +247,7 @@ describe('yes/no labels against plain-text 0/1 scores (review of K3 and K15)', (
     expect([field.level, field.range, field.yesNo]).toEqual(['ordinal', [0, 1], false]);
     expect(['yes', 'No', 'TRUE', 'false', 'y', 'N', '1', '0', 'NA', ' 1 '].map((v) => labelValue(v, field))).toEqual(['1', '0', '1', '0', '1', '0', '1', '0', '', '1']);
     // Scores beyond 0…1: a word stays a word (no yes/no reading).
-    const wide: ComparableField = { ...field, allowed: ['0', '1', '2', '3'], range: [0, 3] };
+    const wide: ComparableField = { ...field, allowed: ['0', '1', '2', '3'], range: [0, 3], zeroOne: false };
     expect(['yes', 'n', '2'].map((v) => labelValue(v, wide))).toEqual(['true', 'n', '2']);
   });
 

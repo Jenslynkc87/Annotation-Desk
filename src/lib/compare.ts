@@ -1,5 +1,5 @@
 // Which fields of a run agreement can be computed on, and their values per text.
-import type { Level } from './metrics';
+import { scaleStep, type Level } from './metrics';
 import { fieldLabel, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from './prompt';
 import type { PromptSpec, Result, Run, Variable } from './types';
 import type { DocView } from './view';
@@ -20,6 +20,8 @@ export interface ComparableField {
    */
   range?: [number, number];
   yesNo: boolean;
+  /** Plain-text scores: answers of 0 and 1, but for a stray one or codes far off them (see `zeroOneScores`). */
+  zeroOne?: boolean;
 }
 
 /**
@@ -72,6 +74,19 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
     .filter(([key, nums]) => nums.length > 0 && nums.length >= (values.get(key)?.length ?? 0) / 2)
     .map(([key, nums]) => {
       const ordinal = nums.every(Number.isInteger);
+      // A yes/no in numbers (`zeroOneScores`): every answer from 0 to 1, or most answers 0 or 1 with at most one in a
+      // hundred (at least one) near them, e.g. a stray 2 or −1, besides codes far off them (a 9 for "can't tell", far
+      // as the rating-scale rule reads a label). A −3…3 scale whose answers are mostly 0 or 1 mostly has more −1s and
+      // 2s; one that hasn't is still compared as numbers against numbers (only a field in words pairs as yes/no).
+      const step = scaleStep([0, 1]);
+      const far = (x: number) => x < -step || x > 1 + step;
+      let zeroOrOne = 0;
+      let near = 0;
+      for (const x of nums) {
+        if (x === 0 || x === 1) zeroOrOne++;
+        else if ((x < 0 || x > 1) && !far(x)) near++;
+      }
+      const zeroOne = nums.every((x) => x >= 0 && x <= 1) || (zeroOrOne * 2 > nums.length && near <= Math.max(1, nums.length / 100));
       // Whole-number scores: the scale is every value from the lowest to the highest seen, so weighted κ measures
       // distances on the scale even where a value (e.g. −2) was never used. (No codebook says what the scale is.)
       let lo = Infinity;
@@ -79,51 +94,64 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       for (const x of nums) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
       const allowed = ordinal && hi - lo <= 100 ? Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i)) : [];
       const range: [number, number] = [lo, hi];
-      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, range, yesNo: false };
+      return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, range, yesNo: false, zeroOne };
     });
 }
 
 /** A codebook field (not free text) of a structured prompt, as `comparableFields` gives it. */
 export function codebookField(p: PromptSpec, v: Variable): ComparableField {
+  // Yes/no: its two values are its categories (a tie "false | true" is no third one).
+  const allowed = v.type === 'category' || v.type === 'ordinal' ? v.values.map((x) => normalizeLabel(x)).filter(Boolean) : v.type === 'boolean' ? ['false', 'true'] : [];
   return {
     key: v.name,
     label: fieldLabel(p, v.name),
     level: v.type === 'ordinal' ? 'ordinal' : v.type === 'number' ? 'interval' : 'nominal',
-    // Yes/no: its two values are its categories (a tie "false | true" is no third one).
-    allowed: v.type === 'category' || v.type === 'ordinal' ? v.values.map((x) => normalizeLabel(x)).filter(Boolean) : v.type === 'boolean' ? ['false', 'true'] : [],
-    yesNo: v.type === 'boolean',
+    allowed,
+    // Categories that are exactly yes and no (or true and false) are a Yes/no field too, so a coder's 1/0 or y/n reads
+    // as yes/no.
+    yesNo: v.type === 'boolean' || (v.type === 'category' && sameSet(allowed, ['false', 'true'])),
   };
 }
 
 const isNumber = (s: string) => s.trim() !== '' && Number.isFinite(Number(s));
+const sameSet = (xs: string[], ys: string[]) => new Set(xs).size === ys.length && xs.every((x) => ys.includes(x));
 /** A codebook scale of numbers: an ordinal scale, or category codes that are all numbers. */
 const numericCodebook = (f: ComparableField) => !f.scaleSeen && f.allowed.length > 0 && f.allowed.every(isNumber);
 /**
- * Plain-text scores whose single answers all lie from 0 to 1 ("flag": 1): a yes/no in numbers (see `combineFields`,
- * `labelValue`). Also with a stray answer between them (a 0.5), which alone would otherwise turn every 1 and 0 into a
- * disagreement; such a value is then left out and reported.
+ * Plain-text scores of 0 and 1 ("flag": 1): a yes/no in numbers (see `combineFields`, `labelValue`). Also with a stray
+ * answer between them (a 0.5) or beyond them (a 2), or codes far off (a 9 for "can't tell"), as `comparableFields`
+ * judges it (`zeroOne`), any of which alone would otherwise turn every 1 and 0 into a disagreement; against a Yes/no
+ * field such a value is left out and reported. (A field made elsewhere, without `zeroOne`: answers all from 0 to 1.)
  */
-export const zeroOneScores = (f: ComparableField) => !!f.scaleSeen && !!f.range && f.range[0] >= 0 && f.range[1] <= 1;
+export const zeroOneScores = (f: ComparableField) => !!f.scaleSeen && (f.zeroOne ?? (!!f.range && f.range[0] >= 0 && f.range[1] <= 1));
+/** No and yes as 0 and 1: plain-text scores of 0 and 1 (`zeroOneScores`), or a codebook whose values are exactly 0 and 1. */
+export const zeroOneValues = (f: ComparableField) => zeroOneScores(f) || (!f.scaleSeen && sameSet(f.allowed, ['0', '1']));
+/** A yes/no field, in words (`yesNo`: a Yes/no field, or categories yes and no) or in numbers (`zeroOneValues`). */
+export const dichotomy = (f: ComparableField) => f.yesNo || zeroOneValues(f);
 
 /**
  * The same field in two runs (e.g. in a comparison), so the result doesn't depend on which run comes first: the
  * values of both runs' scales (e.g. two codebooks, 0…3 and −3…3), and for plain-text scores, which have no
  * codebook, every whole number in the range seen in either run (and that range, from the lowest to the highest
- * answer of either run). A codebook of numbers and plain-text scores: the codebook's scale (see below). A Yes/no
- * field and plain-text scores of 0 and 1 ("flag": 1, `zeroOneScores`): the Yes/no field, so both runs are read with
- * the yes/no rule (1 and 0 as yes and no) and compared.
+ * answer of either run). A codebook of numbers and plain-text scores: the codebook's scale (see below). A yes/no on
+ * both sides (`dichotomy`), in words on at least one (a Yes/no field, or categories yes and no) and in words or as 0
+ * and 1 on the other (a codebook of 0 and 1, or plain-text scores of 0 and 1, `zeroOneScores`): a Yes/no field, so
+ * both runs are read with the yes/no rule (1 and 0 as yes and no) and compared, and a value that is neither (a 0.5
+ * median, a 9 for "can't tell") is left out and reported. (0 and 1 on both sides are compared as numbers, as before.)
  */
 export function combineFields(a: ComparableField, b: ComparableField | undefined): ComparableField {
   if (!b) return a;
-  const yesNo = a.yesNo ? a : b.yesNo ? b : null;
-  if (yesNo && (a.yesNo || zeroOneScores(a)) && (b.yesNo || zeroOneScores(b))) return yesNo;
+  if ((a.yesNo || b.yesNo) && dichotomy(a) && dichotomy(b)) {
+    const yn = a.yesNo ? a : b;
+    return { key: yn.key, label: yn.label, level: 'nominal', allowed: ['false', 'true'], yesNo: true };
+  }
   const level: ComparableField['level'] = a.level === b.level ? a.level : a.level === 'nominal' || b.level === 'nominal' ? 'nominal' : 'interval';
   const scaleSeen = !!a.scaleSeen && !!b.scaleSeen;
   const ranges = [a.range, b.range].filter((r): r is [number, number] => !!r);
   const range: [number, number] | undefined =
     scaleSeen && ranges.length ? [Math.min(...ranges.map((r) => r[0])), Math.max(...ranges.map((r) => r[1]))] : undefined;
-  const { range: _range, ...rest } = a;
-  const base = { ...rest, level, scaleSeen, ...(range ? { range } : {}), yesNo: a.yesNo && b.yesNo };
+  const { range: _range, zeroOne: _zeroOne, ...rest } = a;
+  const base = { ...rest, level, scaleSeen, ...(range ? { range } : {}), ...(scaleSeen ? { zeroOne: zeroOneScores(a) && zeroOneScores(b) } : {}), yesNo: a.yesNo && b.yesNo };
   // A codebook of numbers on one side, plain-text scores on the other: the codebook's scale at whatever level results
   // (also interval, when one plain-text answer was 2.5), so Gwet's q, the split of a half point, the weights and the
   // midpoint are the codebook's. Where the plain-text answers reach beyond it, it is widened to the whole numbers of

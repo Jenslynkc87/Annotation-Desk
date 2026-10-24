@@ -176,23 +176,41 @@ export function drawLabel(notes: string, column: string, value: string, w: Words
 const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Whether a note's draw depended on the texts marked `column` = `value` by the draw `label` names: it left them out
- *  (naming that draw, or no draw in notes of October 24, 2026), or every text of another value in that column. */
-function dependsOn(line: string, column: string, value: string, label: string): boolean {
-  if (line.includes(`whose ${column} already holds another value`)) return true;
-  const m = new RegExp(`(?:marked|excluding) ${escapeRe(column)} = ${escapeRe(value)}(?: \\(([^()]*)\\))?(?=[,;.]| and|$)`).exec(line);
-  return !!m && (m[1] === undefined || m[1] === label);
+ *  naming that draw, or (written `later` than that draw's note: notes are added in draw order) naming no draw (notes of
+ *  October 24, 2026), or every text of another value in that column (the count form). A value is read up to what the
+ *  notes write after one, so "pilot" is not read in "pilot, wave 2". */
+function dependsOn(line: string, column: string, value: string, label: string, later: boolean): boolean {
+  // (The count form of a note of this same value counts only other values.)
+  const own = isSampleNote(line.replace(/^\(replaced \d{4}-\d{2}-\d{2}\) /, ''), column, value);
+  if (later && !own && line.includes(`whose ${column} already holds another value`)) return true;
+  const m = new RegExp(
+    `(?:marked|excluding) ${escapeRe(column)} = ${escapeRe(value)}(?: \\(([^()]*)\\))?(?=(?:,| and) the \\d|, not from |; seed |\\.?$)`,
+  ).exec(line);
+  return !!m && (m[1] === undefined ? later : m[1] === label);
 }
 
 /** The study notes when a redraw replaces the notes of `column` = `value`: each is dropped, unless another draw's note
- *  depends on its texts; that one is kept, marked "(replaced <date>)", so that draw can still be reproduced. */
-export function replaceSampleNotes(notes: string, column: string, value: string, today: string, w: Words = { one: 'text', many: 'texts' }): string {
+ *  depends on its texts, including the redraw's own (`adding`, e.g. leaving out the texts marked so now); that one is
+ *  kept, marked "(replaced <date>)", so that draw can still be reproduced. */
+export function replaceSampleNotes(
+  notes: string,
+  column: string,
+  value: string,
+  today: string,
+  w: Words = { one: 'text', many: 'texts' },
+  adding?: string,
+): string {
   const lines = notes.split('\n');
-  const others = lines.filter((l) => !isSampleNote(l, column, value));
+  // (Each with its place: the note being added comes after all of them.)
+  const others: [string, number][] = [
+    ...lines.map((l, j) => [l, j] as [string, number]).filter(([l]) => !isSampleNote(l, column, value)),
+    ...(adding ? [[adding, lines.length] as [string, number]] : []),
+  ];
   return lines
-    .flatMap((l) => {
+    .flatMap((l, i) => {
       if (!isSampleNote(l, column, value)) return [l];
       const label = labelOf(l, column, value, w);
-      return others.some((o) => dependsOn(o, column, value, label)) ? [`(replaced ${today}) ${l}`] : [];
+      return others.some(([o, j]) => dependsOn(o, column, value, label, j > i)) ? [`(replaced ${today}) ${l}`] : [];
     })
     .join('\n')
     .trim();
@@ -200,15 +218,22 @@ export function replaceSampleNotes(notes: string, column: string, value: string,
 
 /** The samples ("sample = holdout") whose draw depended on the texts now marked `column` = `value`, for the dialog. */
 export function dependentSamples(notes: string, column: string, value: string, w: Words = { one: 'text', many: 'texts' }): string[] {
-  const line = notes.split('\n').filter((l) => isSampleNote(l, column, value)).at(-1);
-  if (!line) return [];
-  const label = labelOf(line, column, value, w);
-  const names = notes
-    .split('\n')
-    .filter((l) => !isSampleNote(l, column, value) && dependsOn(l, column, value, label))
+  const lines = notes.split('\n');
+  const at = lines.findLastIndex((l) => isSampleNote(l, column, value));
+  if (at < 0) return [];
+  const label = labelOf(lines[at], column, value, w);
+  const names = lines
+    .filter((l, j) => !isSampleNote(l, column, value) && dependsOn(l, column, value, label, j > at))
     .map((l) => /^(?:\(replaced \d{4}-\d{2}-\d{2}\) )?Sample (.+?) \(\d{4}-\d{2}-\d{2}\): /.exec(l)?.[1])
     .filter((x): x is string => !!x);
   return [...new Set(names)];
+}
+
+/** Whether a new draw's note (`adding`) depends on the texts now marked `column` = `value` (it leaves them out, naming
+ *  their draw): their draw's note is then kept, marked as replaced, when it is marked (`replaceSampleNotes`). */
+export function leavesOutCurrent(notes: string, column: string, value: string, adding: string, w: Words = { one: 'text', many: 'texts' }): boolean {
+  const label = drawLabel(notes, column, value, w);
+  return label !== '' && dependsOn(adding, column, value, label, true);
 }
 
 /**

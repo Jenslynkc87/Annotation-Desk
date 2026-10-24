@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react';
+import { buildingFor, waitForDownload } from './background';
 import * as dbApi from './db';
+import { sortAddition, type NewItem } from './dedupe';
 import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
 import { describeApiError, isConnectionError, isPermanentError, provider } from './providers';
 import { rejectsTemperature } from './providers/anthropic';
@@ -171,6 +173,17 @@ export function dismissToast(id: string) {
 /** A run as messages name it: "#5", or "#5-ab12cd34" for runs that share a number, as on the screens. `runs`: the
  *  runs of its study. */
 const runLabel = (run: Run, runs: Run[] = state.runs) => `#${runName(run, runs)}`;
+
+/**
+ * A download of this study is being built (lib/background.ts): it reads the study's stored results and logs as it
+ * goes, so nothing may change or delete them meanwhile. True if so, said unless `quiet` (`action`: e.g. "delete the
+ * run"). (New runs, texts and labels don't touch what it reads: it takes the texts and run records when it starts.)
+ */
+function waitsForDownload(studyId: string, action: string, quiet = false): boolean {
+  const label = buildingFor(studyId);
+  if (label && !quiet) toast(waitForDownload(label, action), 'error');
+  return !!label;
+}
 
 // ---------- studies ----------
 
@@ -439,6 +452,7 @@ export async function duplicateStudy(withCorpus: boolean) {
 
 export async function removeStudy(id: string) {
   if (isBusy()) return toast('Finish or cancel the running job first.', 'error');
+  if (waitsForDownload(id, 'delete the study')) return;
   const runs = id === state.currentId ? state.runs : [];
   // Every question first, before anything is cancelled (a study kept at a question keeps its batches): a batch upload
   // of unknown outcome is looked up at the provider (not one another study here shares: left to it).
@@ -469,7 +483,16 @@ export async function removeStudy(id: string) {
   }
   if (failed.length && !confirm(`${failed.join('\n\n')}\n\n${alreadyCancelled(cancelled, 'study')}Delete the study anyway? A batch still running at the provider may be charged, and its results can't be collected here.`)) return;
   const all = id === state.currentId ? runs : await dbApi.listAllRuns().then((rs) => rs.filter((r) => r.studyId === id), () => []);
-  await dbApi.deleteStudy(id);
+  // A batch check of its runs under way finishes first (it would store its results after the delete), and none starts
+  // meanwhile. (A download started during the questions above is waited for too.)
+  deleting.add(id);
+  try {
+    await checksEnded((_, studyId) => studyId === id, 'Batch results of this study are being collected: the study is deleted once that is done.');
+    if (waitsForDownload(id, 'delete the study')) return;
+    await dbApi.deleteStudy(id);
+  } finally {
+    deleting.delete(id);
+  }
   // (Once deleted: a study kept, e.g. because deleting failed, still looks for its own uploads' batches.)
   await forgetBatchesOf(all, looks.map(([r, l]) => [l.foundId, unknownUpload(r), l.foundEarlier]));
   for (const [r, batchId] of found) toast(`The batch of run ${runLabel(r, runs)}’s upload of unknown outcome (${batchId}) had reached the provider and was cancelled.`);
@@ -485,22 +508,6 @@ export async function removeStudy(id: string) {
 
 // ---------- corpus ----------
 
-/** What a text is called where it came from: its file name, else its ID. */
-const nameOf = (x: { docId: string; meta: Record<string, string> }) => x.meta.file || x.docId.trim();
-
-/**
- * Whether a row's ID was made up when it was added rather than read from an ID column of its own: one of its columns'
- * values (entries with an automatic ID keep every column) or the table's name with the row's number (no ID column, or
- * an empty ID cell). Such an ID can differ the next time the same rows are added.
- */
-function madeUpId(x: { docId: string; meta: Record<string, string>; source: string }): boolean {
-  const id = x.docId.trim();
-  if (Object.values(x.meta).some((v) => v.trim() === id)) return true;
-  const dot = x.source.lastIndexOf('.');
-  const base = dot > 0 ? x.source.slice(0, dot) : x.source;
-  return id.startsWith(`${base}_`) && /^\d+$/.test(id.slice(base.length + 1));
-}
-
 /**
  * Add texts to the open study. `studyId`: the study they were read for; if another study has been opened since
  * (e.g. while a folder was still being read), nothing is added.
@@ -514,57 +521,7 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
 }
 let addQueue: Promise<unknown> = Promise.resolve();
 
-type NewItem = { docId: string; text: string; meta: Record<string, string>; source: string };
-
-/**
- * Which rows of an addition are added (`kept`) and which are skipped: already here under their name (`already`) or
- * under another ID (`elsewhere`), or included twice in this addition (`twice`: their names). Compared only with the
- * texts stored before it (`stored`), so an import dialog can count with it too.
- */
-export function sortAddition<T extends NewItem>(items: T[], stored: Doc[]): { kept: T[]; already: number; elsewhere: string[]; twice: string[] } {
-  // A text that is already here (same name, identical text), e.g. after dropping the whole folder again to add
-  // a few new files, is skipped rather than added again as a copy. Same name with a different text is added.
-  // (Versions before October 15, 2026 stored texts without surrounding blank lines and spaces: such a text also
-  // counts as already here. Only the comparison ignores them; nothing stored or added is changed.) A text stored with
-  // a suffix because its name was taken (John Smith_2, the second John Smith of a table) also counts under that name,
-  // so the same table pasted again adds neither. (Not a file's own name, e.g. smith_2.md: files go by their name.)
-  const present = new Map<string, string[]>();
-  const note = (name: string, text: string) => present.set(name, [...(present.get(name) ?? []), text]);
-  for (const d of stored) {
-    note(nameOf(d), d.text);
-    const m = d.meta.file ? null : /^(.*)_([2-9]|[1-9]\d+)$/.exec(d.docId.trim());
-    if (m) note(m[1], d.text);
-  }
-  // A row whose ID was made up (`madeUpId`) is already here also when a stored text without a file has its text and
-  // the same value in each of its columns (columns added since, e.g. labels or a sample, aside), whatever ID it gets
-  // this time: the automatic ID may move to another column, or numbered rows shift when a row is inserted. (A cell a
-  // label sheet has emptied since is no longer stored: the same as an empty cell.)
-  const byText = new Map<string, Doc[]>();
-  for (const d of stored) if (!d.meta.file) byText.set(d.text, [...(byText.get(d.text) ?? []), d]);
-  const storedAs = (it: T) =>
-    it.meta.file || !madeUpId(it)
-      ? undefined
-      : [...(byText.get(it.text) ?? []), ...(byText.get(it.text.trim()) ?? [])].find((d) => Object.entries(it.meta).every(([k, v]) => (d.meta[k] ?? '') === v));
-  let already = 0;
-  const elsewhere: string[] = [];
-  // Within one addition, only an exact copy (same ID and name, identical text and columns) is skipped, e.g. one file
-  // selected from two folders: two rows of one table with the same name and details (two people called John Smith
-  // from the UK, with different answers of the owner's) are both added, the second with a suffix, as the import dialog
-  // says, and so are rows with IDs of their own that differ (two paragraphs of one file reading “Notes”).
-  const seen = new Set<string>();
-  const twice: string[] = [];
-  const kept = items.filter((it) => {
-    const texts = present.get(nameOf(it)) ?? [];
-    if (texts.includes(it.text) || texts.includes(it.text.trim())) return (already++, false);
-    const same = storedAs(it);
-    if (same) return (elsewhere.push(`${it.docId.trim()} (stored as ${same.docId})`), false);
-    const copy = JSON.stringify([it.docId.trim(), nameOf(it), it.text, Object.entries(it.meta).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))]);
-    if (seen.has(copy)) return (twice.push(nameOf(it)), false);
-    seen.add(copy);
-    return true;
-  });
-  return { kept, already, elsewhere, twice };
-}
+export { sortAddition } from './dedupe';
 
 /** False when they could not be saved (or another study was opened meanwhile): the dialog then stays open. */
 async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> {
@@ -576,7 +533,7 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
   }
   const w = words(cur.prompt);
   const what = w.one === 'entry' ? 'details' : 'text';
-  const { kept, already: skipped, elsewhere, twice } = sortAddition(items, state.docs);
+  const { kept, already: skipped, elsewhere, twice } = sortAddition(items, state.docs, w.one === 'entry');
   items = kept;
   if (skipped) toast(`Skipped ${skipped.toLocaleString()} ${skipped === 1 ? w.one : w.many} already in this study (same name and identical ${what}).`);
   if (elsewhere.length) {
@@ -707,7 +664,7 @@ export async function markSample(column: string, value: string, ids: string[], n
       changed.push({ ...d, meta: rest });
     }
   }
-  const kept = replaceSampleNotes(cur.description, column, value, nowIso().slice(0, 10), words(cur.prompt));
+  const kept = replaceSampleNotes(cur.description, column, value, nowIso().slice(0, 10), words(cur.prompt), note);
   const next: Study = { ...structuredClone(cur), description: `${kept ? kept + '\n' : ''}${note}`, updatedAt: nowIso() };
   try {
     await dbApi.putDocsAndStudy(changed, next);
@@ -1277,7 +1234,7 @@ async function lookUpUpload(p: ProviderId, key: string, runId: string, attempt: 
       earlier
         ? [
             ...runs.filter((r) => r.id !== runId && r.batch?.provider === p).flatMap((r) => batchParts(r).filter((x) => fromUpload(x, earlier.since)).map((x) => x.batchId)),
-            ...[...forgotten.values()].filter((f) => f.since === earlier.since).map((f) => f.id),
+            ...[...forgotten.values()].filter((f) => f.since === earlier.since || f.orSince === earlier.since).map((f) => f.id),
           ]
         : [],
     );
@@ -1706,6 +1663,7 @@ export async function retryFailed(runId: string) {
   const original = state.runs.find((r) => r.id === runId);
   if (!original) return;
   if (isBusy()) return toast('A run is already in progress.', 'error');
+  if (waitsForDownload(original.studyId, 'retry the failed requests')) return;
   const key = state.keys[original.snapshot.model.provider];
   if (!key) return toast(`Add your ${provider(original.snapshot.model.provider).label} API key first (API keys, top right).`, 'error');
   set({ submitting: 'Preparing…' });
@@ -1745,9 +1703,10 @@ export async function retryFailed(runId: string) {
       const at = fmtDateTime(unknown.since);
       const n = retryableCount(original, state.results, state.docs);
       const what = `${n.toLocaleString()} failed (or never sent) request${n === 1 ? '' : 's'} of run ${runLabel(original)}`;
+      const reqs = `${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'}`;
       if (
         !confirm(
-          `${look.sure ? `No batch from the upload of ${at} (${unknown.requests.toLocaleString()} requests) was found at ${label}.` : `The batch upload of ${at} (${unknown.requests.toLocaleString()} requests) could not be looked up at ${label} (${look.why}).`} If it did arrive, sending again pays twice. Check the provider's batch list if in doubt.\n\nSend the ${what} again as a new batch (half price; results usually within an hour, collected into the same run)?`,
+          `${look.sure ? `No batch from the upload of ${at} (${reqs}) was found at ${label}.` : `The batch upload of ${at} (${reqs}) could not be looked up at ${label} (${look.why}).`} If it did arrive, sending again pays twice. Check the provider's batch list if in doubt.\n\nSend the ${what} again as a new batch (half price; results usually within an hour, collected into the same run)?`,
         )
       )
         return;
@@ -1763,6 +1722,8 @@ export async function retryFailed(runId: string) {
   } finally {
     set({ submitting: '' });
   }
+  // (A download of the study may have been started while the retry was prepared.)
+  if (waitsForDownload(original.studyId, 'retry the failed requests')) return;
   const run: Run = structuredClone(getState().runs.find((r) => r.id === runId) ?? original);
   const tasks = buildTasks(run, (docId, rep) => !ok.has(`${run.id}:${docId}:${rep}`));
   if (!tasks.length) return toast(`Run ${runLabel(run)} has no failed requests.`);
@@ -1959,6 +1920,7 @@ export async function removeRun(runId: string) {
   const run = state.runs.find((r) => r.id === runId);
   if (!run) return;
   if (uploadingRun === runId) return toast('A batch of this run is being uploaded: wait until that is done.', 'error');
+  if (waitsForDownload(run.studyId, 'delete the run')) return;
   // (Named before it is deleted: runs that share its number are told apart.)
   const name = runLabel(run);
   const look = await lookUpUnknownUpload(run);
@@ -1977,10 +1939,19 @@ export async function removeRun(runId: string) {
 
 export async function deleteRunById(runId: string) {
   if (uploadingRun === runId) return toast('A batch of this run is being uploaded: wait until that is done.', 'error');
+  const run = state.runs.find((r) => r.id === runId);
+  if (run && waitsForDownload(run.studyId, 'delete the run')) return;
+  // A batch check of this run under way finishes first (it would store its results under a run that is gone, or save
+  // the run again), and none starts meanwhile. (A download started during removeRun's questions is waited for too.)
+  deleting.add(runId);
   try {
+    await checksEnded((id) => id === runId, run ? `Batch results of run ${runLabel(run)} are being collected: the run is deleted once that is done.` : '');
+    if (run && waitsForDownload(run.studyId, 'delete the run')) return;
     await dbApi.deleteRun(runId);
   } catch (e) {
     return toast(`The run was not deleted: ${storageError(e)}.`, 'error', true);
+  } finally {
+    deleting.delete(runId);
   }
   set((s) => ({ runs: s.runs.filter((r) => r.id !== runId), results: s.results.filter((r) => r.runId !== runId) }));
 }
@@ -1997,7 +1968,24 @@ export async function renameRun(runId: string, label: string) {
 
 // ---------- batches ----------
 
-const checking = new Set<string>();
+// Batch checks under way (run id → its study, and the check's end): a run or study is deleted, and a download of a
+// study starts reading, only once they have ended. Runs and studies being deleted (their ids): not checked meanwhile.
+const checking = new Map<string, { studyId: string; done: Promise<void> }>();
+const deleting = new Set<string>();
+
+/** Waits for the batch checks under way that `which` picks (by run and study), saying `note` first if there are any. */
+async function checksEnded(which: (runId: string, studyId: string) => boolean, note = ''): Promise<void> {
+  const under = [...checking].filter(([id, c]) => which(id, c.studyId)).map(([, c]) => c.done);
+  if (!under.length) return;
+  if (note) toast(note);
+  await Promise.all(under);
+}
+
+/** Resolves once no batch check of this study's runs is collecting results (a download then reads them as stored).
+ *  New ones wait while its download is built (`checkBatch`). */
+export function batchChecksDone(studyId: string): Promise<void> {
+  return checksEnded((_, s) => s === studyId);
+}
 // Runs whose batch results could not be stored: said once per session, not at every quiet check (run id → that
 // message, taken away once the results are saved).
 const saveFailureShown = new Map<string, string>();
@@ -2017,7 +2005,10 @@ const markKey = (runId: string, batchId: string) => `${runId}\n${batchId}`;
 
 export async function checkBatch(runId: string, quiet = false) {
   const run = state.runs.find((r) => r.id === runId);
-  if (!run?.batch || run.status !== 'submitted' || checking.has(runId)) return;
+  if (!run?.batch || run.status !== 'submitted' || checking.has(runId) || deleting.has(runId) || deleting.has(run.studyId)) return;
+  // Not while a download of its study is being built (it reads the study's stored results as it goes): collected
+  // once that is done, by the next quiet check.
+  if (waitsForDownload(run.studyId, 'check the batch', quiet)) return;
   // Batches being uploaded (e.g. a retry of this run) are added to the run as they go up: check after that.
   if (state.submitting) {
     if (!quiet) toast('A batch is being uploaded; check again when that is done.');
@@ -2028,9 +2019,12 @@ export async function checkBatch(runId: string, quiet = false) {
     if (!quiet) toast(`Add your ${provider(run.batch.provider).label} key to check this batch.`, 'error');
     return;
   }
-  checking.add(runId);
   // (Named now: another study may be opened while it is checked.)
   const name = runLabel(run);
+  // (Recorded right before the `try` whose `finally` ends it: a check that never ends would hold up deletes and
+  // downloads for good.)
+  let ended = () => {};
+  checking.set(runId, { studyId: run.studyId, done: new Promise<void>((r) => (ended = r)) });
   try {
     const adapter = provider(run.batch.provider);
     const parts = batchParts(run).map((p) => ({ ...p }));
@@ -2265,6 +2259,7 @@ export async function checkBatch(runId: string, quiet = false) {
     if (!quiet) toast(`Could not check batch: ${isQuotaError(e) ? storageError(e) : describeApiError(e)}`, 'error');
   } finally {
     checking.delete(runId);
+    ended();
   }
 }
 

@@ -1248,12 +1248,12 @@ export async function buildComparisonReport(
   const isNum = (v: string) => v.trim() !== '' && !Number.isNaN(Number(v));
   const review = compared.flatMap(({ f, items, all }) => {
     const numeric = all.meanDifference !== null;
-    // Scores left out of the statistics (n_left_out_not_on_scale): not a number (e.g. "NA") or off the scale they were
-    // measured on (the codebook's; for plain-text scores, the range of the answers as the statistics grew it).
-    const range = all.leftOut.range;
-    const onScale = (v: string) => isNum(v) && (!range || (Number(v) >= range[0] - 1e-9 && Number(v) <= range[1] + 1e-9));
+    // Scores left out of the statistics (n_left_out_not_on_scale): a pair they didn't count, so not in their confusion
+    // table (whether a pair counts depends on its two values only). On numbers: not a number (e.g. "NA") or off the
+    // scale they were measured on; with categories: not one of them (e.g. a 0.5 median against a yes/no field).
+    const onNumbers = numeric || !!f.scaleSeen || f.level !== 'nominal' || (f.allowed.length > 0 && f.allowed.every(isNum));
     return items.map(({ doc, x, y }) => {
-      const leftOut = numeric && all.leftOut.n > 0 && !(onScale(x) && onScale(y));
+      const leftOut = all.leftOut.n > 0 && !all.confusion[x]?.[y];
       const diff = numeric && !leftOut ? Number(y) - Number(x) : null;
       const mid = all.midpoint;
       const opposite = numeric && mid !== null && ((Number(x) < mid && Number(y) > mid) || (Number(x) > mid && Number(y) < mid));
@@ -1261,7 +1261,7 @@ export async function buildComparisonReport(
       // even number of answers can be half points: 0.5 is "less than 1 point", 1.5 "between 1 and 2 points".
       const size = diff === null ? null : Math.abs(diff);
       const category = leftOut
-        ? (isNum(x) && isNum(y) ? 'not on the scale' : 'not a number')
+        ? (!onNumbers ? 'not a category' : isNum(x) && isNum(y) ? 'not on the scale' : 'not a number')
         : x === y ? (numeric ? (Number(x) === 0 ? 'agree (zero)' : 'agree (non-zero)') : 'agree')
           : opposite ? 'opposite direction'
             : size === null ? 'differ'
@@ -1286,7 +1286,7 @@ export async function buildComparisonReport(
       };
     });
   });
-  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, 'between 1 and 2 points': 2, '1 point': 2, 'less than 1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4, 'not on the scale': 5, 'not a number': 5 };
+  const rank: Record<string, number> = { 'opposite direction': 0, '2+ points': 1, differ: 1, 'between 1 and 2 points': 2, '1 point': 2, 'less than 1 point': 2, agree: 3, 'agree (non-zero)': 3, 'agree (zero)': 4, 'not on the scale': 5, 'not a number': 5, 'not a category': 5 };
   review.sort((p, q) => rank[p.row.category] - rank[q.row.category] || Math.abs(q.row.difference ?? 0) - Math.abs(p.row.difference ?? 0));
 
   // Exploratory: the same figures per group (e.g. per era); small groups give wide intervals.
@@ -1366,7 +1366,7 @@ export async function buildComparisonReport(
     { note: 'Mean difference = second minus first (positive: the second run scores higher on average). Mean absolute difference: average distance regardless of direction.' },
     { note: `Brackets / _ci_low and _ci_high: 95% bootstrap intervals (2,000 resamples of ${w.many}, fixed seed, so the same data gives the same interval).` },
     { note: 'Review sheet: every compared score, opposite directions first, then the largest differences. To draw at random within a category (e.g. 30 opposite-direction cases), sort by category and then by "random", and take the first rows; the numbers never change, so the draw is reproducible. The judgment and note columns are for your own labels.' },
-    ...(review.some((r) => rank[r.row.category] === 5) ? [{ note: 'Review sheet, last rows: scores left out of the statistics (“not a number”, e.g. NA, or “not on the scale”), with the values as the runs gave them.' }] : []),
+    ...(review.some((r) => rank[r.row.category] === 5) ? [{ note: 'Review sheet, last rows: scores left out of the statistics (“not a number”, e.g. NA, “not on the scale”, or “not a category”, e.g. a 0.5 median against a yes/no field), with the values as the runs gave them.' }] : []),
     ...(groupBy ? [{ note: `"By ${groupBy}" sheet: the same figures per ${groupBy}; exploratory, as small groups give wide intervals.` }] : []),
   ]);
   const out = await wb.xlsx.writeBuffer();

@@ -4,7 +4,7 @@ import { codebookField, combineFields, comparableFields, fieldValue, type Compar
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
-import { endBackground, setBackgroundProgress, startBackground, useBackground } from '../lib/background';
+import { endBackground, setBackgroundProgress, startBackground, useBackground, useBuildingFor, waitForDownload } from '../lib/background';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
 import { ABOUT_AUTHOR, cachingLabel, knownFieldNames, labelColumnsFor, labelPairs, labelValue, namedField, NOTE_OR_RATING, preferredGoldColumn, runName } from '../lib/export/tables';
@@ -46,6 +46,10 @@ export function RunsView() {
   const busy = useStore((s) => isBusy(s));
   // While batches are being uploaded (a new run or a retry), runs are not deleted: the upload adds to its run.
   const uploading = useStore((s) => !!s.submitting);
+  // While a download of this study is being built (it reads the stored results and logs as it goes), its runs are not
+  // deleted, retried or collected (the store refuses too).
+  const building = useBuildingFor(useStore((s) => s.currentId));
+  const waitTitle = (action: string) => (building ? waitForDownload(building, action) : undefined);
   const [inspect, setInspect] = useState<Run | null>(null);
   const sorted = [...runs].reverse();
   // Each run's own results, sorted out once per change (during a run, results come in every quarter of a second).
@@ -134,8 +138,8 @@ export function RunsView() {
                           {retry > 0 && (
                             <button
                               className="btn small"
-                              disabled={busy}
-                              title="Re-send the failed (or never sent) requests in this run, with the same frozen settings; new answers replace the failed ones"
+                              disabled={busy || !!building}
+                              title={waitTitle('retry the failed requests') ?? 'Re-send the failed (or never sent) requests in this run, with the same frozen settings; new answers replace the failed ones'}
                               onClick={() => {
                                 // Batch runs retry as a new batch (half price, results later); others right away (full price).
                                 // A run with a batch upload of unknown outcome is not asked here: Retry failed first looks
@@ -152,7 +156,7 @@ export function RunsView() {
                           )}
                           {r.status === 'submitted' && (
                             <>
-                              <button className="btn small" onClick={() => checkBatch(r.id)}>
+                              <button className="btn small" disabled={!!building} title={waitTitle('check the batch')} onClick={() => checkBatch(r.id)}>
                                 Check
                               </button>
                               <button
@@ -172,7 +176,8 @@ export function RunsView() {
                           )}
                           <button
                             className="btn small danger"
-                            disabled={r.status === 'running' || uploading}
+                            disabled={r.status === 'running' || uploading || !!building}
+                            title={waitTitle('delete the run')}
                             onClick={async () => {
                               // A batch that another study here also waits for (a copy of this study, or the study it was copied
                               // from) is left running for it. A copy in another browser can't be seen from here: say so.
@@ -480,7 +485,7 @@ const signed = (x: number) => (x < 0 ? `−${-x}` : String(x));
  * aren't numbers are left out.
  */
 export function leftOutReason(level: Level, range?: [number, number], seen = false, step?: number): string {
-  if (level === 'nominal') return 'a label isn’t one of the field’s values';
+  if (level === 'nominal') return 'a value isn’t one of the field’s values';
   const r = range ? `${signed(range[0])} to ${signed(range[1])}` : '';
   if (seen && !range) return 'a label isn’t a number';
   return seen
@@ -702,7 +707,8 @@ function AgreementPanel() {
   // A download being built (`startBackground`), kept outside this panel, so leaving Runs & agreement and coming back
   // still shows it. For the comparison report: how far it has got (e.g. "field 2 of 5"), else false.
   const building = useBackground();
-  const reporting = building?.kind === 'report' ? building.progress : false;
+  // (Only this study's report: one of another study is named as such next to the button.)
+  const reporting = building?.kind === 'report' && building.study.id === study.id ? building.progress : false;
   const [groupBy, setGroupBy] = useState('');
   // Columns that group texts (e.g. era, journal): a few distinct values, not one per text.
   const groupColumns = useMemo(
@@ -720,7 +726,7 @@ function AgreementPanel() {
     // Named now: the page stays usable while the report is built, so another study may be open when it is done.
     const file = `${slug(currentStudy(getState())?.name ?? 'study')}_run${runName(ra, runs)}_vs_run${runName(rb, runs)}_${dateStamp()}.xlsx`;
     // One download is built at a time (a second would compete with the first for memory and leave two files).
-    if (!startBackground('report', `comparison report (run #${runName(ra, runs)} vs run #${runName(rb, runs)})`)) {
+    if (!startBackground('report', `comparison report (run #${runName(ra, runs)} vs run #${runName(rb, runs)})`, { id: study.id, name: study.name || 'Untitled' })) {
       toast('Another download is still being built: try again when it is done.', 'error');
       return;
     }
@@ -836,7 +842,7 @@ function AgreementPanel() {
       {((srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b) || reporting !== false) && (
         <div className="row" style={{ margin: '2px 0 12px' }}>
           <button
-            className="btn small"
+            className="btn small wrap"
             disabled={!!building}
             onClick={downloadReport}
             title={
@@ -847,6 +853,12 @@ function AgreementPanel() {
           >
             {reporting === false ? 'Download comparison report (Excel)' : `Building the ${building?.label}…${reporting ? ` ${reporting}` : ''}`}
           </button>
+          {building && reporting === false && (
+            <span className="hint">
+              {building.study.id === study.id ? `The ${building.label} is being built (Export)` : `The ${building.label} of the study “${building.study.name}” is being built`}: one download is
+              built at a time.
+            </span>
+          )}
           {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && groupColumns.length > 0 && (
             <select className="select small" style={{ width: 'auto' }} value={groupBy} onChange={(e) => setGroupBy(e.target.value)} title="Adds a sheet with the same figures per group (exploratory)">
               <option value="">No breakdown</option>

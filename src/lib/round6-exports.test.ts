@@ -90,14 +90,15 @@ beforeEach(() => {
 describe('export jobs outlive the tab that started them (K6)', () => {
   it('one at a time: a second does not start while one runs; its progress is kept until it ends', () => {
     expect(backgroundRunning()).toBe(false);
-    expect(startBackground('research', 'research repository')).toBe(true);
-    expect(startBackground('excel', 'Excel workbook')).toBe(false);
-    expect(startBackground('report', 'comparison report')).toBe(false);
+    const study = { id: 's', name: 'Round six' };
+    expect(startBackground('research', 'research repository', study)).toBe(true);
+    expect(startBackground('excel', 'Excel workbook', study)).toBe(false);
+    expect(startBackground('report', 'comparison report', study)).toBe(false);
     setBackgroundProgress('Writing corpus/corpus.csv');
     expect(backgroundRunning()).toBe(true);
     endBackground();
     expect(backgroundRunning()).toBe(false);
-    expect(startBackground('excel', 'Excel workbook')).toBe(true);
+    expect(startBackground('excel', 'Excel workbook', study)).toBe(true);
     endBackground();
   });
 });
