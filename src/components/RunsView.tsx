@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { agreement, fixed, fmtPct, fmtStat, isMissingLabel, scaleStep, type Agreement, type Level } from '../lib/metrics';
-import { codebookField, combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
+import { codebookField, combineFields, comparableFields, fieldValue, labelScale, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
@@ -45,7 +45,8 @@ export function RunsView() {
   const docs = useStore((s) => s.docs);
   const busy = useStore((s) => isBusy(s));
   // While batches are being uploaded (a new run or a retry), runs are not deleted: the upload adds to its run.
-  const uploading = useStore((s) => !!s.submitting);
+  // (A batch being uploaded, or a study or run being deleted: no other run is deleted meanwhile.)
+  const uploading = useStore((s) => !!s.submitting || !!s.deletingWhat);
   // While a download of this study is being built (it reads the stored results and logs as it goes), its runs are not
   // deleted, retried or collected (the store refuses too).
   const building = useBuildingFor(useStore((s) => s.currentId));
@@ -591,6 +592,8 @@ function AgreementPanel() {
   const [fieldPick, setFieldPick] = useState<{ pair: string; key: string } | null>(null);
   const cf = chosenField(fieldPick, pair, bothColumns, fields, columnsField, columnField);
   const f = cf?.key ?? '';
+  // The scale the figures are measured on: against label columns, plain-text 0/1 scores grow from 0…1 (`labelScale`).
+  const scf = useMemo(() => (cf && (column || bothColumns) ? labelScale(cf) : cf), [cf, column, bothColumns]);
   const autoLevel: Level = cf?.level ?? 'nominal';
   // A level picked by hand, for the pair of sources it was picked for (a new pair starts from its field's level).
   const [levelPick, setLevelPick] = useState<{ pair: string; level: '' | Level } | null>(null);
@@ -642,10 +645,10 @@ function AgreementPanel() {
       }
     }
     // The figures at once; the 95% intervals (several seconds on a full corpus) follow from a background worker.
-    return { stats: agreement(xs, ys, level, cf?.allowed ?? [], tolerance, { withIntervals: false, scaleSeen: cf?.scaleSeen, range: cf?.range }), nLabelled, xs, ys };
-  }, [a, b, cf, level, yesNo, tolerance, docs, runs, dataA, dataB]);
+    return { stats: agreement(xs, ys, level, scf?.allowed ?? [], tolerance, { withIntervals: false, scaleSeen: scf?.scaleSeen, range: scf?.range }), nLabelled, xs, ys };
+  }, [a, b, cf, scf, level, yesNo, tolerance, docs, runs, dataA, dataB]);
   // What the intervals depend on: unchanged when results arrive for other runs (e.g. while a run is going).
-  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: cf?.allowed ?? [], tolerance, scaleSeen: cf?.scaleSeen, range: cf?.range }), [xs, ys, level, cf, tolerance]);
+  const job = useMemo(() => ({ a: xs, b: ys, level, allowed: scf?.allowed ?? [], tolerance, scaleSeen: scf?.scaleSeen, range: scf?.range }), [xs, ys, level, scf, tolerance]);
   const jobKey = useMemo(() => JSON.stringify(job), [job]);
   const [intervals, setIntervals] = useState<{ key: string; ci: Agreement['ci'] } | null>(null);
   useEffect(() => {

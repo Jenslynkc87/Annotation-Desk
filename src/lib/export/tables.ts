@@ -1,6 +1,6 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
-import { comparableFields, fieldValue, zeroOneValues, type ComparableField } from '../compare';
+import { comparableFields, fieldValue, labelScale, zeroOneValues, type ComparableField } from '../compare';
 import { agreement, isMissingLabel, type Agreement, type Level } from '../metrics';
 import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields, toNumber } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
@@ -468,7 +468,8 @@ export function agreementForRun(run: Run, docs: Doc[], allRuns: Run[], results: 
   // category), or the numeric scores in plain-text JSON answers. Each with the label columns named after it.
   const { fields, pairs } = labelPairs(run, docs, allRuns, results, study, views);
   const inRun = new Set(run.docIds);
-  const setup = (field: string) => fields.find((f) => f.key === field)!;
+  // (Against labels, plain-text 0/1 scores are on a scale grown from 0…1: `labelScale`.)
+  const setup = (field: string) => labelScale(fields.find((f) => f.key === field)!);
   // (Plain-text scores: the human–human rows too are on the scale grown from the run's answers, `f.range`; it takes in
   // labels within 3 points, so only codes far off it, e.g. 9 or 99 next to −3…3, depend on the model.)
   const stats = (xs: string[], ys: string[], f: ComparableField) => agreement(xs, ys, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen, range: f.range });

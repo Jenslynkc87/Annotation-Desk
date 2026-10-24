@@ -58,6 +58,9 @@ export interface State {
   job: Job | null;
   /** Set while a run is being prepared or a batch uploaded (before `job` exists): nothing else may start. */
   submitting: string;
+  /** Set while a study or run is being deleted (its questions, cancels and the delete itself): nothing else may start,
+   *  since a run or Retry failed would send texts of what is being deleted, and a download would read it half gone. */
+  deletingWhat: string;
   /** Set while a study backup is being imported (closing the tab would leave it half done). */
   importing: boolean;
   toasts: Toast[];
@@ -97,6 +100,7 @@ let state: State = {
   modelsError: { anthropic: '', openai: '' },
   job: null,
   submitting: '',
+  deletingWhat: '',
   importing: false,
   toasts: [],
   saving: false,
@@ -122,7 +126,7 @@ export function useStore<T>(selector: (s: State) => T): T {
 
 /** A run is being sent, or being prepared or uploaded. */
 export function isBusy(s: State = state): boolean {
-  return !!s.job || !!s.submitting;
+  return !!s.job || !!s.submitting || !!s.deletingWhat;
 }
 
 export function currentStudy(s: State = state): Study | null {
@@ -283,8 +287,9 @@ function replacedFrom(results: Result[]): Run['replaced'] {
   return requests ? { requests, usage } : undefined;
 }
 
-export async function selectStudy(id: string) {
-  if (isBusy()) {
+export async function selectStudy(id: string, afterDelete = false) {
+  // (`afterDelete`: the study just deleted is replaced by another while its delete still holds everything else back.)
+  if (isBusy() && !afterDelete) {
     toast('Finish or cancel the running job before switching studies.', 'error');
     return;
   }
@@ -423,7 +428,7 @@ async function flushStudies() {
 // Don't lose a pending edit when the tab is closed.
 if (typeof window !== 'undefined') window.addEventListener('pagehide', () => void flushStudies());
 
-export async function createStudy(name: string, subject?: PromptSpec['subject']) {
+export async function createStudy(name: string, subject?: PromptSpec['subject'], afterDelete = false) {
   const s = newStudy(name, subject);
   try {
     await dbApi.putStudy(s);
@@ -432,7 +437,7 @@ export async function createStudy(name: string, subject?: PromptSpec['subject'])
     return;
   }
   set((st) => ({ studies: [s, ...st.studies] }));
-  await selectStudy(s.id);
+  await selectStudy(s.id, afterDelete);
 }
 
 export async function duplicateStudy(withCorpus: boolean) {
@@ -453,6 +458,16 @@ export async function duplicateStudy(withCorpus: boolean) {
 export async function removeStudy(id: string) {
   if (isBusy()) return toast('Finish or cancel the running job first.', 'error');
   if (waitsForDownload(id, 'delete the study')) return;
+  // From the first question until another study is open, nothing else starts (`deletingWhat`).
+  set({ deletingWhat: 'Deleting the study…' });
+  try {
+    await removeStudyNow(id);
+  } finally {
+    set({ deletingWhat: '' });
+  }
+}
+
+async function removeStudyNow(id: string) {
   const runs = id === state.currentId ? state.runs : [];
   // Every question first, before anything is cancelled (a study kept at a question keeps its batches): a batch upload
   // of unknown outcome is looked up at the provider (not one another study here shares: left to it).
@@ -500,9 +515,9 @@ export async function removeStudy(id: string) {
   const studies = state.studies.filter((s) => s.id !== id);
   set({ studies });
   if (!studies.length) {
-    await createStudy('My first study');
+    await createStudy('My first study', undefined, true);
   } else if (state.currentId === id) {
-    await selectStudy(studies[0].id);
+    await selectStudy(studies[0].id, true);
   }
 }
 
@@ -1921,6 +1936,18 @@ export async function removeRun(runId: string) {
   if (!run) return;
   if (uploadingRun === runId) return toast('A batch of this run is being uploaded: wait until that is done.', 'error');
   if (waitsForDownload(run.studyId, 'delete the run')) return;
+  if (state.deletingWhat) return toast(`Wait until the delete under way has finished (${state.deletingWhat.replace(/…$/, '').toLowerCase()}).`, 'error');
+  // From the first question until the run is gone, no run, Retry failed or download starts (`deletingWhat`).
+  set({ deletingWhat: `Deleting run ${runLabel(run)}…` });
+  try {
+    await removeRunNow(run);
+  } finally {
+    set({ deletingWhat: '' });
+  }
+}
+
+async function removeRunNow(run: Run) {
+  const runId = run.id;
   // (Named before it is deleted: runs that share its number are told apart.)
   const name = runLabel(run);
   const look = await lookUpUnknownUpload(run);

@@ -106,6 +106,10 @@ export function ExportView() {
   const go = async (kind: BackgroundKind, label: string, fn: () => Promise<void>, picked: BuildChoices = {}) => {
     // A download that reads the stored results and logs as it goes waits for a run or Retry failed being sent, so it
     // doesn't hold answers from before and after it.
+    if (getState().deletingWhat) {
+      toast('Wait until the delete under way has finished.', 'error');
+      return;
+    }
     if (readsAsItGoes(kind, picked) && isBusy()) {
       toast(SENDING, 'error');
       return;
@@ -122,6 +126,12 @@ export function ExportView() {
       // (The download takes the open study's data: another study opened meanwhile would be built instead.)
       if (getState().currentId !== study.id) {
         toast(`Nothing was downloaded: another study was opened before the ${label} of “${study.name || 'Untitled'}” could start. Open that study and download it again.`, 'error');
+        return;
+      }
+      // (Asked again: a run or a delete may have started during that wait. The data is taken right after, before
+      // anything else can start.)
+      if (getState().deletingWhat || (readsAsItGoes(kind, picked) && isBusy())) {
+        toast(getState().deletingWhat ? 'Wait until the delete under way has finished.' : SENDING, 'error');
         return;
       }
       await fn();
@@ -217,7 +227,9 @@ export function ExportView() {
                 'excel',
                 `Excel workbook of run #${runName(run!, runs)}`,
                 async () => {
-                  const blob = await buildExcel(exportData(), run!, { text: false, rationale: true, agreement: agreementInWorker, onProgress: showStep });
+                  // (The run as stored now, with its results: a batch check waited for may have finished it.)
+                  const d = exportData();
+                  const blob = await buildExcel(d, d.runs.find((x) => x.id === run!.id) ?? run!, { text: false, rationale: true, agreement: agreementInWorker, onProgress: showStep });
                   download(`${slug(study.name)}_run${runName(run!, runs)}_${dateStamp()}.xlsx`, blob);
                 },
                 { runId: run!.id },
@@ -296,7 +308,8 @@ export function ExportView() {
                 'supp',
                 `supplementary package of run #${runName(run!, runs)}`,
                 async () => {
-                  const { blob, name } = await buildSupplementary(exportData(), run!, { ...supp, onProgress: showStep, agreement: agreementInWorker });
+                  const d = exportData();
+                  const { blob, name } = await buildSupplementary(d, d.runs.find((x) => x.id === run!.id) ?? run!, { ...supp, onProgress: showStep, agreement: agreementInWorker });
                   download(name, blob);
                 },
                 { runId: run!.id, supp },

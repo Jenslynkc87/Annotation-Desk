@@ -24,8 +24,15 @@ function madeUpId(x: { docId: string; meta: Record<string, string>; source: stri
 }
 
 /** Whether a row's ID came from an ID column of its own (a paragraph table's para_id): not a dropped file's (named
- *  after its file), and not made up, also before a suffix adding gave it (John Smith_2). */
-const ownId = (x: NewItem) => x.source !== x.meta.file && ![x.docId.trim(), unsuffixed(x.docId.trim())].some((id) => madeUpId({ ...x, docId: id }));
+ *  after its file), and not made up, also before a suffix adding gave it (John Smith_2). Only a stored text can carry
+ *  such a suffix, and only when its unsuffixed ID is stored too (`storedIds`): a row's ID is as the table gives it, so
+ *  art1_5 (paragraph 5 of file art1) is its own ID, not art1 with a suffix. */
+const ownId = (x: NewItem, storedIds?: Set<string>) => {
+  const id = x.docId.trim();
+  const u = unsuffixed(id);
+  const forms = storedIds && u !== id && storedIds.has(u) ? [id, u] : [id];
+  return x.source !== x.meta.file && !forms.some((f) => madeUpId({ ...x, docId: f }));
+};
 
 /**
  * Which rows of an addition are added (`kept`) and which are skipped: already here under their name (`already`) or
@@ -58,7 +65,8 @@ export function sortAddition<T extends NewItem>(
   }
   // A row with an ID of its own is another row than a stored one with another ID of its own, also under the same file
   // name (two paragraphs of one file reading “Notes”, the second added with the extended table): judged by its ID.
-  const otherRow = (it: T, d: Doc) => ownId(it) && ownId(d) && d.docId.trim() !== it.docId.trim() && unsuffixed(d.docId.trim()) !== it.docId.trim();
+  const storedIds = new Set(stored.map((d) => d.docId.trim()));
+  const otherRow = (it: T, d: Doc) => ownId(it) && ownId(d, storedIds) && d.docId.trim() !== it.docId.trim() && unsuffixed(d.docId.trim()) !== it.docId.trim();
   // A row whose ID was made up (`madeUpId`) is already here also when a stored text without a file has its text and
   // the same value in each of its columns (columns added since, e.g. labels or a sample, aside), whatever ID it gets
   // this time: the automatic ID may move to another column, or numbered rows shift when a row is inserted. (A cell a

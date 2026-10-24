@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { codebookField, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
+import { codebookField, comparableFields, fieldValue, labelScale, type ComparableField } from '../lib/compare';
 import { labelValue, namedField } from '../lib/export/tables';
 import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
 import { fieldLabel, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
@@ -140,7 +140,8 @@ export function compareRows(key: string, col: string, docs: Doc[], views: Map<st
       const p = v.run.snapshot.prompt;
       const variable = p.outputMode === 'structured' ? p.variables.find((x) => x.name === key && x.type !== 'text') : undefined;
       const read = variable ? codebookField(p, variable) : p.outputMode === 'structured' ? undefined : comparableFields(v.run, views.values()).find((f) => f.key === key);
-      rules.set(v.run.id, (rule = { field: variable ?? read, read, pairs: [], rows: [] }));
+      // (Plain-text 0/1 scores on a scale grown from 0…1, as the panel compares them with a column: `labelScale`.)
+      rules.set(v.run.id, (rule = { field: variable ?? (read && labelScale(read)), read, pairs: [], rows: [] }));
     }
     const value = normalizeLabel(key === TEXT_RESPONSE_KEY ? (v.values[key] ?? '') : fieldValue(v.run, v.values, key), !!rule.read?.yesNo);
     // A label: a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
@@ -227,6 +228,7 @@ function TextsAndResults() {
   const results = useStore((s) => s.results);
   const job = useStore((s) => s.job);
   const submitting = useStore((s) => s.submitting);
+  const deletingWhat = useStore((s) => s.deletingWhat);
   const keys = useStore((s) => s.keys);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
@@ -418,11 +420,11 @@ function TextsAndResults() {
   };
 
   const testDoc = docs.find((d) => selected.has(d.id)) ?? docs[0];
-  const busy = !!job || !!submitting;
+  const busy = !!job || !!submitting || !!deletingWhat;
   // The progress of a run and its Cancel button, shown whatever else is on the page.
   const progress = (
     <>
-      {submitting && !job && <div className="progress-label">{submitting}</div>}
+      {(submitting || deletingWhat) && !job && <div className="progress-label">{submitting || deletingWhat}</div>}
       {job && (
         <div>
           <div className="progress">

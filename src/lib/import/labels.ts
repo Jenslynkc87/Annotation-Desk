@@ -306,11 +306,15 @@ export function resultsTable(
   // than one here. (Not the texts' metadata renamed beside a field of its name, meta_tone, nor the exports' own ID
   // column, doc_id, when the sheet is matched by its file column. Nor on a sheet with a run's explanations here word
   // for word: that run's export, whose other columns are the owner's, e.g. tone_jk put beside tone.)
-  const before = new Set(
-    own && !copied.some(isWordy)
-      ? table.columns.slice(0, Math.max(0, table.columns.indexOf('n_ok'))).filter((c) => c !== 'doc_id' && !own.includes(c) && !c.startsWith('meta_'))
-      : [],
-  );
+  // (Nor on a sheet shown to be the export of a run here, every field of it copied from that run: its other columns
+  // are the owner's too.) The long layout (By replicate, results_long.csv, results_by_replicate.csv) has no n_ok: its
+  // run's fields sit between status and the first of rationale, reasoning_summary, parse_error and error.
+  const colOf = (f: string) => (cols.includes(f) ? f : `answer_${f}`);
+  const runExport = fieldSets.some(([id, fs]) => fs.length > 0 && fs.every((f) => copied.includes(colOf(f)) && (isWordy(colOf(f)) || sameAs[colOf(f)]?.run === id)));
+  const at = (c: string) => table.columns.indexOf(c);
+  const ends = ['rationale', 'reasoning_summary', 'parse_error', 'error'].map(at).filter((i) => i > at('status') && at('status') >= 0);
+  const span = at('n_ok') >= 0 ? table.columns.slice(0, at('n_ok')) : ends.length ? table.columns.slice(at('status') + 1, Math.min(...ends)) : [];
+  const before = new Set(own && !copied.some(isWordy) && !runExport ? span.filter((c) => c !== 'doc_id' && !own.includes(c) && !c.startsWith('meta_')) : []);
   const unknown = cols.filter(
     (c) => !columns.includes(c) && !names.has(c) && !agreement.has(c) && (!complete || shaped(c) || before.has(c)) && !label(c) && !ownNote(c),
   );

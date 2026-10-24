@@ -126,6 +126,14 @@ const numericCodebook = (f: ComparableField) => !f.scaleSeen && f.allowed.length
 export const zeroOneScores = (f: ComparableField) => !!f.scaleSeen && (f.zeroOne ?? (!!f.range && f.range[0] >= 0 && f.range[1] <= 1));
 /** No and yes as 0 and 1: plain-text scores of 0 and 1 (`zeroOneScores`), or a codebook whose values are exactly 0 and 1. */
 export const zeroOneValues = (f: ComparableField) => zeroOneScores(f) || (!f.scaleSeen && sameSet(f.allowed, ['0', '1']));
+/**
+ * Plain-text scores of 0 and 1 (`zeroOneScores`) as compared with label columns: their scale grows from 0…1 rather
+ * than from the range of the answers, so a far code the model used (9 for can't tell) is left out and reported, as
+ * against a Yes/no run, while labels within 3 points (a −3…3 field that is mostly 0 or 1) are kept as before.
+ */
+export const labelScale = (f: ComparableField): ComparableField =>
+  zeroOneScores(f) ? { ...f, range: [0, 1], allowed: f.level === 'ordinal' ? ['0', '1'] : f.allowed } : f;
+
 /** A yes/no field, in words (`yesNo`: a Yes/no field, or categories yes and no) or in numbers (`zeroOneValues`). */
 export const dichotomy = (f: ComparableField) => f.yesNo || zeroOneValues(f);
 
