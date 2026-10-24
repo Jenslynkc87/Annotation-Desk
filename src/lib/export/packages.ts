@@ -29,6 +29,7 @@ import {
   runTag,
   sharesNumber,
   toCsvBlob,
+  type AgreementRow,
   type Row,
 } from './tables';
 
@@ -41,6 +42,45 @@ export interface ExportData {
 
 /** The runs in the order they were made, so runs that share a number keep their order (and the latest is the last made) in every copy of the study. */
 const inRunOrder = (d: ExportData): ExportData => ({ ...d, runs: [...d.runs].sort(runOrder) });
+
+/**
+ * The agreement rows of some runs of a study (`agreementForRun`), in their order. Computed here by default; the Export
+ * tab passes one that computes them in a worker, so the page stays responsive (their bootstrap intervals take minutes
+ * on wide numeric scales, e.g. years or counts). The figures are the same either way (fixed seed).
+ */
+export type AgreementFor = (d: ExportData, runs: Run[]) => Promise<AgreementRow[][]>;
+export const agreementHere: AgreementFor = async (d, runs) => runs.map((r) => agreementForRun(r, d.docs, d.runs, d.results, d.study));
+
+/**
+ * A study as agreement needs it, for a worker (which gets a copy): without the texts, nor the answers' raw text,
+ * rationale and reasoning summary, which agreement doesn't read (at full corpus they would double what is copied).
+ */
+export const agreementData = (d: ExportData): ExportData => ({
+  ...d,
+  docs: d.docs.map((x) => ({ ...x, text: '' })),
+  results: d.results.map((r) => ({ ...r, rawText: '', rationale: '', reasoningSummary: '' })),
+});
+
+/** Told each step as it starts (e.g. "Writing corpus/corpus.csv"); a promise it returns is awaited before the step. */
+export type OnProgress = (step: string) => void | Promise<void>;
+
+/**
+ * Starts computing the agreement rows (in a worker they are computed while other files are made), and returns how to
+ * get them: saying "Computing agreement" first if they aren't ready.
+ */
+function startAgreement(d: ExportData, runs: Run[], agreementFor: AgreementFor = agreementHere, onProgress?: OnProgress) {
+  let ready = false;
+  const rows = agreementFor(d, runs).finally(() => (ready = true));
+  // (Awaited below; this only keeps a failure before then from being reported as unhandled.)
+  rows.catch(() => {});
+  return async () => {
+    if (!ready) await onProgress?.('Computing agreement');
+    return rows;
+  };
+}
+
+/** A zip's `onFile` as progress: the path within the package (without its top folder). */
+const writing = (onProgress?: OnProgress) => onProgress && ((path: string) => onProgress(`Writing ${path.slice(path.indexOf('/') + 1)}`));
 
 const MAX32 = 0xffffffff;
 /** Deflate level: about as fast as the lowest (a full corpus's logs are gigabytes), and nearly as small as the default. */
@@ -56,10 +96,13 @@ interface ZipEntry {
   offset: number;
 }
 
+/** A file's contents, or a function that makes them (called once the file has been announced, see `ZipWriter`). */
+export type ZipData = string | Blob | (() => string | Blob | Promise<string | Blob>);
+
 /** A folder of a zip being written: files and folders go in, in that order. */
 export interface ZipFolder {
   folder(name: string): ZipFolder;
-  file(name: string, data: string | Blob): Promise<void>;
+  file(name: string, data: ZipData): Promise<void>;
 }
 
 const set64 = (v: DataView, at: number, x: number) => {
@@ -83,10 +126,13 @@ export class ZipWriter {
   private time: number;
   private date: number;
 
-  /** `onFile`: told each file's path as it starts (a full corpus takes many minutes, so the page shows what it is on). */
+  /**
+   * `onFile`: told each file's path as it starts, before its contents are made (a full corpus takes many minutes, so
+   * the page shows what it is on); a promise it returns is awaited first (e.g. until the page shows the path).
+   */
   constructor(
     private level: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 = ZIP_LEVEL,
-    private onFile?: (path: string) => void,
+    private onFile?: (path: string) => void | Promise<void>,
   ) {
     // Local time, as zip tools show it.
     const d = new Date();
@@ -107,12 +153,17 @@ export class ZipWriter {
     this.add(path + '/', true, 0, 0, 0, []);
   }
 
-  /** One file, compressed as it is read; the next may only start once this one is written. */
-  async file(path: string, data: string | Blob): Promise<void> {
+  /**
+   * One file, compressed as it is read; the next may only start once this one is written. `data` may be a function
+   * that makes the contents: it is called once the file has been announced (`onFile`), so the page names the file
+   * being made, not the one before.
+   */
+  async file(path: string, data: ZipData): Promise<void> {
     if (this.busy) throw new Error('A zip file is written one file at a time.');
     this.busy = true;
     try {
-      this.onFile?.(path);
+      await this.onFile?.(path);
+      if (typeof data === 'function') data = await data();
       this.dir(path.slice(0, Math.max(0, path.lastIndexOf('/'))));
       const out: Blob[] = [];
       let pending: Uint8Array<ArrayBuffer>[] = [];
@@ -300,17 +351,24 @@ function sheetName(wb: Workbook, wanted: string): string {
   return name;
 }
 
-export async function buildExcel(data: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {
+export async function buildExcel(
+  data: ExportData,
+  run: Run,
+  opts: { text: boolean; rationale: boolean; agreement?: AgreementFor; onProgress?: OnProgress },
+): Promise<Blob> {
   const d = inRunOrder(data);
+  const agreement = startAgreement(d, [run], opts.agreement, opts.onProgress);
+  await opts.onProgress?.('Writing the sheets');
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const add = (name: string, rows: Row[]) => addSheet(wb, name, rows);
   add('Results', dropRedundantId(resultsWide(run, d.docs, d.runs, d.results, opts)));
   add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }, d.runs));
-  const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
+  const [agr] = await agreement();
   if (agr.length) add('Agreement', agreementRows(agr, runName(run, d.runs)));
   add('Settings', settingsRows(d.study, run, d.runs));
   add('All runs', runSummaryRows(d.runs, d.results));
+  await opts.onProgress?.('Writing the file');
   const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
@@ -416,18 +474,21 @@ async function addRunLogs(zip: ZipFolder, run: Run, docs: Doc[], results: Result
     });
     pending = [];
   };
-  for await (const page of logPagesForRun(run.id)) {
-    for (const l of page) {
-      const x = parse(l);
-      if (pending.length && pending[0].doc !== x.doc) flush();
-      pending.push(x);
+  // (Read once requests.jsonl has been announced: at full corpus this takes a while.)
+  await zip.file('requests.jsonl', async () => {
+    for await (const page of logPagesForRun(run.id)) {
+      for (const l of page) {
+        const x = parse(l);
+        if (pending.length && pending[0].doc !== x.doc) flush();
+        pending.push(x);
+      }
     }
-  }
-  flush();
-  // Texts deleted from the study since: last.
-  const at = (doc: string) => position.get(doc) ?? docs.length;
-  parts.sort((p, q) => at(p.doc) - at(q.doc));
-  await zip.file('requests.jsonl', new Blob(parts.map((p) => p.requests), { type: 'application/jsonl' }));
+    flush();
+    // Texts deleted from the study since: last.
+    const at = (doc: string) => position.get(doc) ?? docs.length;
+    parts.sort((p, q) => at(p.doc) - at(q.doc));
+    return new Blob(parts.map((p) => p.requests), { type: 'application/jsonl' });
+  });
   await zip.file('responses.jsonl', new Blob(parts.map((p) => p.responses), { type: 'application/jsonl' }));
 }
 
@@ -476,31 +537,33 @@ async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: s
 
 export interface ResearchOptions {
   includeLogs: boolean;
-  /** Told the path of each file as it is written. */
-  onProgress?: (path: string) => void;
+  /** Told each step as it starts: the path of each file before it is made, or "Computing agreement". */
+  onProgress?: OnProgress;
+  /** How the agreement figures are computed (by default here). */
+  agreement?: AgreementFor;
 }
 
 export async function buildResearchRepo(data: ExportData, opts: ResearchOptions): Promise<{ blob: Blob; name: string }> {
   const d = inRunOrder(data);
   const exportedAt = nowIso();
   const name = `${slug(d.study.name)}_research_${dateStamp()}`;
-  const zip = new ZipWriter(ZIP_LEVEL, opts.onProgress);
+  const zip = new ZipWriter(ZIP_LEVEL, writing(opts.onProgress));
   const root = zip.folder(name);
   // (The latest: the run with results made last.)
   const finished = d.runs.filter((r) => d.results.some((x) => x.runId === r.id));
+  const agreement = startAgreement(d, d.runs, opts.agreement, opts.onProgress);
 
   await root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
   // Without the request/response logs: they are under runs/ already, and each holds the full text again. (Export →
   // Study backup has them.) The results as stored, read from the database.
-  await root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, false));
+  await root.file('study-backup.json', () => buildBackup(d.study, d.docs, d.runs, false));
   const corpus = root.folder('corpus');
-  await corpus.file('corpus.csv', toCsvBlob(corpusRows(d.docs, true)));
-  await corpus.file('corpus.jsonl', jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
+  await corpus.file('corpus.csv', () => toCsvBlob(corpusRows(d.docs, true)));
+  await corpus.file('corpus.jsonl', () => jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
 
   const results = root.folder('results');
-  await results.file('runs.csv', toCsvBlob(runSummaryRows(d.runs, d.results)));
-  await results.file('results_all_runs_long.csv', toCsvBlob(resultsLong(d.study, d.runs, d.docs, d.results, { rationale: true, reasoning: true })));
-  const agr: Row[] = [];
+  await results.file('runs.csv', () => toCsvBlob(runSummaryRows(d.runs, d.results)));
+  await results.file('results_all_runs_long.csv', () => toCsvBlob(resultsLong(d.study, d.runs, d.docs, d.results, { rationale: true, reasoning: true })));
 
   // One folder per prompt version.
   const prompts = root.folder('prompts');
@@ -517,19 +580,22 @@ export async function buildResearchRepo(data: ExportData, opts: ResearchOptions)
     const f = runsDir.folder(folders.get(run.id)!);
     await f.file('run.json', JSON.stringify(run, null, 2));
     const rs = d.results.filter((r) => r.runId === run.id);
-    await f.file('results_long.csv', toCsvBlob(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
-    await f.file('results_wide.csv', toCsvBlob(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
+    await f.file('results_long.csv', () => toCsvBlob(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
+    await f.file('results_wide.csv', () => toCsvBlob(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
     if (opts.includeLogs) await addRunLogs(f, run, d.docs, d.results);
-    agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results, d.study), runName(run, d.runs)));
   }
-  if (agr.length) await results.file('agreement.csv', toCsvBlob(agr));
+  const perRun = await agreement();
+  const agr = d.runs.flatMap((run, i) => agreementRows(perRun[i], runName(run, d.runs)));
+  if (agr.length) await results.file('agreement.csv', () => toCsvBlob(agr));
 
   const latest = finished[finished.length - 1];
   if (latest) {
-    await results.file(`results_${folders.get(latest.id)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
+    // (The latest run's agreement as computed above, not again.)
+    const own = perRun[d.runs.indexOf(latest)];
+    await results.file(`results_${folders.get(latest.id)}.xlsx`, () => buildExcel(d, latest, { text: false, rationale: true, agreement: async () => [own] }));
     await scriptFiles(root.folder('scripts'), d.study, latest, exportedAt, d.runs);
   }
-  await root.file('README.md', researchReadme(d, exportedAt, latest, folders, opts));
+  await root.file('README.md', () => researchReadme(d, exportedAt, latest, folders, opts));
   return { blob: zip.blob(), name: `${name}.zip` };
 }
 
@@ -537,16 +603,19 @@ export interface SupplementaryOptions {
   includeTexts: boolean;
   includeRationales: boolean;
   includeLogs: boolean;
-  /** Told the path of each file as it is written. */
-  onProgress?: (path: string) => void;
+  /** Told each step as it starts: the path of each file before it is made, or "Computing agreement". */
+  onProgress?: OnProgress;
+  /** How the agreement figures are computed (by default here). */
+  agreement?: AgreementFor;
 }
 
 export async function buildSupplementary(data: ExportData, run: Run, opts: SupplementaryOptions): Promise<{ blob: Blob; name: string }> {
   const d = inRunOrder(data);
   const exportedAt = nowIso();
   const name = `${slug(d.study.name)}_supplementary_${dateStamp()}`;
-  const zip = new ZipWriter(ZIP_LEVEL, opts.onProgress);
+  const zip = new ZipWriter(ZIP_LEVEL, writing(opts.onProgress));
   const root = zip.folder(name);
+  const agreement = startAgreement(d, [run], opts.agreement, opts.onProgress);
   const rs = d.results.filter((r) => r.runId === run.id);
   const runDocs = d.docs.filter((x) => rs.some((r) => r.docId === x.id));
 
@@ -554,15 +623,15 @@ export async function buildSupplementary(data: ExportData, run: Run, opts: Suppl
   await root.file('metadata.json', JSON.stringify(meta, null, 2));
   await promptFiles(root.folder('prompt'), run);
   const res = root.folder('results');
-  await res.file('results.csv', toCsvBlob(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
-  await res.file('results_by_replicate.csv', toCsvBlob(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
+  await res.file('results.csv', () => toCsvBlob(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
+  await res.file('results_by_replicate.csv', () => toCsvBlob(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
-  const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
-  if (agr.length) await res.file('agreement.csv', toCsvBlob(agreementRows(agr, runName(run, d.runs))));
-  if (opts.includeTexts) await root.folder('data').file('corpus.csv', toCsvBlob(corpusRows(runDocs, true)));
+  const [agr] = await agreement();
+  if (agr.length) await res.file('agreement.csv', () => toCsvBlob(agreementRows(agr, runName(run, d.runs))));
+  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlob(corpusRows(runDocs, true)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
   await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
-  await root.file('README.md', supplementaryReadme(d, run, meta, agr, opts));
+  await root.file('README.md', () => supplementaryReadme(d, run, meta, agr, opts));
   return { blob: zip.blob(), name: `${name}.zip` };
 }
 
@@ -618,7 +687,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     study_notes: d.study.description.trim() || null,
     run: {
       number: run.number,
-      // As the tables and README name it ("5-20261022-221754" for runs that share a number), and its id.
+      // As the tables and README name it ("5-20261022-221754Z" for runs that share a number), and its id.
       name: String(runName(run, d.runs)),
       id: run.id,
       label: run.label,
@@ -767,12 +836,27 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   const retriedAs =
     run.mode !== 'batch' ? '' : retry.asBatch === 'all' ? ' in a new batch' : retry.asBatch === 'none' ? ' as individual requests' : ', individually or in a new batch';
   const howMany = !retry.lowerBound && !retry.interrupted ? `${n(k)} request${k === 1 ? '' : 's'}` : k ? `At least ${n(k)} request${k === 1 ? '' : 's'}` : 'Requests';
-  const planned = `the app version used for the run recorded only the number planned for the ${retry.legacy === 1 ? 'retry' : 'retries'} made with it, ${n(retry.planned)}`;
+  // Each retry's count by its kind: from the stored answers (a version that recorded only the number planned), or the
+  // number recorded (an Oct 18–20 batch retry, whose answers are dated at the run's start).
+  const nu = retry.undated;
+  const which = nu ? (retry.legacy === 1 ? 'one of the retries' : `${n(retry.legacy)} of the retries`) : retry.legacy === 1 ? 'the retry' : 'the retries';
+  const planned = `the app version used for the run recorded only the number planned for ${which} made with it, ${n(retry.planned)}`;
+  const them = retry.legacy === 1 ? 'it' : 'them';
+  const undated = nu
+    ? `${nu === 1 ? 'another retry is counted as the number it recorded' : `${n(nu)} other retries are counted as the numbers they recorded`}, ${n(retry.undatedRequests)}, since that version dated ${nu === 1 ? 'its' : 'their'} answers at the run’s start`
+    : '';
   const u = retry.unanswered;
   const [ni, ns] = [retry.retriesInterrupted, retry.retriesStopped];
   // One parenthesis for every note, joined by semicolons.
   const notes = [
-    retry.lowerBound ? (k ? `counted from the stored answers: ${planned}` : `how many is not known: ${planned}, and no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'}`) : '',
+    retry.lowerBound
+      ? retry.legacySent
+        ? `counted from the stored answers: ${planned}`
+        : k
+          ? `${planned}, and no stored answer dates from ${them}, so none of ${retry.legacy === 1 ? 'its' : 'their'} requests are counted`
+          : `how many is not known: ${planned}, and no stored answer dates from ${them}`
+      : '',
+    retry.lowerBound ? undated : '',
     ni ? `${ni === 1 ? 'a retry was' : `${n(ni)} retries were`} interrupted by the page closing: requests under way then got no recorded answer and are not counted` : '',
     // (Cancel, or a result that could not be saved: sent, so counted, but with no answer.)
     u

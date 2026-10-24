@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
-import { allocationNote, drawStratifiedSample, heldValue, orderStrata, SAMPLING_METHOD, takenNote } from '../lib/sample';
-import { currentStudy, markSample, sampleNotePrefix, useStore } from '../lib/store';
+import { dependentSamples, drawStratifiedSample, heldValue, orderStrata, sampleNote, takenNote } from '../lib/sample';
+import { currentStudy, markSample, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import { Modal, NumberField } from './ui';
 
@@ -8,6 +8,8 @@ import { Modal, NumberField } from './ui';
 export function SampleDialog({ onClose }: { onClose: () => void }) {
   const docs = useStore((s) => s.docs);
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
+  // The study notes: each sample's recorded draw, named by a later draw that leaves its texts out.
+  const notes = useStore((s) => currentStudy(s)?.description ?? '');
   const columns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const valuesOf = (c: string) => [...new Set(docs.map((d) => d.meta[c] ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   // Columns that group texts (era, journal, …): a few distinct values, not one per text. Listed (and the ticked
@@ -33,7 +35,12 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const takenCount = r.taken.reduce((n, t) => n + t.n, 0);
   const chosen = new Set(r.ids);
   const emptyGroups = r.strata.filter((s) => s.drawn === 0).length;
-  const already = docs.filter((d) => d.meta[column.trim()] === value.trim()).length;
+  const markedNow = new Set(docs.filter((d) => d.meta[column.trim()] === value.trim()).map((d) => d.id));
+  const already = markedNow.size;
+  // A redraw: how many of the texts marked now it keeps (the same seed gives other texts when the eligible texts
+  // differ from those of the recorded draw), and the later draws that left those texts out.
+  const keeps = r.ids.filter((id) => markedNow.has(id)).length;
+  const dependents = already && markedAs ? dependentSamples(notes, markedAs.column, markedAs.value, w) : [];
   // File types (e.g. .md and .txt) in the sample versus the eligible texts, to check the mix is similar.
   const types = useMemo(() => {
     const ext = (f: string | undefined) => (f?.includes('.') ? f.slice(f.lastIndexOf('.') + 1).toLowerCase() : '');
@@ -52,13 +59,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const apply = async () => {
     const [col, val] = [column.trim(), value.trim()];
     const date = new Date().toISOString().slice(0, 10);
-    // Starts with sampleNotePrefix, so a redraw for the same column = value replaces this note.
-    const note =
-      `${sampleNotePrefix(col, val)}${date}): ${r.ids.length} of ${r.eligible} ${w.many} drawn at random` +
-      (strata.length ? ` within ${strata.join(' × ')} strata (${allocationNote(r, w.one)})` : '') +
-      (exclude ? `, excluding ${exclude.column} = ${exclude.value}` : '') +
-      (r.taken.length ? `, ${takenNote(r, col, w)}` : '') +
-      `; seed ${seed} (${SAMPLING_METHOD}).`;
+    const note = sampleNote({ column: col, value: val, date, strata, exclude, seed }, r, w, notes);
     setMarking(true);
     const ok = await markSample(col, val, r.ids, note, seed).finally(() => setMarking(false));
     if (ok) onClose();
@@ -83,7 +84,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
         {emptyGroups
           ? ` (${emptyGroups} of ${r.strata.length} groups get${emptyGroups === 1 ? 's' : ''} no ${w.one}, as the sample is smaller than the number of groups)`
           : ', with at least one per group'}
-        . The same seed always gives the same sample;
+        . The same seed gives the same sample from the same eligible {w.many};
         the rule and seed are saved with the study. Afterwards, filter the list by {column} = {value}, choose Select → all shown, and run the
         selection.
       </p>
@@ -151,11 +152,22 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
         </div>
         {takenCount > 0 && (
           <div>
-            Leaves out {takenNote(r, column.trim(), w).replace(/^not from /, '')}, so the samples don’t overlap. To draw from {takenCount === 1 ? 'it' : 'them'} as well,
+            Leaves out {takenNote(r, column.trim(), w, notes).replace(/^not from /, '')}, so the samples don’t overlap. To draw from {takenCount === 1 ? 'it' : 'them'} as well,
             mark this sample in another column.
           </div>
         )}
-        {already > 0 && <div>Replaces the {already} {already === 1 ? w.one : w.many} currently marked {column} = {value}.</div>}
+        {already > 0 && (
+          <div>
+            Replaces the {already} {already === 1 ? w.one : w.many} currently marked {column} = {value} (this draw keeps {keeps === already ? (already === 1 ? 'it' : 'all of them') : `${keeps} of them`}).
+          </div>
+        )}
+        {dependents.length > 0 && (
+          <div>
+            The draw{dependents.length === 1 ? '' : 's'} of {dependents.join(' and ')} left out the {w.many} now marked {column} = {value}. So that{' '}
+            {dependents.length === 1 ? 'it' : 'they'} can still be reproduced, the note of the draw that marked them stays in the study notes, marked as
+            replaced.
+          </div>
+        )}
       </div>
       {strata.length > 0 && (
         <div className="table-wrap" style={{ maxHeight: 240, marginTop: 10 }}>

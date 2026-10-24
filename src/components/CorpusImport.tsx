@@ -13,10 +13,10 @@ import {
 } from '../lib/import/parse';
 import { clearPlan, guessKeyColumn, matchLabels, ownLikeColumn, resultsTable } from '../lib/import/labels';
 import { templatePlaceholders } from '../lib/prompt';
-import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
+import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, sortAddition, toast, useStore } from '../lib/store';
 import { isEntries, words } from '../lib/subject';
 import { runName } from '../lib/view';
-import type { PromptSpec, Run } from '../lib/types';
+import type { Doc, PromptSpec, Run } from '../lib/types';
 import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
 
@@ -319,6 +319,36 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
   );
 }
 
+/**
+ * A table's rows as Import adds them (`items`) and what adding them to the study's texts (`stored`) leaves out
+ * (`plan`: rows already in the study, or the same as another row in every column, which are added once), so that the
+ * dialog counts what is added (`nAdded`), and IDs that more than one added row has (`repeated`, which get _2, _3 …).
+ */
+export function tableAddition(
+  table: ParsedTable,
+  o: { entry: boolean; shown: string[]; textCol: string; idCol: string; skipEmpty: boolean },
+  stored: Doc[],
+) {
+  const { entry, shown, textCol, idCol } = o;
+  const textOf = (r: Record<string, string>) => (entry ? describeRow(r, shown) : String(r[textCol] ?? ''));
+  // (Entries with no column ticked yet: count every row, the button waits for a column.)
+  const rows = o.skipEmpty && (!entry || shown.length) ? table.rows.filter((r) => textOf(r).trim()) : table.rows;
+  // For entries every column is also kept as metadata (filters, samples, comparisons).
+  const metaCols = table.columns.filter((c) => c !== idCol && (entry || c !== textCol));
+  // Entries without an ID column: the first ticked column with a different value in each row (e.g. the title, not
+  // the author), so that answers in a spreadsheet can be matched to the entries later.
+  const unique = (c: string) => new Set(rows.map((r) => String(r[c] ?? '').trim())).size === rows.length;
+  const autoId = entry && !idCol ? (shown.find(unique) ?? shown[0] ?? '') : '';
+  const base = baseName(table.name);
+  const idOf = (r: Record<string, string>, i: number) => String(r[idCol || autoId] ?? '').trim() || `${base}_${i + 1}`;
+  const items: NewDoc[] = rows.map((r, i) => ({ docId: idOf(r, i), text: textOf(r), meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])), source: table.name }));
+  const plan = sortAddition(items, stored);
+  const nAdded = entry && !shown.length ? rows.length : plan.kept.length;
+  const seen = new Set<string>();
+  const repeated = plan.kept.map((it) => it.docId).filter((x) => seen.has(x) || (seen.add(x), false));
+  return { rows, metaCols, autoId, items, plan, nAdded, repeated };
+}
+
 function TableDialog({
   entries,
   table,
@@ -340,35 +370,19 @@ function TableDialog({
   const [shown, setShown] = useState<string[]>(() => (table.columns.length === 1 ? [...table.columns] : []));
   // In a model-knowledge study each row is an entry, described by the columns the model sees.
   const entry = entries;
-  const textOf = (r: Record<string, string>) => (entry ? describeRow(r, shown) : String(r[textCol] ?? ''));
-  // (Entries with no column ticked yet: count every row, the button waits for a column.)
-  const rows = skipEmpty && (!entry || shown.length) ? table.rows.filter((r) => textOf(r).trim()) : table.rows;
-  // For entries every column is also kept as metadata (filters, samples, comparisons).
-  const metaCols = table.columns.filter((c) => c !== idCol && (entry || c !== textCol));
-  // Entries without an ID column: the first ticked column with a different value in each row (e.g. the title, not
-  // the author), so that answers in a spreadsheet can be matched to the entries later.
-  const unique = (c: string) => new Set(rows.map((r) => String(r[c] ?? '').trim())).size === rows.length;
-  const autoId = entry && !idCol ? (shown.find(unique) ?? shown[0] ?? '') : '';
-  const base = baseName(table.name);
-  const idOf = (r: Record<string, string>, i: number) => String(r[idCol || autoId] ?? '').trim() || `${base}_${i + 1}`;
-  const ids = rows.map(idOf);
-  const seen = new Set<string>();
-  const repeated = ids.filter((x) => seen.has(x) || (seen.add(x), false));
+  // (Worked out again only when a choice changes: a corpus table can be big.)
+  const { rows, metaCols, autoId, items, plan, nAdded, repeated } = useMemo(
+    () => tableAddition(table, { entry, shown, textCol, idCol, skipEmpty }, docs),
+    [table, entry, shown, textCol, idCol, skipEmpty, docs],
+  );
+  const left = { twice: plan.twice.length, here: plan.already + plan.elsewhere.length };
   const [adding, once] = useOnce();
   const justShown = useJustShown();
   const add = () =>
     !justShown() &&
     once(async () => {
-      const docs = rows.map((r, i) => {
-        return {
-          docId: ids[i],
-          text: textOf(r),
-          meta: Object.fromEntries(metaCols.map((c) => [c, String(r[c] ?? '')])),
-          source: table.name,
-        };
-      });
       // (Not saved, e.g. storage full: the dialog stays open, so the table isn't lost from the queue.)
-      if (await addDocs(docs)) onDone(table);
+      if (await addDocs(items)) onDone(table);
     });
   // While the rows are being saved, closing wouldn't stop it: Cancel waits.
   const close = () => !adding && onDone(table);
@@ -379,8 +393,8 @@ function TableDialog({
       footer={
         <>
           <button className="btn" onClick={close} disabled={adding}>Cancel</button>
-          <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !rows.length || adding} onClick={add}>
-            {adding ? 'Importing…' : `Import ${rows.length.toLocaleString()} ${entry ? 'entries' : 'texts'}`}
+          <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !nAdded || adding} onClick={add}>
+            {adding ? 'Importing…' : `Import ${nAdded.toLocaleString()} ${entry ? (nAdded === 1 ? 'entry' : 'entries') : nAdded === 1 ? 'text' : 'texts'}`}
           </button>
         </>
       }
@@ -397,8 +411,25 @@ function TableDialog({
       {repeated.length > 0 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
           {repeated.length.toLocaleString()} {entry ? (repeated.length === 1 ? 'entry has' : 'entries have') : repeated.length === 1 ? 'text has' : 'texts have'} the same ID as another
-          (e.g. “{repeated[0]}”) and will get _2, _3 and so on (a row the same as another in every column is added once). Choose an ID column with a different value in each row, so that labels or answers in a spreadsheet can be
+          (e.g. “{repeated[0]}”) and will get _2, _3 and so on. Choose an ID column with a different value in each row, so that labels or answers in a spreadsheet can be
           matched to them later.
+        </div>
+      )}
+      {(entry ? shown.length > 0 : !!textCol) && (left.twice > 0 || left.here > 0) && (
+        <div className="notice" style={{ marginBottom: 12 }}>
+          {nAdded.toLocaleString()} of the {rows.length.toLocaleString()} rows will be added:{' '}
+          {left.twice > 0 && (
+            <>
+              {left.twice.toLocaleString()} {left.twice === 1 ? 'is' : 'are'} the same as another row in every column (e.g. “{plan.twice[0]}”), so {left.twice === 1 ? 'it is' : 'they are'} left out
+            </>
+          )}
+          {left.twice > 0 && left.here > 0 && ', and '}
+          {left.here > 0 && (
+            <>
+              {left.here.toLocaleString()} {left.here === 1 ? 'is' : 'are'} already in this study
+            </>
+          )}
+          .
         </div>
       )}
       {table.problems?.map((p) => (
@@ -452,7 +483,7 @@ function TableDialog({
               <p className="section-title" style={{ marginTop: 10 }}>
                 What the model gets for the first row (after your prompt)
               </p>
-              <pre className="textblock">{textOf(rows[0])}</pre>
+              <pre className="textblock">{items[0].text}</pre>
             </>
           )}
         </div>
@@ -510,7 +541,6 @@ function SheetNote({ table }: { table: ParsedTable }) {
 function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: ParsedTable; onDone: () => void }) {
   const docs = useStore((s) => s.docs);
   const runs = useStore((s) => s.runs);
-  const results = useStore((s) => s.results);
   const prompt = useStore((s) => currentStudy(s)!.prompt);
   const saved = useStore((s) => currentStudy(s)!.savedPrompts);
   const [keyCol, setKeyCol] = useState(() => guessKeyColumn(docs, table));
@@ -525,13 +555,15 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
   );
   // A results file exported from this app: its answer columns are the model's, not human labels (field names from the
   // runs and from the current and saved prompts, so also before a run or after one is deleted). Only the columns that
-  // would be added are judged, not the one rows are matched by (e.g. a survey's response_id).
+  // would be added are judged, not the one rows are matched by (e.g. a survey's response_id). The answers are read as
+  // they are when the sheet is checked, not at every flush of a run's results (each check reads the answers of every
+  // run, about a second in a big study): again when a run starts or ends.
   const exported = useMemo(
-    () => resultsTable(table, runs, results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)], keyCol),
-    [table, runs, results, m, prompt, saved, keyCol],
+    () => resultsTable(table, runs, getState().results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)], keyCol),
+    [table, runs, m, prompt, saved, keyCol],
   );
-  // Its other columns not yet in this study that may hold the answers of a field named differently now (never a label
-  // column such as tone_gold; none when the sheet has every field of a run or prompt here).
+  // Its other columns not yet in this study that may hold the model's answers (of a run not in this study, or a field
+  // named differently now; never a label column such as tone_gold), all named: they would count as labels.
   const others = exported.unknown.filter((c) => !m.replaced.includes(c));
   // Answer columns whose values were not shown to be the model's (e.g. a coder's own labels beside the model's
   // explanations): named as such, never as the model's.
@@ -663,7 +695,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
           {exported.answers.length === 0 ? (
             <>
               the run’s columns ({exported.columns.join(', ')}) and every column with the model’s answers
-              {others.length > 0 && <> (among {list(others)})</>}
+              {others.length > 0 && <> (among {others.join(', ')})</>}
             </>
           ) : (
             <>
@@ -674,7 +706,12 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
                   , and {unconfirmed.join(', ')} unless {unconfirmed.length === 1 ? 'it holds' : 'they hold'} your own {entries ? 'answers' : 'labels'}
                 </>
               )}
-              {others.length > 0 && <>, and any of its other columns ({list(others)}) that holds the model’s answers (e.g. of a field named differently now)</>}
+              {others.length > 0 && (
+                <>
+                  , and any of its other columns ({others.join(', ')}) that holds the model’s answers (e.g. of a run not in this study, or of a field named
+                  differently now)
+                </>
+              )}
             </>
           )}
           , then add it again.

@@ -76,6 +76,8 @@ const runById = (id: string) => store.getState().runs.find((r) => r.id === id)!;
 const toasts = () => store.getState().toasts.map((t) => t.text);
 const partIds = (r: Run) => store.batchParts(r).map((p) => p.batchId);
 const batchStudy = () => store.updateStudy((s) => void (s.options.batch = true));
+/** A later upload's time: never the same millisecond as the run's first upload (which would make it that one). */
+const laterUpload = () => new Date(Date.now() + 1000).toISOString();
 const openaiBatchStudy = () =>
   store.updateStudy((s) => {
     s.options.batch = true;
@@ -374,7 +376,7 @@ describe('deleting asks every question before cancelling anything (G33)', () => 
     const p = fakeBatches(anthropicAdapter);
     await store.startRun({ docIds: ids, scope: 'all' });
     const run = (await dbApi.getRun(lastRun().id))!;
-    await dbApi.putRun({ ...run, error: 'cut off', batch: { ...run.batch!, uploadUnknown: { since: new Date().toISOString(), requests: 2 } } });
+    await dbApi.putRun({ ...run, error: 'cut off', batch: { ...run.batch!, uploadUnknown: { since: laterUpload(), requests: 2 } } });
     await store.selectStudy(store.currentStudy()!.id);
     return p;
   }
@@ -697,7 +699,7 @@ describe('review of the fourth round', () => {
     await store.startRun({ docIds: ids.slice(0, 1), scope: 'one' });
     const runId = lastRun().id;
     const run = (await dbApi.getRun(runId))!;
-    await dbApi.putRun({ ...run, error: 'cut off', batch: { ...run.batch!, uploadUnknown: { since: new Date().toISOString(), requests: 2 } } });
+    await dbApi.putRun({ ...run, error: 'cut off', batch: { ...run.batch!, uploadUnknown: { since: laterUpload(), requests: 2 } } });
     p.made.push({ id: 'b2', items: [{ customId: 'x0', part: {} }, { customId: 'x1', part: {} }], at: new Date().toISOString(), done: false, cancelled: false });
     await store.selectStudy(store.currentStudy()!.id);
     // b2 is found and cancelled; b1 can't be cancelled, and the owner keeps the run.

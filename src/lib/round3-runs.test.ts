@@ -17,6 +17,10 @@ const apiError = (status: number, message: string, extra: Record<string, unknown
 const connectionError = () => new Error('Connection error.');
 const quotaError = () => Object.assign(new Error(''), { name: 'QuotaExceededError' });
 
+// (Every test adds a study to the same database, so later lookups read more runs: several tests take 2–4 s, which
+// came over the default 5 s when the whole suite ran at once.)
+vi.setConfig({ testTimeout: 30_000 });
+
 const confirms: string[] = [];
 let answer = true;
 beforeEach(() => {

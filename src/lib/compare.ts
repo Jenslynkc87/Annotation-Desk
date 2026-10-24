@@ -98,15 +98,25 @@ export function codebookField(p: PromptSpec, v: Variable): ComparableField {
 const isNumber = (s: string) => s.trim() !== '' && Number.isFinite(Number(s));
 /** A codebook scale of numbers: an ordinal scale, or category codes that are all numbers. */
 const numericCodebook = (f: ComparableField) => !f.scaleSeen && f.allowed.length > 0 && f.allowed.every(isNumber);
+/**
+ * Plain-text scores whose single answers all lie from 0 to 1 ("flag": 1): a yes/no in numbers (see `combineFields`,
+ * `labelValue`). Also with a stray answer between them (a 0.5), which alone would otherwise turn every 1 and 0 into a
+ * disagreement; such a value is then left out and reported.
+ */
+export const zeroOneScores = (f: ComparableField) => !!f.scaleSeen && !!f.range && f.range[0] >= 0 && f.range[1] <= 1;
 
 /**
  * The same field in two runs (e.g. in a comparison), so the result doesn't depend on which run comes first: the
  * values of both runs' scales (e.g. two codebooks, 0…3 and −3…3), and for plain-text scores, which have no
  * codebook, every whole number in the range seen in either run (and that range, from the lowest to the highest
- * answer of either run). A codebook of numbers and plain-text scores: the codebook's scale (see below).
+ * answer of either run). A codebook of numbers and plain-text scores: the codebook's scale (see below). A Yes/no
+ * field and plain-text scores of 0 and 1 ("flag": 1, `zeroOneScores`): the Yes/no field, so both runs are read with
+ * the yes/no rule (1 and 0 as yes and no) and compared.
  */
 export function combineFields(a: ComparableField, b: ComparableField | undefined): ComparableField {
   if (!b) return a;
+  const yesNo = a.yesNo ? a : b.yesNo ? b : null;
+  if (yesNo && (a.yesNo || zeroOneScores(a)) && (b.yesNo || zeroOneScores(b))) return yesNo;
   const level: ComparableField['level'] = a.level === b.level ? a.level : a.level === 'nominal' || b.level === 'nominal' ? 'nominal' : 'interval';
   const scaleSeen = !!a.scaleSeen && !!b.scaleSeen;
   const ranges = [a.range, b.range].filter((r): r is [number, number] => !!r);

@@ -177,11 +177,11 @@ describe('runs that share a number (H19)', () => {
     for (const run of [first, early, late]) for (const d of docs) await dbApi.putResult(mkResult(run, d, { stance: 'for' }), log(mkResult(run, d, { stance: 'for' })));
     const loaded = await dbApi.loadStudyData(study.id);
     const before = await research({ study, ...loaded });
-    expect(before.folders).toEqual(['runs/run-01/', 'runs/run-02-20261019-090000/', 'runs/run-02-second-tab-20261019-093000/']);
-    expect(before.runColumn).toEqual(['1', '2-20261019-090000', '2-20261019-093000']);
-    expect(before.xlsx).toEqual(['results/results_run-02-second-tab-20261019-093000.xlsx']);
+    expect(before.folders).toEqual(['runs/run-01/', 'runs/run-02-20261019-090000Z/', 'runs/run-02-second-tab-20261019-093000Z/']);
+    expect(before.runColumn).toEqual(['1', '2-20261019-090000Z', '2-20261019-093000Z']);
+    expect(before.xlsx).toEqual(['results/results_run-02-second-tab-20261019-093000Z.xlsx']);
     expect(before.script.join('\n')).toContain('claude-sonnet-5-5');
-    expect(before.readme).toContain('`results/results_run-02-second-tab-20261019-093000.xlsx` | Excel workbook for the latest run');
+    expect(before.readme).toContain('`results/results_run-02-second-tab-20261019-093000Z.xlsx` | Excel workbook for the latest run');
     expect(before.readme).toContain('ends in when it started (UTC;');
     // "Latest result per text": the run started last too.
     expect(buildDocViews(docs, loaded.runs, loaded.results, 'latest').get(docs[0].id)!.run!.id).toBe(late.id);
@@ -196,19 +196,19 @@ describe('runs that share a number (H19)', () => {
     expect(after.xlsx).toEqual(before.xlsx);
     expect(after.script).toEqual(before.script);
     const twins = moved.runs.filter((r) => r.number === 2);
-    expect(twins.map((r) => runName(r, moved.runs)).sort()).toEqual(['2-20261019-090000', '2-20261019-093000']);
+    expect(twins.map((r) => runName(r, moved.runs)).sort()).toEqual(['2-20261019-090000Z', '2-20261019-093000Z']);
   });
 
   it('two that started in the same second: to the millisecond (kept by a copy too); in the same millisecond, also the start of the id', () => {
     const a = { ...early, createdAt: '2026-10-19T09:00:00.100Z' };
     const b = { ...late, createdAt: '2026-10-19T09:00:00.900Z' };
     const c = { ...late, id: 'cccc0000-3333', createdAt: '2026-10-19T09:00:05.000Z' };
-    expect([a, b, c].map((r) => runName(r, [a, b, c]))).toEqual(['2-20261019-090000.100', '2-20261019-090000.900', '2-20261019-090005']);
+    expect([a, b, c].map((r) => runName(r, [a, b, c]))).toEqual(['2-20261019-090000.100Z', '2-20261019-090000.900Z', '2-20261019-090005Z']);
     // (The same names for the copies a backup import makes, with new ids.)
     const copies = [a, b, c].map((r, i) => ({ ...r, id: `0${i}new` }));
-    expect(copies.map((r) => runName(r, copies))).toEqual(['2-20261019-090000.100', '2-20261019-090000.900', '2-20261019-090005']);
+    expect(copies.map((r) => runName(r, copies))).toEqual(['2-20261019-090000.100Z', '2-20261019-090000.900Z', '2-20261019-090005Z']);
     const d = { ...b, createdAt: a.createdAt };
-    expect([runName(a, [a, d]), runName(d, [a, d])]).toEqual(['2-20261019-090000.100-ffff0000', '2-20261019-090000.100-0000ffff']);
+    expect([runName(a, [a, d]), runName(d, [a, d])]).toEqual(['2-20261019-090000.100Z-ffff0000', '2-20261019-090000.100Z-0000ffff']);
   });
 });
 

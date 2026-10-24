@@ -202,18 +202,18 @@ describe('runs that share a number (F85)', () => {
     const { blob } = await buildResearchRepo(d, { includeLogs: false });
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
-    expect(csvRows(await read('results/runs.csv')).map((r) => r.run)).toEqual(['2-20261001-100000', '2-20261001-103000', '3']);
-    expect([...new Set(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run))]).toEqual(['2-20261001-100000', '2-20261001-103000', '3']);
-    expect([...new Set(csvRows(await read('results/agreement.csv')).map((r) => r.run))]).toEqual(['2-20261001-100000', '2-20261001-103000', '3']);
+    expect(csvRows(await read('results/runs.csv')).map((r) => r.run)).toEqual(['2-20261001-100000Z', '2-20261001-103000Z', '3']);
+    expect([...new Set(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run))]).toEqual(['2-20261001-100000Z', '2-20261001-103000Z', '3']);
+    expect([...new Set(csvRows(await read('results/agreement.csv')).map((r) => r.run))]).toEqual(['2-20261001-100000Z', '2-20261001-103000Z', '3']);
     const readme = await read('README.md');
     expect(readme).toContain('Python script reproducing run #3 ');
-    expect(readme).toContain('its name in the tables’ `run` column (e.g. 2-20261001-100000)');
+    expect(readme).toContain('its name in the tables’ `run` column (e.g. 2-20261001-100000Z)');
     // The supplementary package of one of them, and the comparison report.
     const supp = await supplementary(d, b);
-    expect(supp.readme).toContain('(run #2-20261001-103000)');
-    expect([...new Set(csvRows(await supp.read('results_by_replicate.csv')).map((r) => r.run))]).toEqual(['2-20261001-103000']);
+    expect(supp.readme).toContain('(run #2-20261001-103000Z)');
+    expect([...new Set(csvRows(await supp.read('results_by_replicate.csv')).map((r) => r.run))]).toEqual(['2-20261001-103000Z']);
     const report = await workbook(await buildComparisonReport(a, b, docs, [a, b, c], results, 1));
-    expect(report('Runs').find((r) => r.setting === 'run')).toMatchObject({ first: '#2-20261001-100000', second: '#2-20261001-103000' });
+    expect(report('Runs').find((r) => r.setting === 'run')).toMatchObject({ first: '#2-20261001-100000Z', second: '#2-20261001-103000Z' });
   });
 });
 
@@ -367,8 +367,8 @@ describe('review of the round-three export fixes', () => {
     const { blob } = await buildResearchRepo({ study: mkStudy(stancePrompt), docs, runs: [a, b], results }, { includeLogs: false });
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
-    expect(csvRows(await read('runs/run-02-20261001-103000/results_long.csv')).map((r) => r.run)).toEqual(['2-20261001-103000', '2-20261001-103000', '2-20261001-103000']);
-    expect(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run)).toEqual(['2-20261001-100000', '2-20261001-100000', '2-20261001-100000', '2-20261001-103000', '2-20261001-103000', '2-20261001-103000']);
+    expect(csvRows(await read('runs/run-02-20261001-103000Z/results_long.csv')).map((r) => r.run)).toEqual(['2-20261001-103000Z', '2-20261001-103000Z', '2-20261001-103000Z']);
+    expect(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run)).toEqual(['2-20261001-100000Z', '2-20261001-100000Z', '2-20261001-100000Z', '2-20261001-103000Z', '2-20261001-103000Z', '2-20261001-103000Z']);
   });
 
   it('README: a missing-value marker is no label, so it is not given as an example of a label left out (F10)', async () => {

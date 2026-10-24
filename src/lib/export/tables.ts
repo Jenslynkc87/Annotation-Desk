@@ -1,6 +1,6 @@
 // Tabular views used by every export format.
 import Papa from 'papaparse';
-import { comparableFields, fieldValue, type ComparableField } from '../compare';
+import { comparableFields, fieldValue, zeroOneScores, type ComparableField } from '../compare';
 import { agreement, isMissingLabel, type Agreement, type Level } from '../metrics';
 import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields, toNumber } from '../prompt';
 import { thinkingLabel } from '../providers/anthropic';
@@ -294,20 +294,34 @@ function nameRest(column: string, field: string): string | null {
 }
 
 /**
- * A label cell as it is compared and counted: trimmed and lower-cased (`normalizeLabel`), and blank when it is a
- * missing-value marker such as "NA" that isn't a value of the field (so it counts neither as labelled nor as left out).
+ * A label cell as it is compared and counted: trimmed and lower-cased (`normalizeLabel`; against plain-text scores of
+ * 0 and 1, a yes or no as 1 or 0), and blank when it is a missing-value marker such as "NA" that isn't a value of the
+ * field (so it counts neither as labelled nor as left out).
  */
 export function labelValue(raw: string | undefined, f: ComparableField): string {
-  const v = normalizeLabel(raw, f.yesNo);
+  const v = readLabel(raw, f);
   return v && isMissingLabel(v) && !fitsField(v, f) ? '' : v;
+}
+
+/**
+ * `normalizeLabel`; against plain-text scores of 0 and 1 ("flag": 1, `zeroOneScores`), a yes/no label (yes,
+ * no, true, false, y, n) as 1 or 0, the other way round from a Yes/no field reading 1 and 0 as yes and no. (A coder's
+ * "yes" next to the model's 1 would otherwise count as a disagreement.)
+ */
+function readLabel(raw: string | undefined, f: ComparableField): string {
+  if (zeroOneScores(f)) {
+    const yn = normalizeLabel(raw, true);
+    if (yn === 'true' || yn === 'false') return yn === 'true' ? '1' : '0';
+  }
+  return normalizeLabel(raw, f.yesNo);
 }
 
 /** Does a label fit the field: one of its categories, a yes/no, or a number on its scale? */
 function fitsField(v: string, f: ComparableField): boolean {
-  const n = normalizeLabel(v, f.yesNo);
+  const n = readLabel(v, f);
   if (f.yesNo) return n === 'true' || n === 'false';
   if (f.level === 'nominal') return !f.allowed.length || f.allowed.includes(n);
-  const x = toNumber(v);
+  const x = toNumber(n);
   if (!Number.isFinite(x)) return false;
   if (f.scaleSeen || !f.allowed.length) return true;
   const scale = f.allowed.map(Number).filter(Number.isFinite);
@@ -544,9 +558,10 @@ export { runName, runTag, sharesNumber };
 export function retryNotes(run: Run, retry: RetriedRequests): { requests: string; tokens: string; both: string } {
   const version = `Annotation Desk ${run.snapshot.appVersion}, used for the run,`;
   const n = (k: number) => k.toLocaleString('en-US');
-  // (With other retries, which recorded what they sent, also the total: a lower bound too.)
+  // (With other retries, which recorded what they sent, also the total: a lower bound too. With an Oct 18–20 batch
+  // retry, whose number is the one it recorded (below), the number planned is that of the others.)
   const requests = retry.lowerBound
-    ? `recorded for Retry failed only the number of requests planned (${n(retry.planned)}), not the number sent: counted from the stored answers, ${retry.legacySent ? `at least ${n(retry.legacySent)} ${retry.legacySent === 1 ? 'was' : 'were'} sent` : `the number sent is not known (no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'})`}${retry.others ? `; with the run’s other ${retry.others === 1 ? 'retry' : 'retries'}, at least ${n(retry.requests)} in all` : ''}`
+    ? `recorded for ${retry.undated ? (retry.legacy === 1 ? 'one Retry failed' : `${n(retry.legacy)} of its retries`) : 'Retry failed'} only the number of requests planned (${n(retry.planned)}), not the number sent: counted from the stored answers, ${retry.legacySent ? `at least ${n(retry.legacySent)} ${retry.legacySent === 1 ? 'was' : 'were'} sent` : `the number sent is not known (no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'})`}${retry.others ? `; with the run’s other ${retry.others === 1 ? 'retry' : 'retries'}, at least ${n(retry.requests)} in all` : ''}`
     : '';
   // Batch retries of the builds of October 18–20, 2026, whose answers are dated at the run's start (see retryCounts).
   const undated = retry.undated

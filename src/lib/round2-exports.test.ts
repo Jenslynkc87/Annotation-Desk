@@ -204,8 +204,8 @@ describe('research zip: runs that share a number (N63)', () => {
     const { blob } = await buildResearchRepo({ study: mkStudy(stancePrompt), docs, runs: [a, b, c], results }, { includeLogs: false });
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const runJson = Object.keys(zip.files).filter((k) => k.endsWith('/run.json')).map((k) => k.split('/').slice(-2, -1)[0]).sort();
-    expect(runJson).toEqual(['run-02-20261001-100000', 'run-02-20261001-103000', 'run-03-pilot']);
-    for (const [folder, run] of [['run-02-20261001-100000', a], ['run-02-20261001-103000', b]] as const) {
+    expect(runJson).toEqual(['run-02-20261001-100000Z', 'run-02-20261001-103000Z', 'run-03-pilot']);
+    for (const [folder, run] of [['run-02-20261001-100000Z', a], ['run-02-20261001-103000Z', b]] as const) {
       const f = zip.file(Object.keys(zip.files).find((k) => k.endsWith(`runs/${folder}/run.json`))!)!;
       expect(JSON.parse(await f.async('string')).id).toBe(run.id);
     }

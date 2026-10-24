@@ -4,6 +4,7 @@ import { codebookField, combineFields, comparableFields, fieldValue, type Compar
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
+import { endBackground, setBackgroundProgress, startBackground, useBackground } from '../lib/background';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
 import { ABOUT_AUTHOR, cachingLabel, knownFieldNames, labelColumnsFor, labelPairs, labelValue, namedField, NOTE_OR_RATING, preferredGoldColumn, runName } from '../lib/export/tables';
@@ -88,7 +89,7 @@ export function RunsView() {
                   const retry = retryableCount(r, own, docs);
                   return (
                     <tr key={r.id}>
-                      <td className="mono">#{runName(r, runs)}</td>
+                      <td className="mono" title={typeof runName(r, runs) === 'string' ? 'Another run has the same number (from an earlier version used in two tabs): this one is named by its start time, in UTC (Z).' : undefined}>#{runName(r, runs)}</td>
                       <td>
                         <input
                           className="input small"
@@ -368,8 +369,9 @@ function runFields(run: Run, docs: Doc[], results: Result[]): ComparableField[] 
  * human–human rows, with its scale, level and yes/no rule. Taken from the newest run that has such a field, so
  * a later run of another prompt (a pilot, a renamed field) doesn't lose it. The columns' values are judged on every
  * text that has a label (as the panel compares them), not only that run's: a pilot on other texts still gives the
- * field. When no run has it yet, the field the current or a saved prompt names (`promptField`), listed with the latest
- * run's fields (`run` is then that run). Undefined when neither has one. `known`: `studyFieldNames`, if already at hand.
+ * field. When no run has it yet, the codebook field the current or a saved structured prompt names (`promptField`),
+ * listed with the latest run's fields (`run` is then that run). Undefined when neither has one. `known`:
+ * `studyFieldNames`, if already at hand.
  */
 export function columnsFieldRun(
   colA: string,
@@ -396,24 +398,19 @@ export function columnsFieldRun(
 }
 
 /**
- * Two label columns whose field no run has yet (e.g. coders' labels checked before the model is run): the field the
- * current or a saved prompt names that both columns belong to, the longest such name first (race_negative before
- * race), both holding mostly its values on every labelled text. A structured prompt's field has its codebook scale; a
- * plain-text prompt's has no range of answers yet, so its numbers are compared as numbers and none is left out for its
- * distance (ordinal when every label is a whole number). Either way a missing-value marker such as "NA" is a blank cell.
+ * Two label columns whose field no run has yet (e.g. coders' labels checked before the model is run): the codebook
+ * field the current or a saved structured prompt names that both columns belong to, with its scale, the longest such
+ * name first (race_negative before race), both holding mostly its values on every labelled text (a missing-value
+ * marker such as "NA" is a blank cell). A plain-text prompt's fields are left out: they are those it kept, hidden and
+ * unused, from before it was switched to Plain text. A field of the same name in another prompt is tried when the
+ * columns don't hold one prompt's values.
  */
 export function promptField(colA: string, colB: string, study: Study, docs: Doc[], known: string[] = []): ComparableField | undefined {
-  const labels = docs.flatMap((d) => [d.meta[colA], d.meta[colB]]).map((v) => toNumber(v ?? '')).filter(Number.isFinite);
   const candidates: ComparableField[] = [];
   for (const p of [study.prompt, ...(study.savedPrompts ?? []).map((x) => x.prompt)])
-    for (const v of p.variables) {
-      if (v.type === 'text' || !namedAfter(colA, v.name) || !namedAfter(colB, v.name) || candidates.some((c) => c.key === v.name)) continue;
-      candidates.push(
-        p.outputMode === 'structured'
-          ? codebookField(p, v)
-          : { key: v.name, label: v.name, level: labels.every(Number.isInteger) ? 'ordinal' : 'interval', allowed: [], scaleSeen: true, yesNo: false },
-      );
-    }
+    if (p.outputMode === 'structured')
+      for (const v of p.variables) if (v.type !== 'text' && namedAfter(colA, v.name) && namedAfter(colB, v.name)) candidates.push(codebookField(p, v));
+  // (Stable: the current prompt's field first, then the saved prompts' in their order.)
   candidates.sort((x, y) => y.key.length - x.key.length);
   return candidates.find((f) => {
     const { columns } = labelColumnsFor(f, docs, [...new Set([...known, ...candidates.map((c) => c.key)])], docs);
@@ -702,8 +699,10 @@ function AgreementPanel() {
 
   // (Two label columns need no run fields: their values are compared as they are.)
   const isFreeText = !bothColumns && !!runA && !fields.length;
-  // false, or how far the report has got (e.g. "field 2 of 5").
-  const [reporting, setReporting] = useState<string | false>(false);
+  // A download being built (`startBackground`), kept outside this panel, so leaving Runs & agreement and coming back
+  // still shows it. For the comparison report: how far it has got (e.g. "field 2 of 5"), else false.
+  const building = useBackground();
+  const reporting = building?.kind === 'report' ? building.progress : false;
   const [groupBy, setGroupBy] = useState('');
   // Columns that group texts (e.g. era, journal): a few distinct values, not one per text.
   const groupColumns = useMemo(
@@ -720,12 +719,16 @@ function AgreementPanel() {
     if (!ra || !rb) return;
     // Named now: the page stays usable while the report is built, so another study may be open when it is done.
     const file = `${slug(currentStudy(getState())?.name ?? 'study')}_run${runName(ra, runs)}_vs_run${runName(rb, runs)}_${dateStamp()}.xlsx`;
-    setReporting('');
+    // One download is built at a time (a second would compete with the first for memory and leave two files).
+    if (!startBackground('report', `comparison report (run #${runName(ra, runs)} vs run #${runName(rb, runs)})`)) {
+      toast('Another download is still being built: try again when it is done.', 'error');
+      return;
+    }
     // Built in a background worker, so the page stays responsive (the intervals take minutes on a full corpus).
     // The report doesn't use the texts, so they aren't sent. Without workers, it is built right here.
     // (Every result as stored now, not the panel's view of them, which may be up to a second behind during a run.)
     const all = getState().results;
-    const direct = () => buildComparisonReport(ra, rb, docs, runs, all, tolerance, groupBy);
+    const direct = () => buildComparisonReport(ra, rb, docs, runs, all, tolerance, groupBy, setBackgroundProgress);
     const job: ReportJob = { runA: ra, runB: rb, docs: docs.map((d) => ({ ...d, text: '' })), runs, results: all.filter((r) => r.runId === ra.id || r.runId === rb.id), tolerance, groupBy };
     const build = () =>
       new Promise<Blob>((resolve, reject) => {
@@ -740,7 +743,7 @@ function AgreementPanel() {
         let started = false;
         w.onmessage = (e: MessageEvent<ReportMessage>) => {
           started = true;
-          if ('progress' in e.data) return setReporting(e.data.progress);
+          if ('progress' in e.data) return setBackgroundProgress(e.data.progress);
           w.terminate();
           if ('blob' in e.data) resolve(e.data.blob);
           else reject(new Error(e.data.error));
@@ -764,7 +767,7 @@ function AgreementPanel() {
     } catch (e) {
       toast(`Report failed: ${errorMessage(e)}`, 'error');
     } finally {
-      setReporting(false);
+      endBackground();
     }
   };
   // A metadata column where (almost) every row is different is an identifier, not a set of labels (`looksLikeIdColumn`),
@@ -829,12 +832,22 @@ function AgreementPanel() {
           </div>
         )}
       </div>
-      {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && (
+      {/* (While a report is built, also when other sources are picked, e.g. after leaving the tab and coming back.) */}
+      {((srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b) || reporting !== false) && (
         <div className="row" style={{ margin: '2px 0 12px' }}>
-          <button className="btn small" disabled={reporting !== false} onClick={downloadReport} title="All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper">
-            {reporting === false ? 'Download comparison report (Excel)' : `Building…${reporting ? ` ${reporting}` : ''}`}
+          <button
+            className="btn small"
+            disabled={!!building}
+            onClick={downloadReport}
+            title={
+              building && reporting === false
+                ? 'Another download is being built: one is built at a time.'
+                : 'All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper'
+            }
+          >
+            {reporting === false ? 'Download comparison report (Excel)' : `Building the ${building?.label}…${reporting ? ` ${reporting}` : ''}`}
           </button>
-          {groupColumns.length > 0 && (
+          {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && groupColumns.length > 0 && (
             <select className="select small" style={{ width: 'auto' }} value={groupBy} onChange={(e) => setGroupBy(e.target.value)} title="Adds a sheet with the same figures per group (exploratory)">
               <option value="">No breakdown</option>
               {groupColumns.map((c) => (

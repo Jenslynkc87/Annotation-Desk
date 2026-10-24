@@ -174,10 +174,11 @@ export interface UploadAttempt {
   /** When the upload got no answer, if that happened while the page was open: a batch it created was created before
    *  then, so a later lookup by request count leaves out batches created afterwards. */
   endedAt?: string;
-  /** A retry's upload: the run's earlier upload of unknown outcome it was sent after (the same requests). A batch
-   *  found by its number of requests that may have been created before the retry began may be that one's: it is
-   *  recorded as either's (`BatchPart.eitherRetry`), not as this retry's (from October 24, 2026). */
-  earlier?: Pick<UploadAttempt, 'since' | 'requests' | 'endedAt'>;
+  /** A retry's upload: the run's earlier upload of unknown outcome it was sent after (the same requests; with its own
+   *  `retryAt` when that one was a retry's too). A batch found by its number of requests that may have been created
+   *  before the retry began may be that one's: it is recorded as either's (`BatchPart.eitherRetry`), not as this
+   *  retry's (from October 24, 2026). */
+  earlier?: Pick<UploadAttempt, 'since' | 'requests' | 'endedAt' | 'retryAt'>;
 }
 
 export interface BatchPart {
@@ -196,9 +197,11 @@ export interface BatchPart {
   /** With `saveFailed`: its results were stored, only the run's record of them could not be saved. */
   resultsSaved?: boolean;
   /** Found by its number of requests for a retry's upload of unknown outcome, while an earlier upload of the same
-   *  requests was unknown too, so it is either's: recorded as the earlier one's (`submittedAt`), and counted as that
-   *  retry (begun at `at`, its upload at `since`) only if its answers carry the retry's request names. */
-  eitherRetry?: { at: string; since: string };
+   *  requests was unknown too, so it is either's: recorded as the earlier one's (`submittedAt`). Its answers' request
+   *  names tell which it is: counted as that retry (begun at `at`, its upload at `since`) if they carry the retry's
+   *  names, as the retry that made the earlier upload (begun at `earlierAt`, when it was a retry's) if they carry
+   *  that one's, else as neither. */
+  eitherRetry?: { at: string; since: string; earlierAt?: string };
 }
 
 export interface Usage {

@@ -22,6 +22,7 @@ import {
   type UploadAttempt,
   type Usage,
 } from './types';
+import { replaceSampleNotes } from './sample';
 import { words } from './subject';
 import { errorMessage, fmtDateTime, nowIso, shortHash, uid } from './util';
 import { runName } from './view';
@@ -470,7 +471,7 @@ export async function removeStudy(id: string) {
   const all = id === state.currentId ? runs : await dbApi.listAllRuns().then((rs) => rs.filter((r) => r.studyId === id), () => []);
   await dbApi.deleteStudy(id);
   // (Once deleted: a study kept, e.g. because deleting failed, still looks for its own uploads' batches.)
-  await forgetBatchesOf(all, looks.map(([r, l]) => [l.foundId, unknownUpload(r)]));
+  await forgetBatchesOf(all, looks.map(([r, l]) => [l.foundId, unknownUpload(r), l.foundEarlier]));
   for (const [r, batchId] of found) toast(`The batch of run ${runLabel(r, runs)}’s upload of unknown outcome (${batchId}) had reached the provider and was cancelled.`);
   for (const [r, l] of looks) if (l.keptFor.length) toast(keptMessage(runLabel(r, runs), l));
   const studies = state.studies.filter((s) => s.id !== id);
@@ -488,6 +489,19 @@ export async function removeStudy(id: string) {
 const nameOf = (x: { docId: string; meta: Record<string, string> }) => x.meta.file || x.docId.trim();
 
 /**
+ * Whether a row's ID was made up when it was added rather than read from an ID column of its own: one of its columns'
+ * values (entries with an automatic ID keep every column) or the table's name with the row's number (no ID column, or
+ * an empty ID cell). Such an ID can differ the next time the same rows are added.
+ */
+function madeUpId(x: { docId: string; meta: Record<string, string>; source: string }): boolean {
+  const id = x.docId.trim();
+  if (Object.values(x.meta).some((v) => v.trim() === id)) return true;
+  const dot = x.source.lastIndexOf('.');
+  const base = dot > 0 ? x.source.slice(0, dot) : x.source;
+  return id.startsWith(`${base}_`) && /^\d+$/.test(id.slice(base.length + 1));
+}
+
+/**
  * Add texts to the open study. `studyId`: the study they were read for; if another study has been opened since
  * (e.g. while a folder was still being read), nothing is added.
  */
@@ -500,14 +514,14 @@ export async function addDocs(items: { docId: string; text: string; meta: Record
 }
 let addQueue: Promise<unknown> = Promise.resolve();
 
-/** False when they could not be saved (or another study was opened meanwhile): the dialog then stays open. */
-async function addDocsNow(items: { docId: string; text: string; meta: Record<string, string>; source: string }[], studyId?: string): Promise<boolean> {
-  const cur = currentStudy();
-  if (!cur || !items.length) return !!cur;
-  if (studyId && cur.id !== studyId) {
-    toast('Another study was opened while the files were being read, so nothing was added. Open the study again and add the files there.', 'error', true);
-    return false;
-  }
+type NewItem = { docId: string; text: string; meta: Record<string, string>; source: string };
+
+/**
+ * Which rows of an addition are added (`kept`) and which are skipped: already here under their name (`already`) or
+ * under another ID (`elsewhere`), or included twice in this addition (`twice`: their names). Compared only with the
+ * texts stored before it (`stored`), so an import dialog can count with it too.
+ */
+export function sortAddition<T extends NewItem>(items: T[], stored: Doc[]): { kept: T[]; already: number; elsewhere: string[]; twice: string[] } {
   // A text that is already here (same name, identical text), e.g. after dropping the whole folder again to add
   // a few new files, is skipped rather than added again as a copy. Same name with a different text is added.
   // (Versions before October 15, 2026 stored texts without surrounding blank lines and spaces: such a text also
@@ -516,28 +530,60 @@ async function addDocsNow(items: { docId: string; text: string; meta: Record<str
   // so the same table pasted again adds neither. (Not a file's own name, e.g. smith_2.md: files go by their name.)
   const present = new Map<string, string[]>();
   const note = (name: string, text: string) => present.set(name, [...(present.get(name) ?? []), text]);
-  for (const d of state.docs) {
+  for (const d of stored) {
     note(nameOf(d), d.text);
     const m = d.meta.file ? null : /^(.*)_([2-9]|[1-9]\d+)$/.exec(d.docId.trim());
     if (m) note(m[1], d.text);
   }
-  const w = words(cur.prompt);
-  const what = w.one === 'entry' ? 'details' : 'text';
-  let skipped = 0;
-  // Within one addition, only an exact copy (same name, identical text and columns) is skipped, e.g. one file selected
-  // from two folders: two rows of one table with the same name and details (two people called John Smith from the
-  // UK, with different answers of the owner's) are both added, the second with a suffix, as the import dialog says.
+  // A row whose ID was made up (`madeUpId`) is already here also when a stored text without a file has its text and
+  // the same value in each of its columns (columns added since, e.g. labels or a sample, aside), whatever ID it gets
+  // this time: the automatic ID may move to another column, or numbered rows shift when a row is inserted. (A cell a
+  // label sheet has emptied since is no longer stored: the same as an empty cell.)
+  const byText = new Map<string, Doc[]>();
+  for (const d of stored) if (!d.meta.file) byText.set(d.text, [...(byText.get(d.text) ?? []), d]);
+  const storedAs = (it: T) =>
+    it.meta.file || !madeUpId(it)
+      ? undefined
+      : [...(byText.get(it.text) ?? []), ...(byText.get(it.text.trim()) ?? [])].find((d) => Object.entries(it.meta).every(([k, v]) => (d.meta[k] ?? '') === v));
+  let already = 0;
+  const elsewhere: string[] = [];
+  // Within one addition, only an exact copy (same ID and name, identical text and columns) is skipped, e.g. one file
+  // selected from two folders: two rows of one table with the same name and details (two people called John Smith
+  // from the UK, with different answers of the owner's) are both added, the second with a suffix, as the import dialog
+  // says, and so are rows with IDs of their own that differ (two paragraphs of one file reading “Notes”).
   const seen = new Set<string>();
   const twice: string[] = [];
-  items = items.filter((it) => {
+  const kept = items.filter((it) => {
     const texts = present.get(nameOf(it)) ?? [];
-    if (texts.includes(it.text) || texts.includes(it.text.trim())) return (skipped++, false);
-    const copy = JSON.stringify([nameOf(it), it.text, Object.entries(it.meta).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))]);
+    if (texts.includes(it.text) || texts.includes(it.text.trim())) return (already++, false);
+    const same = storedAs(it);
+    if (same) return (elsewhere.push(`${it.docId.trim()} (stored as ${same.docId})`), false);
+    const copy = JSON.stringify([it.docId.trim(), nameOf(it), it.text, Object.entries(it.meta).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))]);
     if (seen.has(copy)) return (twice.push(nameOf(it)), false);
     seen.add(copy);
     return true;
   });
+  return { kept, already, elsewhere, twice };
+}
+
+/** False when they could not be saved (or another study was opened meanwhile): the dialog then stays open. */
+async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> {
+  const cur = currentStudy();
+  if (!cur || !items.length) return !!cur;
+  if (studyId && cur.id !== studyId) {
+    toast('Another study was opened while the files were being read, so nothing was added. Open the study again and add the files there.', 'error', true);
+    return false;
+  }
+  const w = words(cur.prompt);
+  const what = w.one === 'entry' ? 'details' : 'text';
+  const { kept, already: skipped, elsewhere, twice } = sortAddition(items, state.docs);
+  items = kept;
   if (skipped) toast(`Skipped ${skipped.toLocaleString()} ${skipped === 1 ? w.one : w.many} already in this study (same name and identical ${what}).`);
+  if (elsewhere.length) {
+    toast(
+      `Skipped ${elsewhere.length.toLocaleString()} ${elsewhere.length === 1 ? w.one : w.many} already in this study under another ID (identical ${what} and columns): ${elsewhere.slice(0, 3).join(', ')}${elsewhere.length > 3 ? ', …' : ''}.`,
+    );
+  }
   if (twice.length) {
     const names = [...new Set(twice)];
     toast(`Skipped ${twice.length.toLocaleString()} ${twice.length === 1 ? w.one : w.many} included twice in this addition (same name, identical ${what} and columns): ${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''}.`);
@@ -644,8 +690,9 @@ export async function removeMetaColumn(column: string): Promise<boolean> {
 /**
  * Mark a drawn sample: `column` = `value` on these texts, removed from texts marked by an earlier draw.
  * `note` (the rule and seed) is added to the study description, which is exported with the study; it replaces
- * the note of an earlier draw for the same `column` = `value` (whose marks this draw replaces). The marks and
- * the note are saved together, or not at all.
+ * the note of an earlier draw for the same `column` = `value` (whose marks this draw replaces), which is kept, marked
+ * as replaced, when another draw's note depends on its texts (`replaceSampleNotes`). The marks and the note are saved
+ * together, or not at all.
  */
 export async function markSample(column: string, value: string, ids: string[], note: string, seed: number): Promise<boolean> {
   const cur = currentStudy();
@@ -660,11 +707,7 @@ export async function markSample(column: string, value: string, ids: string[], n
       changed.push({ ...d, meta: rest });
     }
   }
-  const kept = cur.description
-    .split('\n')
-    .filter((line) => !isSampleNote(line, column, value))
-    .join('\n')
-    .trim();
+  const kept = replaceSampleNotes(cur.description, column, value, nowIso().slice(0, 10), words(cur.prompt));
   const next: Study = { ...structuredClone(cur), description: `${kept ? kept + '\n' : ''}${note}`, updatedAt: nowIso() };
   try {
     await dbApi.putDocsAndStudy(changed, next);
@@ -679,17 +722,7 @@ export async function markSample(column: string, value: string, ids: string[], n
   return true;
 }
 
-/** The start of the study note a drawn sample adds (see SampleDialog), so a redraw can replace it. */
-export function sampleNotePrefix(column: string, value: string): string {
-  return `Sample ${column} = ${value} (`;
-}
-
-/** A note of a drawn sample of exactly this column = value ("Sample sample = validation (2026-10-22): …"), not of
- *  another value that starts the same way (e.g. "validation (2)"). */
-function isSampleNote(line: string, column: string, value: string): boolean {
-  const prefix = sampleNotePrefix(column, value);
-  return line.startsWith(prefix) && /^\d{4}-\d{2}-\d{2}\): /.test(line.slice(prefix.length));
-}
+export { sampleNotePrefix } from './sample';
 
 export async function removeDocs(ids: string[]) {
   // Not while a run is going: the run would go on sending (and paying for) the deleted texts.
@@ -912,7 +945,8 @@ let pendingResults: Result[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 function queueResult(r: Result) {
   pendingResults.push(r);
-  flushTimer ??= setTimeout(flushResults, 250);
+  // (A large study redraws much on each flush: once a second there, so the page stays responsive during a run.)
+  flushTimer ??= setTimeout(flushResults, state.results.length > 20_000 ? 1000 : 250);
 }
 function flushResults() {
   flushTimer = null;
@@ -1111,6 +1145,17 @@ const fromUpload = (p: BatchPart, since: string | undefined) => !!since && (p.su
 /** The start of the request names of a retry's batch (begun at `at`): t<time>_0, t<time>_1, … */
 const retryIdPrefix = (at: string) => `t${Date.parse(at).toString(36)}_`;
 
+/** A batch found for a retry (begun at `at`, its upload at `since`) that may instead be the earlier upload's. */
+const eitherOf = (at: string, since: string, earlier: NonNullable<UploadAttempt['earlier']>): NonNullable<BatchPart['eitherRetry']> => ({
+  at,
+  since,
+  ...(earlier.retryAt ? { earlierAt: earlier.retryAt } : {}),
+});
+
+/** Times to the second, where two uploads are told apart (often in the same minute). */
+const fmtSeconds = (iso: string) =>
+  new Date(iso).toLocaleString('en-GB', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
 /**
  * Every run in this browser: the stored ones and the open study's as this page has them (with a batch that went up
  * when its run could not be saved after it). A run of the open study may be listed twice.
@@ -1130,9 +1175,10 @@ const sameUpload = (a: UploadAttempt, b: UploadAttempt) =>
 // not cancelled). Each with its upload's time (and number of requests, when known): a copy of the deleted run restored
 // from a backup keeps that upload as it was, and still finds its own batch. The latest few hundred (a lookup only sees
 // batches created around its upload), in localStorage: if that is unavailable, batches the provider lists as cancelled
-// are still never taken by their number of requests.
+// are still never taken by their number of requests. A batch found for either of two uploads (`Lookup.either`) is kept
+// with both times (`orSince`: the other one), so a copy restored with either upload on record finds it.
 const FORGOTTEN = 'annotation-desk-deleted-batches';
-type Forgotten = { id: string; since?: string; requests?: number };
+type Forgotten = { id: string; since?: string; requests?: number; orSince?: string };
 
 function forgottenBatches(): Map<string, Forgotten> {
   try {
@@ -1145,8 +1191,9 @@ function forgottenBatches(): Map<string, Forgotten> {
 }
 
 /** Remember the batches of runs being deleted (and `found`: the batches of their uploads of unknown outcome, with that
- *  upload), except one another run here still collects or waits for. */
-async function forgetBatchesOf(runs: Run[], found: [string, UploadAttempt | undefined][]) {
+ *  upload, and the earlier upload's time when the batch may be that one's), except one another run here still collects
+ *  or waits for. */
+async function forgetBatchesOf(runs: Run[], found: [string, UploadAttempt | undefined, string?][]) {
   const gone = new Set(runs.map((r) => r.id));
   const others = (await runsHere().catch(() => [] as Run[])).filter((r) => !gone.has(r.id));
   const held = new Set(others.flatMap((r) => batchParts(r).map((p) => p.batchId)));
@@ -1155,9 +1202,9 @@ async function forgetBatchesOf(runs: Run[], found: [string, UploadAttempt | unde
     ...runs.flatMap((r) =>
       batchParts(r)
         .filter((p) => !held.has(p.batchId) && !waiting.some((since) => fromUpload(p, since)))
-        .map((p) => ({ id: p.batchId, ...(p.submittedAt ? { since: p.submittedAt } : {}) })),
+        .map((p) => ({ id: p.batchId, ...(p.submittedAt ? { since: p.submittedAt } : {}), ...(p.eitherRetry ? { orSince: p.eitherRetry.since } : {}) })),
     ),
-    ...found.filter(([id]) => !!id).map(([id, a]) => ({ id, ...(a ? { since: a.since, requests: a.requests } : {}) })),
+    ...found.filter(([id]) => !!id).map(([id, a, orSince]) => ({ id, ...(a ? { since: a.since, requests: a.requests } : {}), ...(orSince ? { orSince } : {}) })),
   ];
   if (!entries.length) return;
   try {
@@ -1193,7 +1240,11 @@ async function lookUpUpload(p: ProviderId, key: string, runId: string, attempt: 
     for (const r of runs) {
       const part = r.id !== runId && r.batch?.provider === p ? batchParts(r).find((x) => fromUpload(x, attempt.since)) : undefined;
       // (One it holds for either of two uploads, as this retry's upload may be: the same there.)
-      const either = attempt.retryAt && part?.eitherRetry?.since === attempt.since && part.submittedAt ? { either: { since: part.submittedAt, requests: attempt.requests } } : {};
+      const held = part?.eitherRetry;
+      const either =
+        attempt.retryAt && held?.since === attempt.since && part!.submittedAt
+          ? { either: { since: part!.submittedAt, requests: attempt.requests, ...(held.earlierAt ? { retryAt: held.earlierAt } : {}) } }
+          : {};
       if (part) return { found: { batchId: part.batchId, inputFileId: part.inputFileId }, sure: true, why: '', heldBy: studyName(r.studyId), ...either };
     }
     listed = await provider(p).listRecentBatches(key, attempt.since);
@@ -1209,7 +1260,7 @@ async function lookUpUpload(p: ProviderId, key: string, runId: string, attempt: 
     // when a run here has it, even if the delete cancelled it (its finished requests are collected).
     const ownGone = (id: string) => {
       const f = forgotten.get(id);
-      return !!f && f.since === attempt.since && (!f.requests || f.requests === attempt.requests);
+      return !!f && (f.since === attempt.since || f.orSince === attempt.since) && (!f.requests || f.requests === attempt.requests);
     };
     const gone = listed.filter((b) => !own.has(b.batchId) && ownGone(b.batchId));
     // (A retry's upload sent after an earlier one of unknown outcome: the deleted run may have found it as either's,
@@ -1307,7 +1358,9 @@ async function submitBatches(
   const eitherFound: string[] = [];
   // (A retry sent after an upload of unknown outcome: a batch found by its number of requests may be that one's.)
   const prior = retry?.before.uploadUnknown;
-  const earlierUpload = prior ? { earlier: { since: prior.since, requests: prior.requests, ...(prior.endedAt ? { endedAt: prior.endedAt } : {}) } } : {};
+  const earlierUpload = prior
+    ? { earlier: { since: prior.since, requests: prior.requests, ...(prior.endedAt ? { endedAt: prior.endedAt } : {}), ...(prior.retryAt ? { retryAt: prior.retryAt } : {}) } }
+    : {};
   cancelRequested.delete(run.id);
   uploadingRun = run.id;
   try {
@@ -1370,7 +1423,7 @@ async function submitBatches(
         inputFileId: handle.inputFileId,
         status: 'submitted',
         lastStatus: 'submitted',
-        ...(either && retry ? { submittedAt: either.since, eitherRetry: { at: retry.at, since: attempt.since } } : { submittedAt: attempt.since }),
+        ...(either && retry ? { submittedAt: either.since, eitherRetry: eitherOf(retry.at, attempt.since, either) } : { submittedAt: attempt.since }),
       });
       sent++;
       if (either) eitherFound.push(handle.batchId);
@@ -1433,7 +1486,7 @@ async function submitBatches(
   } else if (cancelled) toast(`Upload stopped: ${sent} of ${groups.length} batches had gone up and ${sent === 1 ? 'was' : 'were'} cancelled at ${adapter.label}. Results finished before cancelling are still collected.`, 'error', true);
   else if (sent === groups.length && eitherFound.length && prior) {
     toast(
-      `The upload got no answer, but ${adapter.label} has a batch with these requests (${eitherFound.join(', ')}): it is this upload’s, or that of the earlier upload of ${fmtDateTime(prior.since)}, whose outcome was unknown. Its results are collected into run ${runLabel(run)}; this retry is counted as sent only if they come from its upload.`,
+      `The upload got no answer, but ${adapter.label} has a batch with these requests (${eitherFound.join(', ')}): it is this upload’s, or that of the earlier upload of ${fmtSeconds(prior.since)}, whose outcome was unknown. Its results are collected into run ${runLabel(run)}; this retry is counted as sent only if they come from its upload.`,
       'success',
       true,
     );
@@ -1671,7 +1724,7 @@ export async function retryFailed(runId: string) {
         // (A retry's upload whose batch may be that of the run's earlier upload of the same requests: recorded as that
         // one's, and counted as the retry only if its answers show it is the retry's.)
         const either = unknown.retryAt ? look.either : undefined;
-        const when = either ? { submittedAt: either.since, eitherRetry: { at: unknown.retryAt!, since: unknown.since } } : { submittedAt: unknown.since };
+        const when = either ? { submittedAt: either.since, eitherRetry: eitherOf(unknown.retryAt!, unknown.since, either) } : { submittedAt: unknown.since };
         const parts = [...batchParts(run), { batchId: found.batchId, inputFileId: found.inputFileId, status: 'submitted' as const, lastStatus: 'submitted', ...when }];
         const { uploadUnknown: _gone, ...batch } = run.batch!;
         run.batch = { ...batch, batchId: parts[0].batchId, inputFileId: parts[0].inputFileId, parts, lastStatus: 'submitted' };
@@ -1684,7 +1737,7 @@ export async function retryFailed(runId: string) {
         // (Found by a copy of this study first: both collect it.)
         const shared = look.heldBy ? ` It is the same batch that “${look.heldBy}” (another study here that shares this upload: a copy from a backup, or the study this one was copied from) collects.` : '';
         const which = either
-          ? `Found a batch with the requests of the upload of ${fmtDateTime(unknown.since)} (${found.batchId}): it is that upload’s, or that of the earlier upload of ${fmtDateTime(either.since)}, whose outcome was unknown too. Its results are collected into run ${runLabel(run)}; the retry is counted as sent only if they come from its upload.`
+          ? `Found a batch with the requests of the upload of ${fmtSeconds(unknown.since)} (${found.batchId}): it is that upload’s, or that of the earlier upload of ${fmtSeconds(either.since)}, whose outcome was unknown too. Its results are collected into run ${runLabel(run)}; the retry is counted as sent only if they come from its upload.`
           : `Found the batch that was uploaded (${found.batchId}): its results are collected into run ${runLabel(run)}.`;
         toast(`${which} Nothing was sent again.${shared}`, 'success', true);
         return;
@@ -1766,10 +1819,11 @@ export function unknownUpload(run: Run): UploadAttempt | undefined {
  * charged with nowhere to deliver, and Remaining would send the same requests again). Not when another study here
  * shares that upload (a copy imported from a backup, or the study it was copied from): its batch is left to it.
  * `problem`: why deleting may leave a batch at the provider, said in full ('' if there is nothing to ask);
- * `cancelId`: the batch found, still running; `foundId`: the batch found; `keptFor`: the studies it is left to;
- * `heldFor`: those of them that already have its batch (their Retry failed found it).
+ * `cancelId`: the batch found, still running; `foundId`: the batch found; `foundEarlier`: when that batch may instead
+ * be the run's earlier upload's (found as either's, see `Lookup.either`), that upload's time; `keptFor`: the studies
+ * it is left to; `heldFor`: those of them that already have its batch (their Retry failed found it).
  */
-export type UnknownLook = { problem: string; cancelId: string; foundId: string; keptFor: string[]; heldFor?: UploadHolder[] };
+export type UnknownLook = { problem: string; cancelId: string; foundId: string; foundEarlier?: string; keptFor: string[]; heldFor?: UploadHolder[] };
 
 export async function lookUpUnknownUpload(run: Run): Promise<UnknownLook> {
   const none: UnknownLook = { problem: '', cancelId: '', foundId: '', keptFor: [] };
@@ -1792,17 +1846,22 @@ export async function lookUpUnknownUpload(run: Run): Promise<UnknownLook> {
     if (!look.found) return none;
     if (look.heldBy) return { ...none, keptFor: [look.heldBy], heldFor: [{ study: look.heldBy, batchId: look.found.batchId, collected: false }] };
     const id = look.found.batchId;
+    // (Found as either's: it may be the earlier upload's. Both are named, and it is remembered under both.)
+    const earlier = look.either ? { foundEarlier: look.either.since } : {};
     // (One that has already ended has nothing left to stop: its results are paid for.)
     const ended = await adapter.checkBatch(key, id).then((st) => st.done, () => false);
-    if (ended) return { ...none, foundId: id, problem: `${upload} did arrive (${id}) and has already ended: its results are paid for, and Retry failed on the run collects them.` };
-    return { ...none, cancelId: id, foundId: id };
+    if (ended) return { ...none, ...earlier, foundId: id, problem: `${uploadName(run, attempt, look.either?.since)} did arrive (${id}) and has already ended: its results are paid for, and Retry failed on the run collects them.` };
+    return { ...none, ...earlier, cancelId: id, foundId: id };
   } finally {
     if (!busy) set({ submitting: '' });
   }
 }
 
-const uploadName = (run: Run, attempt: UploadAttempt) =>
-  `The batch upload of ${fmtDateTime(attempt.since)} (${attempt.requests.toLocaleString()} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}`;
+/** (`earlier`: a batch found for either of two uploads, this one or the run's earlier one begun then: both named.) */
+const uploadName = (run: Run, attempt: UploadAttempt, earlier?: string) =>
+  earlier
+    ? `The batch upload of ${fmtSeconds(attempt.since)} (${attempt.requests.toLocaleString()} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}, or its earlier upload of ${fmtSeconds(earlier)},`
+    : `The batch upload of ${fmtDateTime(attempt.since)} (${attempt.requests.toLocaleString()} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}`;
 
 /** Cancel the batch found for a run's upload of unknown outcome. Returns why it could not be ('' if it was, or had
  *  ended meanwhile). */
@@ -1911,7 +1970,7 @@ export async function removeRun(runId: string) {
   if (failed.length && !confirm(`${failed.join('\n\n')}\n\n${alreadyCancelled(cancelled, 'run')}Delete run ${name} anyway? A batch still running at the provider may be charged, and its results can't be collected here.`)) return;
   await deleteRunById(runId);
   // (Once deleted: a run kept, e.g. because deleting failed, still looks for its own upload's batch.)
-  if (!state.runs.some((r) => r.id === runId)) await forgetBatchesOf([run], [[look.foundId, unknownUpload(run)]]);
+  if (!state.runs.some((r) => r.id === runId)) await forgetBatchesOf([run], [[look.foundId, unknownUpload(run), look.foundEarlier]]);
   if (look.cancelId && cancelled.includes(look.cancelId)) toast(`The batch of that upload (${look.cancelId}) had reached the provider and was cancelled.`);
   if (look.keptFor.length) toast(keptMessage(name, look));
 }
@@ -1945,11 +2004,12 @@ const saveFailureShown = new Map<string, string>();
 // Batches whose results could not be stored, or were but the run's record of them could not be: not fetched again by
 // the quiet checks, only when the owner checks by hand. Kept with their marks (batch id → when, the status shown, and
 // for stored results what collecting them gave), so a run read again from storage (e.g. when its study is opened
-// again) still shows them, and a run whose record alone could not be saved is completed once it can be.
+// again) still shows them, and a run whose record alone could not be saved is completed once it can be. (`covers`: the
+// retry's upload a batch found as either's was found for, which is then no longer of unknown outcome.)
 type SaveMark = {
   at: string;
   lastStatus: string;
-  collected?: Pick<BatchPart, 'status' | 'lastStatus' | 'endedAt' | 'error' | 'submittedAt'> & { providerStatus: string; retry?: { at: string; requests: number } };
+  collected?: Pick<BatchPart, 'status' | 'lastStatus' | 'endedAt' | 'error' | 'submittedAt'> & { providerStatus: string; retry?: { at: string; requests: number }; covers?: string };
 };
 const saveFailedBatches = new Map<string, SaveMark>();
 // (By run and batch: a copy of the study imported from a backup has the same batch, but none of its results.)
@@ -1986,13 +2046,17 @@ export async function checkBatch(runId: string, quiet = false) {
     const collectedNow = new Map<string, string>();
     // Batches found for either of two uploads that turned out to be a retry's (see `BatchPart.eitherRetry`).
     const retriedNow: { batchId: string; at: string; requests: number }[] = [];
+    // The retry's upload each batch found as either's was found for (batch id → its time): that upload is known, also
+    // once the batch is collected while the run's record of it can't be saved yet.
+    const covers = new Map(batchParts(run).flatMap((p) => (p.eitherRetry ? [[p.batchId, p.eitherRetry.since] as const] : [])));
     for (const p of parts) {
       if (p.status !== 'submitted') continue;
       const mark = saveFailedBatches.get(markKey(runId, p.batchId));
       // Results stored while the run's record of them could not be saved: that record is completed from what
       // collecting them gave, without fetching them again.
       if (mark?.collected) {
-        const { providerStatus, retry, ...done } = mark.collected;
+        const { providerStatus, retry, covers: upload, ...done } = mark.collected;
+        if (upload) covers.set(p.batchId, upload);
         delete p.saveFailed;
         delete p.resultsSaved;
         delete p.eitherRetry;
@@ -2033,9 +2097,11 @@ export async function checkBatch(runId: string, quiet = false) {
       // The time the provider finished the batch (not when this page collected it).
       const endedAt = st.endedAt ?? nowIso();
       // A batch found for either of two uploads of the same requests (an earlier one, or a retry's): its answers'
-      // request names tell which, so the retry is counted as sent only if its upload went up.
+      // request names tell which, so a retry is counted as sent only if its upload went up: this retry, or the one
+      // that made the earlier upload (else that was the run's own upload: no retry).
       const either = p.eitherRetry;
-      const byRetry = !!either && lines.some((l) => l.customId.startsWith(retryIdPrefix(either.at)));
+      const by = either && [either.at, either.earlierAt].find((at) => !!at && lines.some((l) => l.customId.startsWith(retryIdPrefix(at))));
+      const byRetry = !!by && by === either?.at;
       let c: { ok: number; failed: number };
       try {
         c = await storeBatchResults(run, lines, (byRetry ? either!.since : p.submittedAt) ?? run.createdAt, endedAt);
@@ -2051,10 +2117,8 @@ export async function checkBatch(runId: string, quiet = false) {
       delete p.resultsSaved;
       saveFailedBatches.delete(markKey(runId, p.batchId));
       if (either) {
-        if (byRetry) {
-          p.submittedAt = either.since;
-          retriedNow.push({ batchId: p.batchId, at: either.at, requests: lines.length });
-        }
+        if (byRetry) p.submittedAt = either.since;
+        if (by) retriedNow.push({ batchId: p.batchId, at: by, requests: lines.length });
         delete p.eitherRetry;
       }
       collectedNow.set(p.batchId, st.status);
@@ -2096,7 +2160,7 @@ export async function checkBatch(runId: string, quiet = false) {
     // An upload still marked as under way, but not going on in this page: its outcome is unknown, unless its batch is
     // one this page knows (it went up, but the run could not be saved after it). A known batch is never also "unknown".
     // (Also as the page had its batches before this check: one found for either of two uploads is that until collected.)
-    const knownUpload = (a: UploadAttempt | undefined) => !!a && [...merged, ...batchParts(run)].some((p) => fromUpload(p, a.since));
+    const knownUpload = (a: UploadAttempt | undefined) => !!a && ([...merged, ...batchParts(run)].some((p) => fromUpload(p, a.since)) || [...covers.values()].includes(a.since));
     if (updated.batch!.uploading && uploadingRun !== runId) {
       const { uploading, ...rest } = updated.batch!;
       if (!knownUpload(uploading)) updated.batch = { ...rest, uploadUnknown: uploading };
@@ -2151,7 +2215,16 @@ export async function checkBatch(runId: string, quiet = false) {
         saveFailedBatches.set(markKey(runId, id), {
           at: now,
           lastStatus: `${providerStatus}; run record not saved`,
-          collected: { status: p.status, lastStatus: p.lastStatus, endedAt: p.endedAt, error: p.error, submittedAt: p.submittedAt, providerStatus, ...(retry ? { retry: { at: retry.at, requests: retry.requests } } : {}) },
+          collected: {
+            status: p.status,
+            lastStatus: p.lastStatus,
+            endedAt: p.endedAt,
+            error: p.error,
+            submittedAt: p.submittedAt,
+            providerStatus,
+            ...(retry ? { retry: { at: retry.at, requests: retry.requests } } : {}),
+            ...(covers.has(id) ? { covers: covers.get(id) } : {}),
+          },
         });
       }
       const shown: Run = {

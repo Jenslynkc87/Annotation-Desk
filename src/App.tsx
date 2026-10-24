@@ -5,6 +5,7 @@ import { RunsView } from './components/RunsView';
 import { StudyMenu } from './components/StudyMenu';
 import { Icon } from './components/ui';
 import { Workbench } from './components/Workbench';
+import { useBackgroundRunning } from './lib/background';
 import { currentStudy, dismissToast, isBusy, updateStudy, useStore } from './lib/store';
 
 type Tab = 'workbench' | 'runs' | 'export';
@@ -26,9 +27,10 @@ export function App({ openHere }: { openHere?: () => Promise<boolean> }) {
   const modelsStatus = useStore((s) => s.modelsStatus);
   const modelsError = useStore((s) => s.modelsError);
   const failing = (Object.keys(keys) as (keyof typeof keys)[]).filter((p) => keys[p] && modelsStatus[p] === 'error');
-  // Closing or reloading the tab stops a run that is being sent, a batch being uploaded or a backup being
-  // imported, and loses a change not yet saved: ask first.
-  const busy = useStore((s) => isBusy(s) || s.importing || !!s.saveError);
+  // Closing or reloading the tab stops a run that is being sent, a batch being uploaded, a backup being imported or a
+  // download being built (lib/background.ts), and loses a change not yet saved: ask first.
+  const building = useBackgroundRunning();
+  const busy = useStore((s) => isBusy(s) || s.importing || !!s.saveError) || building;
   useEffect(() => {
     if (!busy) return;
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();

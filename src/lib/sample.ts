@@ -66,7 +66,9 @@ export function heldValue(d: Doc, markedAs: { column: string; value: string }): 
  * were ticked; method 1, before that, sorted by the browser's language and ranked remainders before the
  * minimum of one). Eligible: every text except those left out by `exclude` and, with `markedAs` (the dialog always
  * gives it, since October 24, 2026), those already marked with another value in the sample's column; the note
- * names both, so the same call on the texts as they were reproduces the draw.
+ * names both, so the same call on the texts as they were reproduces the draw. Which texts those were: the note names
+ * the draw that marked them (`drawLabel`), and that draw's note is kept when it is replaced (`markSample`), so they can
+ * be drawn again from the notes.
  */
 export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResult {
   const strata = o.method === 2 ? o.strata : orderStrata(o.strata);
@@ -123,17 +125,111 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
   return { ids, strata: keys.map((k) => ({ key: k, available: n(k), drawn: take.get(k)! })), eligible: eligible.length, taken };
 }
 
+type Words = { one: string; many: string };
+
 /**
  * For the note saved with a sample: the texts left out because they already belong to another sample in its column,
- * e.g. "not from the 20 texts already marked sample = validation" ('' when none were; with more than three values, how
- * many texts and values).
+ * e.g. "not from the 20 texts already marked sample = validation (drawn 2026-10-24, 20 of 300 texts, seed 99)" ('' when
+ * none were; with more than three values, how many texts and values). With the study notes (`notes`), each value names
+ * the draw that marked it, so the texts left out can be drawn again from the notes ("no draw recorded": marked otherwise).
  */
-export function takenNote(r: SampleResult, column: string, w: { one: string; many: string } = { one: 'text', many: 'texts' }): string {
+export function takenNote(r: SampleResult, column: string, w: Words = { one: 'text', many: 'texts' }, notes?: string): string {
   if (!r.taken.length) return '';
   // (A column of other metadata picked to mark in, e.g. journal: their number, not a list of every value.)
   if (r.taken.length > 3) return `not from the ${r.taken.reduce((n, t) => n + t.n, 0)} ${w.many} whose ${column} already holds another value (${r.taken.length} values)`;
-  const parts = r.taken.map((t, i) => (i === 0 ? `the ${t.n} ${t.n === 1 ? w.one : w.many} already marked ${column} = ${t.value}` : `the ${t.n} marked ${column} = ${t.value}`));
+  const drawn = (value: string) => (notes === undefined ? '' : ` (${drawLabel(notes, column, value, w) || 'no draw recorded'})`);
+  const parts = r.taken.map((t, i) =>
+    i === 0 ? `the ${t.n} ${t.n === 1 ? w.one : w.many} already marked ${column} = ${t.value}${drawn(t.value)}` : `the ${t.n} marked ${column} = ${t.value}${drawn(t.value)}`,
+  );
   return `not from ${parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0]}`;
+}
+
+/** The start of the study note a drawn sample adds (see SampleDialog), so a redraw can replace it. */
+export function sampleNotePrefix(column: string, value: string): string {
+  return `Sample ${column} = ${value} (`;
+}
+
+/** A note of a drawn sample of exactly this column = value ("Sample sample = validation (2026-10-22): …"), not of
+ *  another value that starts the same way (e.g. "validation (2)"), nor one kept as replaced. */
+export function isSampleNote(line: string, column: string, value: string): boolean {
+  const prefix = sampleNotePrefix(column, value);
+  return line.startsWith(prefix) && /^\d{4}-\d{2}-\d{2}\): /.test(line.slice(prefix.length));
+}
+
+/** A sample note's draw, as a later note names it: "drawn 2026-10-24, 100 of 3080 texts, seed 11" (its date, size,
+ *  eligible texts and seed: a redraw with the same seed and size on the same day is told apart by the eligible count). */
+function labelOf(line: string, column: string, value: string, w: Words): string {
+  const rest = line.slice(sampleNotePrefix(column, value).length);
+  const size = /^\d{4}-\d{2}-\d{2}\): (\d+ of \d+) /.exec(rest)?.[1];
+  // (Its own seed is the last one: a note may name another draw's before it.)
+  const seed = [...rest.matchAll(/seed (-?\d+)/g)].at(-1)?.[1];
+  return [`drawn ${rest.slice(0, 10)}`, ...(size ? [`${size} ${w.many}`] : []), ...(seed ? [`seed ${seed}`] : [])].join(', ');
+}
+
+/** The draw recorded for the texts marked `column` = `value` (its current note), as a later note names it; '' when
+ *  the study notes have none (e.g. marks added from a spreadsheet). */
+export function drawLabel(notes: string, column: string, value: string, w: Words = { one: 'text', many: 'texts' }): string {
+  const line = notes.split('\n').filter((l) => isSampleNote(l, column, value)).at(-1);
+  return line ? labelOf(line, column, value, w) : '';
+}
+
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Whether a note's draw depended on the texts marked `column` = `value` by the draw `label` names: it left them out
+ *  (naming that draw, or no draw in notes of October 24, 2026), or every text of another value in that column. */
+function dependsOn(line: string, column: string, value: string, label: string): boolean {
+  if (line.includes(`whose ${column} already holds another value`)) return true;
+  const m = new RegExp(`(?:marked|excluding) ${escapeRe(column)} = ${escapeRe(value)}(?: \\(([^()]*)\\))?(?=[,;.]| and|$)`).exec(line);
+  return !!m && (m[1] === undefined || m[1] === label);
+}
+
+/** The study notes when a redraw replaces the notes of `column` = `value`: each is dropped, unless another draw's note
+ *  depends on its texts; that one is kept, marked "(replaced <date>)", so that draw can still be reproduced. */
+export function replaceSampleNotes(notes: string, column: string, value: string, today: string, w: Words = { one: 'text', many: 'texts' }): string {
+  const lines = notes.split('\n');
+  const others = lines.filter((l) => !isSampleNote(l, column, value));
+  return lines
+    .flatMap((l) => {
+      if (!isSampleNote(l, column, value)) return [l];
+      const label = labelOf(l, column, value, w);
+      return others.some((o) => dependsOn(o, column, value, label)) ? [`(replaced ${today}) ${l}`] : [];
+    })
+    .join('\n')
+    .trim();
+}
+
+/** The samples ("sample = holdout") whose draw depended on the texts now marked `column` = `value`, for the dialog. */
+export function dependentSamples(notes: string, column: string, value: string, w: Words = { one: 'text', many: 'texts' }): string[] {
+  const line = notes.split('\n').filter((l) => isSampleNote(l, column, value)).at(-1);
+  if (!line) return [];
+  const label = labelOf(line, column, value, w);
+  const names = notes
+    .split('\n')
+    .filter((l) => !isSampleNote(l, column, value) && dependsOn(l, column, value, label))
+    .map((l) => /^(?:\(replaced \d{4}-\d{2}-\d{2}\) )?Sample (.+?) \(\d{4}-\d{2}-\d{2}\): /.exec(l)?.[1])
+    .filter((x): x is string => !!x);
+  return [...new Set(names)];
+}
+
+/**
+ * The note saved with a drawn sample (in the study notes, exported with the study): its rule and seed, and the texts it
+ * left out, naming the draws that marked them. Starts with `sampleNotePrefix`, so a redraw replaces it.
+ */
+export function sampleNote(
+  o: { column: string; value: string; date: string; strata: string[]; exclude: SampleOptions['exclude']; seed: number },
+  r: SampleResult,
+  w: Words,
+  notes: string,
+): string {
+  // (Texts left out because an earlier draw marked them: that draw is named, so they can be drawn again.)
+  const excluded = o.exclude ? drawLabel(notes, o.exclude.column, o.exclude.value, w) : '';
+  return (
+    `${sampleNotePrefix(o.column, o.value)}${o.date}): ${r.ids.length} of ${r.eligible} ${w.many} drawn at random` +
+    (o.strata.length ? ` within ${o.strata.join(' × ')} strata (${allocationNote(r, w.one)})` : '') +
+    (o.exclude ? `, excluding ${o.exclude.column} = ${o.exclude.value}${excluded ? ` (${excluded})` : ''}` : '') +
+    (r.taken.length ? `, ${takenNote(r, o.column, w, notes)}` : '') +
+    `; seed ${o.seed} (${SAMPLING_METHOD}).`
+  );
 }
 
 /** How the texts were spread over the strata, for the note saved with a sample: "at least one per stratum" only

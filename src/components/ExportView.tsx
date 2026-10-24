@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
+import { endBackground, setBackgroundProgress, startBackground, useBackground, type BackgroundKind } from '../lib/background';
 import { buildBackup } from '../lib/export/backup';
-import { buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from '../lib/export/packages';
+import { agreementData, agreementHere, buildExcel, buildResearchRepo, buildSupplementary, type AgreementFor, type ExportData } from '../lib/export/packages';
 import { labelPairs } from '../lib/export/tables';
+import type { AgreementJob, AgreementMessage } from '../lib/report.worker';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
@@ -12,6 +14,61 @@ function exportData(): ExportData {
   const s = getState();
   return { study: currentStudy(s)!, docs: s.docs, runs: s.runs, results: s.results };
 }
+
+/**
+ * The exports' agreement figures, computed in a background worker so the page stays responsive (their bootstrap
+ * intervals take minutes on wide numeric scales, e.g. years or counts). It is sent only what agreement reads
+ * (`agreementData`: not the texts). Without workers, computed here; the figures are the same either way (fixed seed).
+ */
+const agreementInWorker: AgreementFor = (d, runs) =>
+  new Promise((resolve, reject) => {
+    const here = () => agreementHere(d, runs).then(resolve, reject);
+    let w: Worker;
+    try {
+      w = new Worker(new URL('../lib/report.worker.ts', import.meta.url), { type: 'module' });
+    } catch {
+      here();
+      return;
+    }
+    w.onmessage = (e: MessageEvent<AgreementMessage>) => {
+      w.terminate();
+      if ('rows' in e.data) resolve(e.data.rows);
+      else reject(new Error(e.data.error));
+    };
+    // (The worker didn't start, e.g. a browser without module workers: computed here.)
+    w.onerror = () => {
+      w.terminate();
+      here();
+    };
+    const job: AgreementJob = { agreement: { data: agreementData(d), runIds: runs.map((r) => r.id) } };
+    try {
+      w.postMessage(job);
+    } catch {
+      w.terminate();
+      here();
+    }
+  });
+
+/** Resolves once the page has shown what changed, so a step's name is on screen before its work blocks the page (at once in a hidden tab, which doesn't paint). */
+const painted = () =>
+  new Promise<void>((resolve) => {
+    if (document.visibilityState !== 'visible') return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, 100);
+    requestAnimationFrame(() => setTimeout(done, 0));
+  });
+
+/** A build's progress line: the step (e.g. "Writing corpus/corpus.csv"), shown before the step starts. */
+const showStep = (step: string) => {
+  setBackgroundProgress(step);
+  return painted();
+};
+
+/** The study the download being built here is for: another study may be opened meanwhile. */
+let buildingFor = { id: '', name: '' };
 
 export function ExportView() {
   const runs = useStore((s) => s.runs);
@@ -27,24 +84,39 @@ export function ExportView() {
   useEffect(() => {
     if (run && run.id !== runId) setRunId(run.id);
   }, [run, runId]);
-  const [busy, setBusy] = useState('');
-  // The file a zip is writing (a full corpus with logs takes many minutes).
-  const [writing, setWriting] = useState('');
+  // The download being built (`startBackground`), kept outside this tab: leaving the tab and coming back still shows it
+  // (the build goes on meanwhile), and a second one can't start before it is done. Its progress: the step it is on,
+  // e.g. the file a zip is writing (a full corpus with logs takes many minutes).
+  const building = useBackground();
+  const study = useStore((s) => currentStudy(s))!;
+  // (One of another study: every button waits, none says it is building this study's.)
+  const otherStudy = building && building.kind !== 'report' && buildingFor.id !== study.id ? buildingFor.name : null;
+  const busy = otherStudy !== null ? 'other' : (building?.kind ?? '');
   const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(true);
 
-  const go = async (label: string, fn: () => Promise<void>) => {
-    setBusy(label);
+  const go = async (kind: BackgroundKind, label: string, fn: () => Promise<void>) => {
+    // One download is built at a time (a second would compete with the first for memory and leave two files).
+    if (!startBackground(kind, label)) {
+      toast('Another download is still being built: try again when it is done.', 'error');
+      return;
+    }
+    buildingFor = { id: study.id, name: study.name || 'Untitled' };
     try {
       await fn();
     } catch (e) {
       toast(`Export failed: ${errorMessage(e)}`, 'error');
     } finally {
-      setBusy('');
+      endBackground();
     }
   };
+  const stepLine = (kind: BackgroundKind, extra = '') =>
+    busy === kind && (
+      <div className="hint">
+        {building!.progress || 'Preparing'}…{extra}
+      </div>
+    );
 
-  const study = useStore((s) => currentStudy(s))!;
   // The label columns agreement is computed for (as in the exports: codebook fields, or scores in JSON answers), and
   // the columns named after a field that are not used, with the reason.
   const { gold, skipped } = useMemo(() => {
@@ -99,6 +171,12 @@ export function ExportView() {
             {gold.length > 0 && <> Agreement is computed automatically for: {gold.join(', ')}.</>}
             {skipped.length > 0 && <> Not used for agreement: {skipped.join(', ')}.</>}
           </div>
+          {busy === 'report' && <div className="hint">A comparison report is being built (Runs &amp; agreement): the downloads below can start once it is done.</div>}
+          {otherStudy !== null && (
+            <div className="hint">
+              The {building!.label} of the study “{otherStudy}” is being built: the downloads below can start once it is done.
+            </div>
+          )}
         </div>
       </div>
 
@@ -112,14 +190,15 @@ export function ExportView() {
             className="btn primary export-btn"
             disabled={!run || !!busy}
             onClick={() =>
-              go('excel', async () => {
-                const blob = await buildExcel(exportData(), run!, { text: false, rationale: true });
+              go('excel', 'Excel workbook', async () => {
+                const blob = await buildExcel(exportData(), run!, { text: false, rationale: true, agreement: agreementInWorker, onProgress: showStep });
                 download(`${slug(study.name)}_run${runName(run!, runs)}_${dateStamp()}.xlsx`, blob);
               })
             }
           >
             <Icon name="download" /> {busy === 'excel' ? 'Building…' : 'Download Excel'}
           </button>
+          {stepLine('excel')}
         </div>
 
         <div className="card card-pad export-card">
@@ -134,19 +213,15 @@ export function ExportView() {
             className="btn primary export-btn"
             disabled={!!busy || (!docs.length && !runs.length)}
             onClick={() =>
-              go('research', async () => {
-                try {
-                  const { blob, name } = await buildResearchRepo(exportData(), { includeLogs: researchLogs, onProgress: setWriting });
-                  download(name, blob);
-                } finally {
-                  setWriting('');
-                }
+              go('research', 'research repository', async () => {
+                const { blob, name } = await buildResearchRepo(exportData(), { includeLogs: researchLogs, onProgress: showStep, agreement: agreementInWorker });
+                download(name, blob);
               })
             }
           >
             <Icon name="download" /> {busy === 'research' ? 'Building…' : 'Download .zip'}
           </button>
-          {busy === 'research' && writing && <div className="hint">Writing {writing.slice(writing.indexOf('/') + 1)}… (a full corpus with logs can take half an hour; keep this tab open)</div>}
+          {stepLine('research', ' (a full corpus with logs can take half an hour; keep this tab open)')}
         </div>
 
         <div className="card card-pad export-card">
@@ -182,19 +257,15 @@ export function ExportView() {
             className="btn primary export-btn"
             disabled={!run || !!busy}
             onClick={() =>
-              go('supp', async () => {
-                try {
-                  const { blob, name } = await buildSupplementary(exportData(), run!, { ...supp, onProgress: setWriting });
-                  download(name, blob);
-                } finally {
-                  setWriting('');
-                }
+              go('supp', 'supplementary package', async () => {
+                const { blob, name } = await buildSupplementary(exportData(), run!, { ...supp, onProgress: showStep, agreement: agreementInWorker });
+                download(name, blob);
               })
             }
           >
             <Icon name="download" /> {busy === 'supp' ? 'Building…' : 'Download .zip'}
           </button>
-          {busy === 'supp' && writing && <div className="hint">Writing {writing.slice(writing.indexOf('/') + 1)}…</div>}
+          {stepLine('supp')}
         </div>
       </div>
 
@@ -208,7 +279,7 @@ export function ExportView() {
             className="btn"
             disabled={!!busy}
             onClick={() =>
-              go('backup', async () => {
+              go('backup', 'study backup', async () => {
                 const d = exportData();
                 // (The results as stored: read from the database, not as this page reads them by today's rules.)
                 const b = await buildBackup(d.study, d.docs, d.runs, true);
@@ -216,7 +287,7 @@ export function ExportView() {
               })
             }
           >
-            <Icon name="download" /> Download backup
+            <Icon name="download" /> {busy === 'backup' ? 'Building…' : 'Download backup'}
           </button>
         </div>
       </div>

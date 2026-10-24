@@ -167,15 +167,17 @@ export function krippendorffAlpha(pairs: [string, string][], level: Level): numb
   }
   const nc = o.map((row) => row.reduce((s, x) => s + x, 0));
   const n = nc.reduce((s, x) => s + x, 0);
+  // Running totals of nc, so the ordinal distance is one subtraction, not a loop (wide scales such as years have
+  // hundreds of values). The counts are whole numbers, so the sums are exact and the result unchanged.
+  const upTo = [0];
+  for (let g = 0; g < k; g++) upTo.push(upTo[g] + nc[g]);
   const delta2 = (c: number, d: number): number => {
     if (c === d) return 0;
     if (level === 'nominal') return 1;
     if (level === 'interval') return (Number(values[c]) - Number(values[d])) ** 2;
     const lo = Math.min(c, d);
     const hi = Math.max(c, d);
-    let s = 0;
-    for (let g = lo; g <= hi; g++) s += nc[g];
-    return (s - (nc[c] + nc[d]) / 2) ** 2;
+    return (upTo[hi + 1] - upTo[lo] - (nc[c] + nc[d]) / 2) ** 2;
   };
   let num = 0;
   let den = 0;

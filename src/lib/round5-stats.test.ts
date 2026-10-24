@@ -6,8 +6,8 @@ import 'fake-indexeddb/auto';
 import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
 import { columnsFieldRun, looksLikeIdColumn, promptField } from '../components/RunsView';
-import { codebookFields, compareFieldFor, comparableLabel, remainingNotes, unknownUploadNote } from '../components/Workbench';
-import { combineFields, comparableFields, fieldValue, type ComparableField } from './compare';
+import { codebookFields, compareFieldFor, compareRows, remainingNotes, unknownUploadNote } from '../components/Workbench';
+import { combineFields, comparableFields, type ComparableField } from './compare';
 import { buildComparisonReport } from './export/packages';
 import { labelValue } from './export/tables';
 import { agreement } from './metrics';
@@ -162,15 +162,11 @@ describe('two label columns whose field only a prompt names (H6)', () => {
     });
   }
 
-  it('a plain-text prompt: numbers compared as numbers, no range, "NA" blank', () => {
+  // (Round six: a plain-text prompt's fields are those it kept, hidden and unused, from before it was switched to Plain
+  // text; they give no field. See round6-stats.test.ts.)
+  it('a plain-text prompt’s (hidden) fields give no field', () => {
     const st = mkStudy({ ...text, variables: [variable('race', 'ordinal', SCALE)] });
-    const f = promptField('race_gold', 'race_coder2', st, docs, ['race', 'tone'])!;
-    expect([f.key, f.level, f.scaleSeen, f.range, f.allowed]).toEqual(['race', 'ordinal', true, undefined, []]);
-    const r = panel(f);
-    expect(r.n).toBe(60);
-    expect(r.leftOut.n).toBe(0);
-    // A label far off counts (no distance rule without the model's range).
-    expect(agreement(['3', '1'], ['30', '1'], f.level, f.allowed, 1, { withIntervals: false, scaleSeen: true }).n).toBe(2);
+    expect(promptField('race_gold', 'race_coder2', st, docs, ['race', 'tone'])).toBeUndefined();
   });
 
   it('takes the longest field both columns are named after, and none whose values the columns don’t hold', () => {
@@ -193,21 +189,12 @@ describe('the field “Disagree with” compares (H7, H14, H26, H27)', () => {
   const run = mkRun(prompt, docs.map((d) => d.id), 'r2', 2);
   const results = docs.map((d) => mkResult('r2', d.id, { summary: 's', tone_explanation: 'e', tone: '0', stance_explanation: 'e', stance: '1' }));
   const runs = [run];
-  // What the Workbench lists under "Disagree with <col>" (TextsAndResults: modelValue, labelOf, comparable).
+  // What the Workbench lists under "Disagree with <col>" (TextsAndResults: compareFieldFor, compareRows).
   const disagree = (col: string, studyPrompt: PromptSpec, runFilter: string) => {
     const views = buildDocViews(docs, runs, results, runFilter);
     const viewed = runFilter === 'latest' ? null : runs.find((r) => r.id === runFilter)!;
-    const pick = compareFieldFor(col, [], codebookFields(viewed, studyPrompt, views.values(), runs), 'response');
-    const pairs: [string, string][] = [];
-    const rows: [string, string, string][] = [];
-    for (const d of docs) {
-      const v = views.get(d.id)!;
-      const x = normalizeLabel(v.run ? fieldValue(v.run, v.values, pick.key) : '', pick.yesNo);
-      const y = normalizeLabel(d.meta[col], pick.yesNo);
-      if (x && y) (pairs.push([x, y]), rows.push([d.id, x, y]));
-    }
-    const ok = comparableLabel(pick.variable, pairs);
-    return { key: pick.key, ids: rows.filter(([, x, y]) => x !== y && ok(x) && ok(y)).map(([id]) => id) };
+    const key = compareFieldFor(col, [], codebookFields(viewed, studyPrompt, views.values(), runs), 'response');
+    return { key, ids: [...compareRows(key, col, docs, views)].filter(([, r]) => r.counts && r.value !== r.label).map(([id]) => id) };
   };
 
   it('a structured run: the codebook field the column is named after, not the first', () => {
@@ -244,10 +231,13 @@ describe('the field “Disagree with” compares (H7, H14, H26, H27)', () => {
     const scores = comparableFields(textRun, views.values());
     const codebook = codebookFields(null, text, views.values(), [run, textRun]);
     expect([...codebook.keys()]).toEqual(['tone', 'stance']);
-    expect(compareFieldFor('stance_gold', scores, codebook, 'response').field?.key).toBe('stance');
-    const tone = compareFieldFor('tone_gold', scores, codebook, 'response');
-    expect([tone.key, tone.field, tone.variable?.type]).toEqual(['tone', undefined, 'ordinal']);
-    expect(compareFieldFor('era', scores, codebook, 'response').key).toBe('stance');
+    expect(compareFieldFor('stance_gold', scores, codebook, 'response')).toBe('stance');
+    expect(compareFieldFor('tone_gold', scores, codebook, 'response')).toBe('tone');
+    expect(compareFieldFor('era', scores, codebook, 'response')).toBe('stance');
+    // (Round six: each text is judged on the scale of the run that gave it.) d0 and d1 come from the plain-text run
+    // (stance 1 and −1, both labelled 1), the rest from the structured run.
+    const rows = compareRows('stance', 'stance_gold', docs, views);
+    expect([...rows].filter(([, r]) => r.counts && r.value !== r.label).map(([id]) => id)).toEqual(['d1', 'd2', 'd5', 'd8']);
   });
 });
 

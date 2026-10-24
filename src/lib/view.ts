@@ -233,11 +233,11 @@ export interface RetriedRequests {
   requests: number;
   /** Retries by a version that recorded only the number planned, and fewer answers to them are stored. */
   lowerBound: boolean;
-  /** Retries by such a version, the number they planned, and the requests counted for them (from the stored answers). */
+  /** Retries by such a version (not `undated` ones), the number they planned, and the requests counted for them (from the stored answers). */
   legacy: number;
   planned: number;
   legacySent: number;
-  /** Retries recorded as sent (by later versions, or a batch). */
+  /** Retries recorded as sent (by later versions, a batch, or an Oct 18–20 batch retry: `undated`). */
   others: number;
   /** Those retries replaced attempts that version didn't keep: the run's token counts may be too low. */
   tokensIncomplete: boolean;
@@ -257,7 +257,8 @@ export interface RetriedRequests {
 /** The requests a run's retries sent, for the exports (see `retryCounts`). */
 export function retriedRequests(run: Run, results: Result[]): RetriedRequests {
   const counts = retryCounts(run, results);
-  const legacy = counts.filter((c) => c.planned !== undefined);
+  // (An Oct 18–20 batch retry counts the number it recorded, not a lower bound: among the others.)
+  const legacy = counts.filter((c) => c.planned !== undefined && !c.undated);
   return {
     requests: counts.reduce((s, c) => s + c.requests, 0),
     lowerBound: legacy.some((c) => c.requests < c.planned!),
@@ -302,10 +303,13 @@ export const sharesNumber = (run: Run, runs: Run[]) => runs.some((r) => r.id !==
 /** Runs in the order they were made: by number, then (runs that share one) by start time. */
 export const runOrder = (a: Run, b: Run) => a.number - b.number || (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id);
 
-/** When a run started (UTC), to the second, or with `ms` to the millisecond: "20261022-221754" ("…-221754.123"). */
+/**
+ * When a run started, to the second, or with `ms` to the millisecond: "20261022-221754Z" ("…-221754.123Z"). In UTC,
+ * so a name is the same on every computer; the Z says so, since the screens show local times next to it.
+ */
 function startTag(run: Run, ms = false): string {
   const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{3}))?/.exec(run.createdAt ?? '');
-  return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}${ms ? `.${m[7] ?? '000'}` : ''}` : '';
+  return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}${ms ? `.${m[7] ?? '000'}` : ''}Z` : '';
 }
 
 /**
@@ -322,7 +326,7 @@ export function runTag(run: Run, runs: Run[]): string {
   return [startTag(run, true), slug(run.id.slice(0, 8))].filter(Boolean).join('-');
 }
 
-/** A run as the app and its exports name it: its number, or for runs that share one, the number and when it started ("5-20261022-221754"). */
+/** A run as the app and its exports name it: its number, or for runs that share one, the number and when it started ("5-20261022-221754Z"). */
 export function runName(run: Run, runs: Run[]): number | string {
   return sharesNumber(run, runs) ? `${run.number}-${runTag(run, runs)}` : run.number;
 }

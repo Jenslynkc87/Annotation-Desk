@@ -192,8 +192,9 @@ export interface ResultsTable {
    *  completed_at, … with a label column the same as one run's answers): it may be one, or the owner's own sheet. */
   sure: boolean;
   /** The sheet's other columns (not named like a field, nor a label column for one, e.g. tone_gold), which may hold
-   *  the answers of a field this study no longer knows by that name; [] when the sheet has every field of one of
-   *  this study's runs or prompts. */
+   *  answers this study doesn't know by that name (a run not in it, a field renamed since); when the sheet has every
+   *  field of one of this study's runs and holds answers stored here, only those shaped like a field's answers
+   *  (stance, stance_explanation). */
   unknown: string[];
 }
 
@@ -269,15 +270,31 @@ export function resultsTable(
   const exported = strong.length > 0 || copied.some(isWordy) || (shared.length >= 2 && copied.length > 0);
   if (!exported) return { columns: [], answers: [], strong: [], copied: [], sameAs: {}, shared: [], sure: true, unknown: [] };
   const columns = [...answers, ...cols.filter((c) => strong.includes(c) || shared.includes(c))];
-  // Columns that may hold a renamed field's answers: only when the sheet lacks a field of every run and prompt here
-  // (or has none); never a label column named after a field or another of its columns (tone_gold, frame_coder1).
-  // (A plain-text run's fields: its response, or the keys of its JSON answers, the response column being often deleted.)
+  // Columns that may hold answers the app doesn't know by name (a run not in this study, or a field renamed since);
+  // never a label column named after a field or another of its columns (tone_gold, frame_coder1), nor the owner's
+  // explanation of one (tone_gold_explanation, coder_explanation). Every other column, unless the sheet has every
+  // field of one of this study's runs and holds answers stored here (`copied`): a structured run's fields, or the keys
+  // of a plain-text run's JSON answers (not its response column, which every such sheet has; nor a prompt's fields
+  // alone; nor a run's whose answers the sheet doesn't hold, e.g. a pilot with fewer keys than the run the sheet is
+  // from). (An entries run's short answers are never compared, see copiedColumns: its fields are enough.) Even then,
+  // columns shaped like a field's answers: an explanation, and the column it explains (stance beside stance_explanation).
   const has = (f: string) => cols.includes(f) || cols.includes(`answer_${f}`);
-  const fieldSets = [...runs.map((r) => r.snapshot.prompt), ...prompts].map(outputFields).concat([...keysOf.values()].map((ks) => [...ks]));
-  const complete = fieldSets.some((fs) => fs.length > 0 && fs.every(has));
+  const entriesRuns = new Set(runs.filter((r) => r.snapshot.prompt.subject === 'entries').map((r) => r.id));
+  const fieldSets = [
+    ...runs.filter((r) => r.snapshot.prompt.outputMode === 'structured').map((r) => [r.id, outputFields(r.snapshot.prompt)] as const),
+    ...[...keysOf].map(([id, ks]) => [id, [...ks]] as const),
+  ];
+  const complete = answers.length > 0 && fieldSets.some(([id, fs]) => fs.length > 0 && fs.every(has) && (copied.length > 0 || entriesRuns.has(id)));
+  const shaped = (c: string) => isWordy(c) || has(`${keyOf(c)}_explanation`) || has(`${keyOf(c)}_reasoning`);
   const bases = [...names, ...cols];
-  const unknown =
-    answers.length && complete ? [] : cols.filter((c) => !columns.includes(c) && !names.has(c) && !agreement.has(c) && !bases.some((b) => b !== c && labelColumnOf(c, b)));
+  const label = (c: string) => bases.some((b) => b !== c && labelColumnOf(c, b));
+  const ownNote = (c: string) => {
+    const of = keyOf(c).replace(/_(explanation|reasoning)$/, '');
+    return of !== keyOf(c) && (label(of) || of.split('_').every((w) => LABEL_MARKER.test(w)));
+  };
+  const unknown = cols.filter(
+    (c) => !columns.includes(c) && !names.has(c) && !agreement.has(c) && (!complete || shaped(c)) && !label(c) && !ownNote(c),
+  );
   const sure = strong.some((c) => !ownLikeColumn(c)) || copied.some(isWordy);
   return { columns, answers, strong, copied, sameAs, shared, sure, unknown };
 }

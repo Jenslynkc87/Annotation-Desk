@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
+import { comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { labelValue, namedField } from '../lib/export/tables';
 import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
 import { fieldLabel, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
@@ -110,23 +110,48 @@ export function codebookFields(viewedRun: Run | null, prompt: PromptSpec, views:
 }
 
 /**
- * What "Compare with <column>" compares, the same rule for both kinds of run: the field the column is named after
+ * The field "Compare with <column>" compares, the same rule for both kinds of run: the field the column is named after
  * (race for race_gold, `namedField`), else the first, among the scores in plain-text JSON answers (`scoreFields`) and
- * the codebook fields shown (`codebookFields`); with the score's range or the codebook's variable (its scale, and
- * whether it is a yes/no field), taken from the run's own prompt. `fallback`: with neither, e.g. a plain-text answer.
+ * the codebook fields shown (`codebookFields`). `fallback`: with neither, e.g. a plain-text answer.
  */
-export function compareFieldFor(
-  col: string,
-  scoreFields: ComparableField[],
-  codebook: Map<string, PromptSpec>,
-  fallback: string,
-): { key: string; field?: ComparableField; variable?: Variable; yesNo: boolean } {
+export function compareFieldFor(col: string, scoreFields: ComparableField[], codebook: Map<string, PromptSpec>, fallback: string): string {
   const keys = [...scoreFields.map((f) => f.key), ...codebook.keys()];
-  const key = namedField(col, keys) ?? keys[0] ?? fallback;
-  const field = scoreFields.find((f) => f.key === key);
-  if (field) return { key, field, yesNo: false };
-  const variable = codebook.get(key)?.variables.find((v) => v.name === key);
-  return { key, variable, yesNo: variable?.type === 'boolean' };
+  return namedField(col, keys) ?? keys[0] ?? fallback;
+}
+
+/**
+ * "Disagree with <column>" and the highlighting: each text's model value of `key` and its label, both as compared,
+ * and whether the comparison counts them (`counts`). Each text is judged on the scale of the run that gave its value,
+ * as the Agreement panel compares that run with the column: a structured run on its own codebook field (its scale, and
+ * whether it is a yes/no field), a plain-text run on the range of its answers shown (`comparableFields`), grown through
+ * the labels of its own texts (`comparableLabel`). Only texts with both a value and a label are listed.
+ */
+export function compareRows(key: string, col: string, docs: Doc[], views: Map<string, DocView>): Map<string, { value: string; label: string; counts: boolean }> {
+  type Rule = { field?: ComparableField | Variable; yesNo: boolean; pairs: [string, string][]; rows: [string, string, string][] };
+  const rules = new Map<string, Rule>();
+  for (const d of docs) {
+    const v = views.get(d.id);
+    if (!v?.run || v.status === 'none' || v.status === 'error') continue;
+    let rule = rules.get(v.run.id);
+    if (!rule) {
+      const p = v.run.snapshot.prompt;
+      const variable = p.outputMode === 'structured' ? p.variables.find((x) => x.name === key && x.type !== 'text') : undefined;
+      const field = p.outputMode === 'structured' ? variable : comparableFields(v.run, views.values()).find((f) => f.key === key);
+      rules.set(v.run.id, (rule = { field, yesNo: variable?.type === 'boolean', pairs: [], rows: [] }));
+    }
+    const value = normalizeLabel(key === TEXT_RESPONSE_KEY ? (v.values[key] ?? '') : fieldValue(v.run, v.values, key), rule.yesNo);
+    // A label: for scores, a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
+    const label = rule.field && 'key' in rule.field ? labelValue(d.meta[col], rule.field) : normalizeLabel(d.meta[col], rule.yesNo);
+    if (!value || !label) continue;
+    rule.pairs.push([value, label]);
+    rule.rows.push([d.id, value, label]);
+  }
+  const out = new Map<string, { value: string; label: string; counts: boolean }>();
+  for (const rule of rules.values()) {
+    const ok = comparableLabel(rule.field, rule.pairs);
+    for (const [id, value, label] of rule.rows) out.set(id, { value, label, counts: ok(value) && ok(label) });
+  }
+  return out;
 }
 
 /**
@@ -244,13 +269,14 @@ function TextsAndResults() {
   // Display names: look the key up in the current prompt, then in the viewed run's prompt (or the prompt of a structured
   // run shown).
   const promptOf = (key: string) => {
-    const inCurrent = study.prompt.variables.some((v) => v.name === key);
+    // (A plain-text prompt's fields are those it kept, hidden and unused, from before it was switched to Plain text.)
+    const inCurrent = study.prompt.outputMode === 'structured' && study.prompt.variables.some((v) => v.name === key);
     return inCurrent ? study.prompt : (codebook.get(key) ?? viewedRun?.snapshot.prompt ?? study.prompt);
   };
   const fieldName = (key: string) => fieldLabel(promptOf(key), key);
   // Plain-text runs whose answers are JSON (the owner's layout): their scores, read inside the answers, as in the
   // Agreement panel (`comparableFields`). Those of the run being viewed; in "Latest result per text" with a plain-text
-  // prompt, those of the plain-text runs shown (their ranges joined, as for two runs in the panel).
+  // prompt, those of the plain-text runs shown. (For the fields offered; each text is judged on its own run's scale.)
   const scoreFields = useMemo(() => {
     const textRuns = viewedRun
       ? viewedRun.snapshot.prompt.outputMode === 'text'
@@ -260,34 +286,22 @@ function TextsAndResults() {
         ? [...new Set([...views.values()].map((v) => v.run).filter((r): r is Run => !!r && r.snapshot.prompt.outputMode === 'text'))]
         : [];
     const byKey = new Map<string, ComparableField>();
-    for (const run of textRuns) for (const f of comparableFields(run, views.values())) byKey.set(f.key, combineFields(f, byKey.get(f.key)));
+    for (const run of textRuns) for (const f of comparableFields(run, views.values())) if (!byKey.has(f.key)) byKey.set(f.key, f);
     return [...byKey.values()];
   }, [viewedRun, study.prompt.outputMode, views]);
   // The field compared with a column (`compareFieldFor`): the one the column is named after (race for race_gold), else
   // the first, among the plain-text scores and the codebook fields shown.
   const fieldFor = (col: string) => compareFieldFor(col, scoreFields, codebook, fields[0]);
-  const { key: compareField, field: scoreField, variable: compareVar, yesNo: compareYesNo } = fieldFor(compareCol);
+  const compareField = fieldFor(compareCol);
   // The compared field gets a column of its own where none shows it (e.g. a structured run's score in "Latest" under a
   // plain-text prompt), so its value can be seen and marked.
   const shownFields = compareCol && codebook.has(compareField) && !fields.includes(compareField) ? [...fields, compareField] : fields;
-  // The compared value of a text, read inside the JSON answer for a plain-text run (also under a structured prompt).
-  const modelValue = (v: DocView) =>
-    normalizeLabel(compareField === TEXT_RESPONSE_KEY || !v.run ? (v.values[compareField] ?? '') : fieldValue(v.run, v.values, compareField), compareYesNo);
-  // A label: for scores, a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
-  const labelOf = (d: Doc) => (scoreField ? labelValue(d.meta[compareCol], scoreField) : normalizeLabel(d.meta[compareCol], compareYesNo));
-  // Labels the comparison leaves out, as the Agreement panel does (e.g. "NA", or a number off the scale).
-  const comparable = useMemo(() => {
-    const pairs: [string, string][] = [];
-    if (compareCol)
-      for (const d of docs) {
-        const v = views.get(d.id)!;
-        const val = modelValue(v);
-        const gold = labelOf(d);
-        if (v.status !== 'none' && v.status !== 'error' && val && gold) pairs.push([val, gold]);
-      }
-    return comparableLabel(scoreField ?? compareVar, pairs);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docs, views, compareCol, compareField, compareYesNo, compareVar, scoreField]);
+  // Each text's compared value (read inside the JSON answer for a plain-text run) and label, on the scale of the run
+  // that gave the value; a label the comparison leaves out (e.g. "NA", or a number off that scale) doesn't count.
+  const compared = useMemo(
+    () => (compareCol ? compareRows(compareField, compareCol, docs, views) : new Map<string, { value: string; label: string; counts: boolean }>()),
+    [compareField, compareCol, docs, views],
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -303,15 +317,13 @@ function TextsAndResults() {
       if (statusFilter === 'mismatch') {
         // Only texts with both a model value and a label (as the highlighted cells), not every unlabelled one, and
         // not those whose label the comparison leaves out (e.g. "NA").
-        const val = modelValue(v);
-        const gold = labelOf(d);
-        if (!compareCol || v.status === 'none' || v.status === 'error' || !val || !gold || val === gold || !comparable(val) || !comparable(gold)) return false;
+        const c = compared.get(d.id);
+        if (!c?.counts || c.value === c.label) return false;
       }
       if (!q) return true;
       return d.docId.toLowerCase().includes(q) || d.text.toLowerCase().includes(q) || Object.values(v.values).some((x) => x.toLowerCase().includes(q));
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docs, views, query, statusFilter, metaFilter, compareCol, compareField, compareYesNo, comparable, scoreField]);
+  }, [docs, views, query, statusFilter, metaFilter, compared]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE));
   const curPage = Math.min(page, pageCount - 1);
@@ -567,7 +579,7 @@ function TextsAndResults() {
                 <option value="">Compare with…</option>
                 {metaColumns.map((c) => (
                   <option key={c} value={c}>
-                    {fieldName(fieldFor(c).key)} vs {c}
+                    {fieldName(fieldFor(c))} vs {c}
                   </option>
                 ))}
               </select>
@@ -660,8 +672,8 @@ function TextsAndResults() {
                   const gold = compareCol ? d.meta[compareCol] ?? '' : '';
                   // The compared value and label, and the cell that shows the value (a plain-text run's whole answer
                   // when its score has no column of its own).
-                  const [nv, ng] = compareCol ? [modelValue(v), labelOf(d)] : ['', ''];
-                  const cmp = nv && ng && comparable(nv) && comparable(ng) ? (nv === ng ? 'match' : 'mismatch') : '';
+                  const c = compared.get(d.id);
+                  const cmp = c?.counts ? (c.value === c.label ? 'match' : 'mismatch') : '';
                   const cmpCell = v.run?.snapshot.prompt.outputMode === 'text' && !shownFields.includes(compareField) ? TEXT_RESPONSE_KEY : compareField;
                   return (
                     <tr
