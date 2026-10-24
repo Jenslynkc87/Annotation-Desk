@@ -11,10 +11,11 @@ import {
   splitPasted,
   type ParsedTable,
 } from '../lib/import/parse';
-import { clearPlan, guessKeyColumn, matchLabels, resultsTable } from '../lib/import/labels';
+import { clearPlan, guessKeyColumn, matchLabels, ownLikeColumn, resultsTable } from '../lib/import/labels';
 import { templatePlaceholders } from '../lib/prompt';
 import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
 import { isEntries, words } from '../lib/subject';
+import { runName } from '../lib/view';
 import type { PromptSpec, Run } from '../lib/types';
 import { countWords } from '../lib/util';
 import { Icon, Modal } from './ui';
@@ -396,7 +397,7 @@ function TableDialog({
       {repeated.length > 0 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
           {repeated.length.toLocaleString()} {entry ? (repeated.length === 1 ? 'entry has' : 'entries have') : repeated.length === 1 ? 'text has' : 'texts have'} the same ID as another
-          (e.g. “{repeated[0]}”) and will get _2, _3 and so on. Choose an ID column with a different value in each row, so that labels or answers in a spreadsheet can be
+          (e.g. “{repeated[0]}”) and will get _2, _3 and so on (a row the same as another in every column is added once). Choose an ID column with a different value in each row, so that labels or answers in a spreadsheet can be
           matched to them later.
         </div>
       )}
@@ -523,13 +524,15 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
     [docs, m],
   );
   // A results file exported from this app: its answer columns are the model's, not human labels (field names from the
-  // runs and from the current and saved prompts, so also before a run or after one is deleted).
+  // runs and from the current and saved prompts, so also before a run or after one is deleted). Only the columns that
+  // would be added are judged, not the one rows are matched by (e.g. a survey's response_id).
   const exported = useMemo(
-    () => resultsTable(table, runs, results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)]),
-    [table, runs, results, m, prompt, saved],
+    () => resultsTable(table, runs, results, m.updates, [prompt, ...(saved ?? []).map((x) => x.prompt)], keyCol),
+    [table, runs, results, m, prompt, saved, keyCol],
   );
-  // Its other columns not yet in this study: one may hold the answers of a field named differently now.
-  const others = m.columns.filter((c) => !exported.columns.includes(c) && !m.replaced.includes(c));
+  // Its other columns not yet in this study that may hold the answers of a field named differently now (never a label
+  // column such as tone_gold; none when the sheet has every field of a run or prompt here).
+  const others = exported.unknown.filter((c) => !m.replaced.includes(c));
   // Answer columns whose values were not shown to be the model's (e.g. a coder's own labels beside the model's
   // explanations): named as such, never as the model's.
   const unconfirmed = exported.answers.filter((c) => !exported.copied.includes(c));
@@ -541,6 +544,17 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
   const plural = (xs: string[]) => (xs.length === 1 ? '' : 's');
   const [one, many] = entries ? ['entry', 'entries'] : ['text', 'texts'];
   const blocked = m.conflicts.length > 0 || exported.columns.length > 0;
+  // When only columns a sheet of the owner's may have too point to an export (status, completed_at, response_id):
+  // the notice says it may be one, and how to add it if it is the owner's own.
+  const own = [...exported.strong, ...exported.shared];
+  // Of those, the columns only such files have (not response_id, which a survey's sheet may have too).
+  const proof = exported.strong.filter((c) => !ownLikeColumn(c));
+  const weak = own.filter((c) => !proof.includes(c));
+  const sameAs = (c: string) => {
+    const x = exported.sameAs[c];
+    const run = runs.find((r) => r.id === x?.run);
+    return `run #${run ? runName(run, runs) : '?'}’s answers for all ${(x?.texts ?? 0).toLocaleString()} ${x?.texts === 1 ? one : many} with a value there`;
+  };
   // Several rows for texts that the study has twice under one name (John Smith, John Smith_2) need other advice.
   const sameName = m.sameName;
   const otherConflicts = m.conflicts.filter((k) => !sameName.some((x) => x.key === k));
@@ -581,20 +595,34 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
         For the {many} it lists, a column that is already there gets this sheet’s values: a blank cell leaves no value (“NA” keeps {entries ? 'an entry' : 'a text'} out
         of the comparison). {entries ? 'Entries' : 'Texts'} it doesn’t list keep theirs.
       </p>
-      {exported.columns.length > 0 && (
+      {exported.columns.length > 0 && !exported.sure && (
+        <div className="notice warn" style={{ marginBottom: 12 }}>
+          <strong>This may be a results file exported from Annotation Desk</strong>: it has the column{plural(own)} {list(own)} those files have
+          {exported.copied.length === 1 && (
+            <>
+              , and its column {exported.copied[0]} is the same as {sameAs(exported.copied[0])}
+            </>
+          )}
+          {exported.copied.length > 1 && <>, and its columns {exported.copied.map((c) => `${c} (the same as ${sameAs(c)})`).join(', ')}</>}. If it is
+          your own sheet, rename {own.length === 1 ? 'that column' : 'those columns'} (e.g. {own[0]} to my_{own[0]}) or delete {own.length === 1 ? 'it' : 'them'}, then
+          add it again. If it is a results file, use a sheet with only your own columns (the {entries ? 'ID' : 'file name or ID'} and your{' '}
+          {entries ? 'answers' : 'labels'}): the model’s answers added here would count as {entries ? 'your own answers' : 'human labels'}.
+        </div>
+      )}
+      {exported.columns.length > 0 && exported.sure && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
           <strong>This is a results file exported from Annotation Desk</strong>:{' '}
-          {exported.strong.length > 0 ? (
+          {proof.length > 0 ? (
             <>
-              it has the column{plural(exported.strong)} {list(exported.strong)}, which only those files have.
+              it has the column{plural(proof)} {list(proof)}, which only those files have.
             </>
           ) : (
             <>
               its column{plural(exported.copied)} {list(exported.copied)} {exported.copied.length === 1 ? 'holds' : 'hold'} the model’s answers stored in this study,
               for nearly every {one} it lists
-              {exported.shared.length > 0 && (
+              {weak.length > 0 && (
                 <>
-                  , and it has the column{plural(exported.shared)} {list(exported.shared)} those files have
+                  , and it has the column{plural(weak)} {list(weak)} those files have
                 </>
               )}
               .
@@ -607,7 +635,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
             </>
           ) : exported.copied.length > 0 ? (
             <>
-              {exported.strong.length > 0 ? (
+              {proof.length > 0 ? (
                 <>
                   Its column{plural(exported.copied)} {list(exported.copied)} {exported.copied.length === 1 ? 'holds' : 'hold'} the model’s answers, which are
                   already in this study (under <em>Runs &amp; agreement</em>); added

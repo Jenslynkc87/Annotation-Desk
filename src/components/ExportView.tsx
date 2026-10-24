@@ -5,7 +5,7 @@ import { labelPairs } from '../lib/export/tables';
 import { currentStudy, getState, toast, useStore } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
-import { retryInProgress, runInProgress, runName, runTitle } from '../lib/view';
+import { retryInProgress, runInProgress, runName, runOrder, runTitle } from '../lib/view';
 import { Icon } from './ui';
 
 function exportData(): ExportData {
@@ -17,7 +17,8 @@ export function ExportView() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
   const docs = useStore((s) => s.docs);
-  const withResults = runs.filter((r) => results.some((x) => x.runId === r.id));
+  // (In the order the runs were made, as in the exports: of runs that share a number, the one started last comes last.)
+  const withResults = [...runs].sort(runOrder).filter((r) => results.some((x) => x.runId === r.id));
   // The run picked; until then the latest finished run with results (else the latest with results, e.g. once the
   // first results arrive while this tab is open). Once shown it stays: a run that is still being sent doesn't take
   // its place when its first results come in.
@@ -27,6 +28,8 @@ export function ExportView() {
     if (run && run.id !== runId) setRunId(run.id);
   }, [run, runId]);
   const [busy, setBusy] = useState('');
+  // The file a zip is writing (a full corpus with logs takes many minutes).
+  const [writing, setWriting] = useState('');
   const [supp, setSupp] = useState({ includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(true);
 
@@ -132,13 +135,18 @@ export function ExportView() {
             disabled={!!busy || (!docs.length && !runs.length)}
             onClick={() =>
               go('research', async () => {
-                const { blob, name } = await buildResearchRepo(exportData(), { includeLogs: researchLogs });
-                download(name, blob);
+                try {
+                  const { blob, name } = await buildResearchRepo(exportData(), { includeLogs: researchLogs, onProgress: setWriting });
+                  download(name, blob);
+                } finally {
+                  setWriting('');
+                }
               })
             }
           >
             <Icon name="download" /> {busy === 'research' ? 'Building…' : 'Download .zip'}
           </button>
+          {busy === 'research' && writing && <div className="hint">Writing {writing.slice(writing.indexOf('/') + 1)}… (a full corpus with logs can take half an hour; keep this tab open)</div>}
         </div>
 
         <div className="card card-pad export-card">
@@ -175,13 +183,18 @@ export function ExportView() {
             disabled={!run || !!busy}
             onClick={() =>
               go('supp', async () => {
-                const { blob, name } = await buildSupplementary(exportData(), run!, supp);
-                download(name, blob);
+                try {
+                  const { blob, name } = await buildSupplementary(exportData(), run!, { ...supp, onProgress: setWriting });
+                  download(name, blob);
+                } finally {
+                  setWriting('');
+                }
               })
             }
           >
             <Icon name="download" /> {busy === 'supp' ? 'Building…' : 'Download .zip'}
           </button>
+          {busy === 'supp' && writing && <div className="hint">Writing {writing.slice(writing.indexOf('/') + 1)}…</div>}
         </div>
       </div>
 

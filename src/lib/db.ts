@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { Doc, Result, ResultLog, Run, Study } from './types';
+import { runOrder } from './view';
 
 interface DeskDB extends DBSchema {
   studies: { key: string; value: Study };
@@ -47,7 +48,8 @@ export async function loadStudyData(studyId: string) {
     d.getAllFromIndex('results', 'byStudy', studyId),
   ]);
   docs.sort((a, b) => a.order - b.order);
-  runs.sort((a, b) => a.number - b.number);
+  // (Runs that share a number, from an earlier version used in two tabs: the one started later last, as in the exports.)
+  runs.sort(runOrder);
   return { docs, runs, results };
 }
 

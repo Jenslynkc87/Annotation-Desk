@@ -16,7 +16,7 @@ Everything runs in your browser. Your API key, texts and results never pass thro
 - **Retry failed requests** within the same run, with its frozen settings, so one run stays one complete dataset (in a batch run, as a new batch at batch price). A batch run too large for one batch is sent as several, after a warning.
 - **Inspect results:** a results list with per-text detail (rationale, reasoning summary, tokens, timing, the exact request and the full raw response), comparison against any metadata column, and an agreement panel (percent agreement, Cohen's κ, weighted κ, Krippendorff's α, Gwet's AC1, Spearman ρ, MAE, confusion matrix) for model vs. human labels, run vs. run, or replicate vs. replicate.
 - **Compare two runs** (e.g. two models): agreement within a chosen tolerance (exact, ±1, ±2 points), systematic difference (does one score higher?), and a downloadable Excel comparison report with intervals, confusion tables, both runs' settings and draft text for a paper. Plain-text runs that answer in JSON are compared on their numeric scores.
-- **Draw a sample:** a stratified random sample (e.g. 100 held-out articles within era × journal groups, pilots left out), reproducible from a seed and marked in a column; filter the text list by it and run exactly those texts.
+- **Draw a sample:** a stratified random sample (e.g. 100 held-out articles within era × journal groups, pilots left out), reproducible from a seed and marked in a column (texts already in another sample in that column are left out, so samples don't overlap); filter the text list by it and run exactly those texts.
 - **Agreement with uncertainty:** 95% bootstrap intervals for every agreement statistic, the number of labelled texts compared, and human–human agreement (two coders' columns) as a baseline.
 - **Export:**
   - **Excel** workbook for a run.
@@ -27,7 +27,7 @@ Everything runs in your browser. Your API key, texts and results never pass thro
 
 Open the hosted app, click **API keys**, paste a key from [console.anthropic.com](https://console.anthropic.com/settings/keys) or [platform.openai.com](https://platform.openai.com/api-keys), and create your first study.
 
-Keys are kept only for the open tab unless you tick *Remember keys in this browser*. Studies are saved automatically in the browser (IndexedDB); use **Export → Study backup** to move a study to another computer or browser, and keep one, since a browser can clear a site's data (e.g. when the disk is full). The app works in one tab at a time: a second tab waits; once the first is closed, it opens when you switch to it or click *Open here*, so the same requests are never sent twice.
+Keys are kept only for the open tab unless you tick *Remember keys in this browser*. Studies are saved automatically in the browser (IndexedDB); use **Export → Study backup** to move a study to another computer or browser, and keep one, since a browser can clear a site's data (e.g. when the disk is full). The app works in one tab at a time: a second tab waits; once the first is closed, it opens when you switch to it or click *Open here*, so the same requests are never sent twice. (Versions before October 2026 had no such lock: close any tab still running one before opening this version.)
 
 ## Development
 

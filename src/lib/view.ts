@@ -38,7 +38,8 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
     let chosenRun: Run | null = null;
     for (const r of list) {
       const run = runById.get(r.runId);
-      if (run && (!chosenRun || run.number > chosenRun.number)) chosenRun = run;
+      // (Of runs that share a number, the one started last, as in the exports.)
+      if (run && (!chosenRun || runOrder(run, chosenRun) > 0)) chosenRun = run;
     }
     const reps = chosenRun ? list.filter((r) => r.runId === chosenRun!.id).sort((a, b) => a.replicate - b.replicate) : [];
     const values: Record<string, string> = {};
@@ -176,6 +177,8 @@ export interface RetryCount {
   interrupted?: boolean;
   /** Of `requests`, those stopped (Cancel, a failed save) before an answer was stored. */
   unanswered?: number;
+  /** A batch retry by a version that dated its answers at the run's start: `requests` is the number it recorded. */
+  undated?: boolean;
 }
 
 /**
@@ -186,11 +189,16 @@ export interface RetryCount {
  * (`replacedAt`). That is a lower bound, since those versions overwrote an attempt a retry replaced (and attempts
  * replaced before October 23, 2026 are only in the logs); such a batch retry whose batches are not back yet counts
  * the answers so far (none at first). An immediate retry still being sent: its answers so far.
+ *
+ * The batch builds of October 18–20, 2026 (live before the published one) dated every batch answer at the run's start
+ * and kept no upload time on their batches, so no answer of their batch retries falls in its window: such a retry
+ * counts the number it recorded, which it saved only once its batch had gone up (`undated`).
  */
 export function retryCounts(run: Run, results: Result[]): RetryCount[] {
   const entries = [...(run.retries ?? [])].sort((a, b) => a.at.localeCompare(b.at));
   if (!entries.length) return [];
   const legacy = BARE_VERSION.test(run.snapshot.appVersion);
+  const parts = run.batch?.parts ?? [];
   // Every request a result records, each with its attempt number: the earlier attempts later retries replaced (those
   // whose request time it kept, from October 23, 2026), then its own.
   const sends = results.flatMap((r) => {
@@ -203,6 +211,12 @@ export function retryCounts(run: Run, results: Result[]): RetryCount[] {
   return entries.map((e, i) => {
     const asBatch = !!e.asBatch;
     if (legacy && !e.counted) {
+      // A batch retry with no batch uploaded in its window, among batches without an upload time: undated answers.
+      const next = entries[i + 1]?.at;
+      const undated =
+        asBatch && parts.some((p) => !p.submittedAt) && !parts.some((p) => p.submittedAt && p.submittedAt >= e.at && (!next || p.submittedAt < next));
+      // (Its replaced attempts were overwritten too.)
+      if (undated) return { at: e.at, asBatch, requests: e.requests, planned: e.requests, unrecorded: true, undated: true };
       // (Requests that record no earlier attempt: whatever they replaced, that version didn't keep.)
       const found = within(i);
       const unrecorded = found.some((s) => s.attempt < 2) || (!asBatch && found.length < e.requests);
@@ -232,6 +246,12 @@ export interface RetriedRequests {
   interrupted: boolean;
   /** Requests sent that were stopped (Cancel, a failed save) before an answer was stored: no result, no token count. */
   unanswered: number;
+  /** How many retries were interrupted, and how many stopped with requests under way (`unanswered`). */
+  retriesInterrupted: number;
+  retriesStopped: number;
+  /** Batch retries counted as the number recorded (answers dated at the run's start, see `retryCounts`), and that number. */
+  undated: number;
+  undatedRequests: number;
 }
 
 /** The requests a run's retries sent, for the exports (see `retryCounts`). */
@@ -249,6 +269,10 @@ export function retriedRequests(run: Run, results: Result[]): RetriedRequests {
     asBatch: counts.every((c) => c.asBatch) ? 'all' : counts.every((c) => !c.asBatch) ? 'none' : 'some',
     interrupted: counts.some((c) => c.interrupted),
     unanswered: counts.reduce((s, c) => s + (c.unanswered ?? 0), 0),
+    retriesInterrupted: counts.filter((c) => c.interrupted).length,
+    retriesStopped: counts.filter((c) => c.unanswered).length,
+    undated: counts.filter((c) => c.undated).length,
+    undatedRequests: counts.reduce((s, c) => s + (c.undated ? c.requests : 0), 0),
   };
 }
 
@@ -275,12 +299,32 @@ export function runTokens(results: Result[], runId: string, replaced?: Run['repl
 /** Runs that share their number with another one (given twice by versions before October 22, 2026, open in two tabs). */
 export const sharesNumber = (run: Run, runs: Run[]) => runs.some((r) => r.id !== run.id && r.number === run.number);
 
-/** The start of a run's id: tells apart runs that share a number (also in their folder names). */
-export const runIdTag = (run: Run) => slug(run.id.slice(0, 8));
+/** Runs in the order they were made: by number, then (runs that share one) by start time. */
+export const runOrder = (a: Run, b: Run) => a.number - b.number || (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.id.localeCompare(b.id);
 
-/** A run as the app and its exports name it: its number, or for runs that share one, the number and the start of its id ("5-ab12cd34"). */
+/** When a run started (UTC), to the second, or with `ms` to the millisecond: "20261022-221754" ("…-221754.123"). */
+function startTag(run: Run, ms = false): string {
+  const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{3}))?/.exec(run.createdAt ?? '');
+  return m ? `${m[1]}${m[2]}${m[3]}-${m[4]}${m[5]}${m[6]}${ms ? `.${m[7] ?? '000'}` : ''}` : '';
+}
+
+/**
+ * Tells apart runs that share a number (also in their folder names): when the run started, which a copy of the study
+ * keeps (a backup import gives runs new ids). Two such runs started in the same second: to the millisecond; in the
+ * same millisecond: also the start of the id.
+ */
+export function runTag(run: Run, runs: Run[]): string {
+  const twins = runs.filter((r) => r.id !== run.id && r.number === run.number);
+  for (const ms of [false, true]) {
+    const tag = startTag(run, ms);
+    if (tag && !twins.some((r) => startTag(r, ms) === tag)) return tag;
+  }
+  return [startTag(run, true), slug(run.id.slice(0, 8))].filter(Boolean).join('-');
+}
+
+/** A run as the app and its exports name it: its number, or for runs that share one, the number and when it started ("5-20261022-221754"). */
 export function runName(run: Run, runs: Run[]): number | string {
-  return sharesNumber(run, runs) ? `${run.number}-${runIdTag(run)}` : run.number;
+  return sharesNumber(run, runs) ? `${run.number}-${runTag(run, runs)}` : run.number;
 }
 
 /** "#5 · label". `runs`: the study's runs, so runs that share a number are told apart as in the exports (`runName`). */

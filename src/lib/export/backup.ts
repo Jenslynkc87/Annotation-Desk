@@ -60,7 +60,18 @@ export async function buildBackup(study: Study, docs: Doc[], runs: Run[], includ
     });
     parts.push(last ? '\n]}\n' : '\n],\n');
   };
-  await section('docs', (add) => docs.forEach(add), false);
+  // (The texts too, a few hundred at a time: a full corpus's are about 500 million characters.)
+  await section(
+    'docs',
+    (add) => {
+      for (let i = 0; i < docs.length; i += 200) {
+        const start = parts.length;
+        docs.slice(i, i + 200).forEach(add);
+        parts.splice(start, parts.length - start, new Blob(parts.slice(start)));
+      }
+    },
+    false,
+  );
   await section('runs', (add) => runs.forEach(add), false);
   await section(
     'results',

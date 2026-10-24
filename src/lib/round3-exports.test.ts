@@ -195,25 +195,25 @@ describe('runs that share a number (F85)', () => {
   it('the tables, README and file names tell them apart', async () => {
     const docs = mkDocs(2, (i) => ({ stance_gold: i ? 'for' : 'against' }));
     const a = mkRun('aaaaaaaa-1111', 2, docs.map((d) => d.id), stancePrompt);
-    const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt);
+    const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt, { createdAt: '2026-10-01T10:30:00.000Z' });
     const c = mkRun('cccccccc-3333', 3, docs.map((d) => d.id), stancePrompt);
     const results = [a, b, c].flatMap((r) => docs.map((d) => mkResult(r, d, 1, { stance: 'for' })));
     const d: ExportData = { study: mkStudy(stancePrompt), docs, runs: [a, b, c], results };
     const { blob } = await buildResearchRepo(d, { includeLogs: false });
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
-    expect(csvRows(await read('results/runs.csv')).map((r) => r.run)).toEqual(['2-aaaaaaaa', '2-bbbbbbbb', '3']);
-    expect([...new Set(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run))]).toEqual(['2-aaaaaaaa', '2-bbbbbbbb', '3']);
-    expect([...new Set(csvRows(await read('results/agreement.csv')).map((r) => r.run))]).toEqual(['2-aaaaaaaa', '2-bbbbbbbb', '3']);
+    expect(csvRows(await read('results/runs.csv')).map((r) => r.run)).toEqual(['2-20261001-100000', '2-20261001-103000', '3']);
+    expect([...new Set(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run))]).toEqual(['2-20261001-100000', '2-20261001-103000', '3']);
+    expect([...new Set(csvRows(await read('results/agreement.csv')).map((r) => r.run))]).toEqual(['2-20261001-100000', '2-20261001-103000', '3']);
     const readme = await read('README.md');
     expect(readme).toContain('Python script reproducing run #3 ');
-    expect(readme).toContain('its name in the tables’ `run` column (e.g. 2-aaaaaaaa)');
+    expect(readme).toContain('its name in the tables’ `run` column (e.g. 2-20261001-100000)');
     // The supplementary package of one of them, and the comparison report.
     const supp = await supplementary(d, b);
-    expect(supp.readme).toContain('(run #2-bbbbbbbb)');
-    expect([...new Set(csvRows(await supp.read('results_by_replicate.csv')).map((r) => r.run))]).toEqual(['2-bbbbbbbb']);
+    expect(supp.readme).toContain('(run #2-20261001-103000)');
+    expect([...new Set(csvRows(await supp.read('results_by_replicate.csv')).map((r) => r.run))]).toEqual(['2-20261001-103000']);
     const report = await workbook(await buildComparisonReport(a, b, docs, [a, b, c], results, 1));
-    expect(report('Runs').find((r) => r.setting === 'run')).toMatchObject({ first: '#2-aaaaaaaa', second: '#2-bbbbbbbb' });
+    expect(report('Runs').find((r) => r.setting === 'run')).toMatchObject({ first: '#2-20261001-100000', second: '#2-20261001-103000' });
   });
 });
 
@@ -362,13 +362,13 @@ describe('review of the round-three export fixes', () => {
   it('runs that share a number: their own results_long.csv names them as runs.csv does, and their rows are not mixed (F85)', async () => {
     const docs = mkDocs(3);
     const a = mkRun('aaaaaaaa-1111', 2, docs.map((d) => d.id), stancePrompt);
-    const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt);
+    const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt, { createdAt: '2026-10-01T10:30:00.000Z' });
     const results = [a, b].flatMap((r) => docs.map((d) => mkResult(r, d, 1, { stance: 'for' })));
     const { blob } = await buildResearchRepo({ study: mkStudy(stancePrompt), docs, runs: [a, b], results }, { includeLogs: false });
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
-    expect(csvRows(await read('runs/run-02-bbbbbbbb/results_long.csv')).map((r) => r.run)).toEqual(['2-bbbbbbbb', '2-bbbbbbbb', '2-bbbbbbbb']);
-    expect(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run)).toEqual(['2-aaaaaaaa', '2-aaaaaaaa', '2-aaaaaaaa', '2-bbbbbbbb', '2-bbbbbbbb', '2-bbbbbbbb']);
+    expect(csvRows(await read('runs/run-02-20261001-103000/results_long.csv')).map((r) => r.run)).toEqual(['2-20261001-103000', '2-20261001-103000', '2-20261001-103000']);
+    expect(csvRows(await read('results/results_all_runs_long.csv')).map((r) => r.run)).toEqual(['2-20261001-100000', '2-20261001-100000', '2-20261001-100000', '2-20261001-103000', '2-20261001-103000', '2-20261001-103000']);
   });
 
   it('README: a missing-value marker is no label, so it is not given as an example of a label left out (F10)', async () => {

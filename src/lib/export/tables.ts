@@ -6,7 +6,7 @@ import { TEXT_RESPONSE_KEY, flattenJsonResponse, isExplanationKey, normalizeLabe
 import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
-import { buildDocViews, replacedAttempts, retriedRequests, runIdTag, runInProgress, runName, sharesNumber, type DocView, type RetriedRequests } from '../view';
+import { buildDocViews, replacedAttempts, retriedRequests, runInProgress, runName, runTag, sharesNumber, type DocView, type RetriedRequests } from '../view';
 
 export type Row = Record<string, string | number | null>;
 
@@ -14,6 +14,32 @@ export function toCsv(rows: Row[], columns?: string[]): string {
   const cols = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
   // UTF-8 BOM so Excel opens non-ASCII text correctly.
   return '﻿' + Papa.unparse({ fields: cols, data: rows.map((r) => cols.map((c) => r[c] ?? '')) });
+}
+
+/**
+ * The same file as `toCsv`, as a Blob made a few rows at a time: a table with every text (about 500 million
+ * characters for a full corpus), or every answer of several full runs, is too long for one string.
+ */
+export function toCsvBlob(rows: Row[], columns?: string[]): Blob {
+  const cols = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  if (!rows.length || !cols.length) return new Blob([toCsv(rows, columns)]);
+  const parts: Blob[] = [];
+  let lines: string[] = [];
+  let length = 0;
+  rows.forEach((r, i) => {
+    const data = [cols.map((c) => r[c] ?? '')];
+    // The header with the first row; then each row after a line break, as Papa joins them.
+    const line = i ? '\r\n' + Papa.unparse({ fields: cols, data }, { header: false }) : '﻿' + Papa.unparse({ fields: cols, data });
+    lines.push(line);
+    length += line.length;
+    if (length >= 4_000_000) {
+      parts.push(new Blob(lines));
+      lines = [];
+      length = 0;
+    }
+  });
+  parts.push(new Blob(lines));
+  return new Blob(parts);
 }
 
 export function metaColumns(docs: Doc[]): string[] {
@@ -238,7 +264,7 @@ export const ABOUT_AUTHOR = 'about the author';
  * Words around a field's name that mark a column of human labels for it (race_gold, human_race, race_coder2), also
  * saying whose or which labels they are (race_expert_gold, race_final_gold, gold_standard_race, human_coded_race).
  */
-const LABEL_MARKER = /^(gold|human|coder|rater|annotator|pilot|expert|final|consensus|standard|coded|reference|adjudicated|manual)\d*$/;
+export const LABEL_MARKER = /^(gold|human|coder|rater|annotator|pilot|expert|final|consensus|standard|coded|reference|adjudicated|manual)\d*$/;
 
 /**
  * The fields that label columns' own names point to: race_negative_gold or gold_race_negative → race_negative (the
@@ -507,7 +533,7 @@ export function agreementRows(rows: AgreementRow[], runNumber: number | string):
 }
 
 // (Kept in view.ts, which the screens use too, and passed on from here.)
-export { runIdTag, runName, sharesNumber };
+export { runName, runTag, sharesNumber };
 
 /**
  * What a run's retry counts leave out ('' if nothing), about the requests sent and the tokens, and both in one. For
@@ -522,13 +548,19 @@ export function retryNotes(run: Run, retry: RetriedRequests): { requests: string
   const requests = retry.lowerBound
     ? `recorded for Retry failed only the number of requests planned (${n(retry.planned)}), not the number sent: counted from the stored answers, ${retry.legacySent ? `at least ${n(retry.legacySent)} ${retry.legacySent === 1 ? 'was' : 'were'} sent` : `the number sent is not known (no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'})`}${retry.others ? `; with the run’s other ${retry.others === 1 ? 'retry' : 'retries'}, at least ${n(retry.requests)} in all` : ''}`
     : '';
+  // Batch retries of the builds of October 18–20, 2026, whose answers are dated at the run's start (see retryCounts).
+  const undated = retry.undated
+    ? `dated the answers of a batch sent by Retry failed at the run’s start, so the requests ${retry.undated === 1 ? 'that retry sent are taken as the number' : 'those retries sent are taken as the numbers'} it recorded (${n(retry.undatedRequests)}${retry.undated === 1 ? '' : ' in all'})`
+    : '';
   const tokens = retry.tokensIncomplete
     ? 'did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries'
     : '';
-  const both = [requests, tokens].filter(Boolean).join('; it also ');
+  const sent = [requests, undated].filter(Boolean).join('; it also ');
+  const both = [requests, undated, tokens].filter(Boolean).join('; it also ');
   // A retry cut short by the page closing counts the requests answered; those under way then are not known.
+  const ni = retry.retriesInterrupted;
   const cut = retry.interrupted
-    ? `A Retry failed of this run was interrupted (the page was closed while it was sending): it counts the requests answered; up to ${n(run.snapshot.options.concurrency)} more may have been sent without an answer being recorded.`
+    ? `${ni > 1 ? `${n(ni)} of this run’s retries (Retry failed) were` : 'A Retry failed of this run was'} interrupted (the page was closed while ${ni > 1 ? 'they were' : 'it was'} sending): ${ni > 1 ? 'they count' : 'it counts'} the requests answered; up to ${n(run.snapshot.options.concurrency)} more${ni > 1 ? ' each' : ''} may have been sent without an answer being recorded.`
     : '';
   // Requests sent when Cancel (or a failed save) stopped a retry: counted, but they left no result and no token count.
   const u = retry.unanswered;
@@ -537,7 +569,7 @@ export function retryNotes(run: Run, retry: RetriedRequests): { requests: string
     : '';
   const join = (...parts: string[]) => parts.filter(Boolean).join(' ');
   return {
-    requests: join(requests && `${version} ${requests}.`, cut, stopped),
+    requests: join(sent && `${version} ${sent}.`, cut, stopped),
     tokens: join(tokens && `${version} ${tokens}.`, stopped),
     both: join(both && `${version} ${both}.`, cut, stopped),
   };

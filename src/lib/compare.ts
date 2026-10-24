@@ -1,7 +1,7 @@
 // Which fields of a run agreement can be computed on, and their values per text.
 import type { Level } from './metrics';
 import { fieldLabel, flattenJsonResponse, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from './prompt';
-import type { Result, Run } from './types';
+import type { PromptSpec, Result, Run, Variable } from './types';
 import type { DocView } from './view';
 
 export interface ComparableField {
@@ -15,6 +15,8 @@ export interface ComparableField {
   /**
    * Plain-text runs: the lowest and highest of the model's single answers, whole or not, from which `agreement`
    * grows the scale that labels are compared on (`allowed` holds its whole numbers for whole-number scores).
+   * A numeric codebook combined with plain-text scores (`combineFields`): the codebook's own lowest and highest
+   * point, so the scale's midpoint stays the codebook's when `allowed` is widened to take in the model's answers.
    */
   range?: [number, number];
   yesNo: boolean;
@@ -46,18 +48,7 @@ function answerNumbers(r: Result): { keys: string[]; nums: number[] } | null {
  */
 export function comparableFields(run: Run, views: Iterable<DocView>): ComparableField[] {
   const p = run.snapshot.prompt;
-  if (p.outputMode === 'structured') {
-    return p.variables
-      .filter((v) => v.type !== 'text')
-      .map((v) => ({
-        key: v.name,
-        label: fieldLabel(p, v.name),
-        level: v.type === 'ordinal' ? 'ordinal' : v.type === 'number' ? 'interval' : 'nominal',
-        // Yes/no: its two values are its categories (a tie "false | true" is no third one).
-        allowed: v.type === 'category' || v.type === 'ordinal' ? v.values.map((x) => normalizeLabel(x)).filter(Boolean) : v.type === 'boolean' ? ['false', 'true'] : [],
-        yesNo: v.type === 'boolean',
-      }));
-  }
+  if (p.outputMode === 'structured') return p.variables.filter((v) => v.type !== 'text').map((v) => codebookField(p, v));
   // Read from the separate answers, not the combined ones: the median of two answers can fall between whole
   // numbers (e.g. 1.5), which must not turn a field of whole-number scores into an interval field.
   // (Each key's values as numbers, NaN for text.)
@@ -92,6 +83,18 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
     });
 }
 
+/** A codebook field (not free text) of a structured prompt, as `comparableFields` gives it. */
+export function codebookField(p: PromptSpec, v: Variable): ComparableField {
+  return {
+    key: v.name,
+    label: fieldLabel(p, v.name),
+    level: v.type === 'ordinal' ? 'ordinal' : v.type === 'number' ? 'interval' : 'nominal',
+    // Yes/no: its two values are its categories (a tie "false | true" is no third one).
+    allowed: v.type === 'category' || v.type === 'ordinal' ? v.values.map((x) => normalizeLabel(x)).filter(Boolean) : v.type === 'boolean' ? ['false', 'true'] : [],
+    yesNo: v.type === 'boolean',
+  };
+}
+
 const isNumber = (s: string) => s.trim() !== '' && Number.isFinite(Number(s));
 /** A codebook scale of numbers: an ordinal scale, or category codes that are all numbers. */
 const numericCodebook = (f: ComparableField) => !f.scaleSeen && f.allowed.length > 0 && f.allowed.every(isNumber);
@@ -114,7 +117,9 @@ export function combineFields(a: ComparableField, b: ComparableField | undefined
   // A codebook of numbers on one side, plain-text scores on the other: the codebook's scale at whatever level results
   // (also interval, when one plain-text answer was 2.5), so Gwet's q, the split of a half point, the weights and the
   // midpoint are the codebook's. Where the plain-text answers reach beyond it, it is widened to the whole numbers of
-  // their range (for a codebook of whole numbers), else to that range's ends, so no answer of the model is left out.
+  // their range (for a codebook of whole numbers), else to that range's ends, so no answer of the model is left out;
+  // `range` keeps the codebook's own ends, so a stray answer (a 4 next to −3…3) doesn't move the midpoint that
+  // decides "opposite direction".
   const coded = numericCodebook(a) && b.scaleSeen ? a : numericCodebook(b) && a.scaleSeen ? b : null;
   if (coded) {
     const other = coded === a ? b : a;
@@ -131,7 +136,7 @@ export function combineFields(a: ComparableField, b: ComparableField | undefined
       } else extra.push(...[from, to].filter((x) => x < lo || x > hi));
     }
     const allowed = [...coded.allowed, ...extra.map(String)];
-    return { ...base, allowed: [...new Set(allowed)].sort((x, y) => Number(x) - Number(y)) };
+    return { ...base, allowed: [...new Set(allowed)].sort((x, y) => Number(x) - Number(y)), range: [lo, hi] };
   }
   if (level === 'interval' || (!a.allowed.length && !a.scaleSeen) || (!b.allowed.length && !b.scaleSeen)) return { ...base, allowed: [] };
   if (!a.allowed.length || !b.allowed.length) return { ...base, allowed: [] };

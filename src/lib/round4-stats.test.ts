@@ -171,7 +171,7 @@ describe('a codebook run against a plain-text run with a 2.5 answer (G4)', () =>
     const plain = plainField([0, 1, 2, 2.5, 1, 0]);
     expect([plain.level, plain.allowed]).toEqual(['interval', []]);
     for (const f of [combineFields(coded, plain), combineFields(plain, coded)]) {
-      expect([f.level, f.allowed, f.scaleSeen, f.range]).toEqual(['interval', SCALE, false, undefined]);
+      expect([f.level, f.allowed, f.scaleSeen, f.range]).toEqual(['interval', SCALE, false, [-3, 3]]);
     }
     // Widened to the whole numbers of the plain-text answers where they reach beyond it (no answer left out).
     const wide = plainField([0, 1, 4.5]);

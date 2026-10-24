@@ -174,6 +174,10 @@ export interface UploadAttempt {
   /** When the upload got no answer, if that happened while the page was open: a batch it created was created before
    *  then, so a later lookup by request count leaves out batches created afterwards. */
   endedAt?: string;
+  /** A retry's upload: the run's earlier upload of unknown outcome it was sent after (the same requests). A batch
+   *  found by its number of requests that may have been created before the retry began may be that one's: it is
+   *  recorded as either's (`BatchPart.eitherRetry`), not as this retry's (from October 24, 2026). */
+  earlier?: Pick<UploadAttempt, 'since' | 'requests' | 'endedAt'>;
 }
 
 export interface BatchPart {
@@ -191,6 +195,10 @@ export interface BatchPart {
   saveFailed?: string;
   /** With `saveFailed`: its results were stored, only the run's record of them could not be saved. */
   resultsSaved?: boolean;
+  /** Found by its number of requests for a retry's upload of unknown outcome, while an earlier upload of the same
+   *  requests was unknown too, so it is either's: recorded as the earlier one's (`submittedAt`), and counted as that
+   *  retry (begun at `at`, its upload at `since`) only if its answers carry the retry's request names. */
+  eitherRetry?: { at: string; since: string };
 }
 
 export interface Usage {

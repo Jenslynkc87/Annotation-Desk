@@ -8,6 +8,13 @@ export interface SampleOptions {
   strata: string[];
   /** Leave out texts whose `column` equals `value` (e.g. pilot = yes). */
   exclude: { column: string; value: string } | null;
+  /**
+   * The column and value the sample will be marked with (e.g. sample = holdout): texts whose `column` already holds
+   * another value (an earlier sample, e.g. sample = validation) are left out, so samples marked in one column stay
+   * disjoint; texts with this same value (a redraw) are not. The draw's note says how many were left out
+   * (`SampleResult.taken`).
+   */
+  markedAs?: { column: string; value: string } | null;
   seed: number;
   /** 3 (the default) takes the strata columns in the fixed order of `orderStrata`; 2 takes them in the order
    *  given (as they were ticked), to redraw a sample recorded with method 2. */
@@ -24,6 +31,8 @@ export interface SampleResult {
   ids: string[];
   strata: Stratum[];
   eligible: number;
+  /** Texts left out because their marking column already holds another value (`markedAs`), per value, most first. */
+  taken: { value: string; n: number }[];
 }
 
 const norm = (s: string | undefined) => (s ?? '').trim().toLowerCase();
@@ -41,16 +50,34 @@ export const SAMPLING_METHOD = 'Annotation Desk sampling method 3';
 export const orderStrata = (strata: string[]) => [...strata].sort(byCode);
 
 /**
+ * The value a text already holds in the column a sample is marked in, when it is another value than the sample's
+ * (so the text belongs to another sample there); '' otherwise. (Compared as marking does: the value exactly.)
+ */
+export function heldValue(d: Doc, markedAs: { column: string; value: string }): string {
+  const held = d.meta[markedAs.column] ?? '';
+  return held.trim() !== '' && held !== markedAs.value ? held : '';
+}
+
+/**
  * Proportional allocation (largest remainder), at least one text per stratum when the sample is large
  * enough; within each stratum a seeded shuffle of the texts in file-name order, so the same seed, corpus and
  * strata columns always give the same sample, whatever the import order, the order the columns were ticked or
  * the browser (method 3: strata columns ordered by name; method 2, October 2026, took them in the order they
  * were ticked; method 1, before that, sorted by the browser's language and ranked remainders before the
- * minimum of one).
+ * minimum of one). Eligible: every text except those left out by `exclude` and, with `markedAs` (the dialog always
+ * gives it, since October 24, 2026), those already marked with another value in the sample's column; the note
+ * names both, so the same call on the texts as they were reproduces the draw.
  */
 export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResult {
   const strata = o.method === 2 ? o.strata : orderStrata(o.strata);
-  const eligible = docs.filter((d) => !o.exclude || norm(d.meta[o.exclude.column]) !== norm(o.exclude.value));
+  const notExcluded = docs.filter((d) => !o.exclude || norm(d.meta[o.exclude.column]) !== norm(o.exclude.value));
+  const takenBy = new Map<string, number>();
+  const eligible = notExcluded.filter((d) => {
+    const held = o.markedAs ? heldValue(d, o.markedAs) : '';
+    if (held) takenBy.set(held, (takenBy.get(held) ?? 0) + 1);
+    return !held;
+  });
+  const taken = [...takenBy].map(([value, n]) => ({ value, n })).sort((a, b) => b.n - a.n || byCode(a.value, b.value));
   const groups = new Map<string, Doc[]>();
   for (const d of eligible) {
     const key = strata.map((c) => d.meta[c]?.trim() || '(none)').join(' · ') || 'all';
@@ -93,7 +120,20 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
     }
     ids.push(...items.slice(0, take.get(k)!).map((d) => d.id));
   }
-  return { ids, strata: keys.map((k) => ({ key: k, available: n(k), drawn: take.get(k)! })), eligible: eligible.length };
+  return { ids, strata: keys.map((k) => ({ key: k, available: n(k), drawn: take.get(k)! })), eligible: eligible.length, taken };
+}
+
+/**
+ * For the note saved with a sample: the texts left out because they already belong to another sample in its column,
+ * e.g. "not from the 20 texts already marked sample = validation" ('' when none were; with more than three values, how
+ * many texts and values).
+ */
+export function takenNote(r: SampleResult, column: string, w: { one: string; many: string } = { one: 'text', many: 'texts' }): string {
+  if (!r.taken.length) return '';
+  // (A column of other metadata picked to mark in, e.g. journal: their number, not a list of every value.)
+  if (r.taken.length > 3) return `not from the ${r.taken.reduce((n, t) => n + t.n, 0)} ${w.many} whose ${column} already holds another value (${r.taken.length} values)`;
+  const parts = r.taken.map((t, i) => (i === 0 ? `the ${t.n} ${t.n === 1 ? w.one : w.many} already marked ${column} = ${t.value}` : `the ${t.n} marked ${column} = ${t.value}`));
+  return `not from ${parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0]}`;
 }
 
 /** How the texts were spread over the strata, for the note saved with a sample: "at least one per stratum" only

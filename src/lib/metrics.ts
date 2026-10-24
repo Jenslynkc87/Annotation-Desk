@@ -426,7 +426,9 @@ export function grownScale([lo, hi]: [number, number], values: number[]): [numbe
  * lowest and highest number in `allowed`, which is then every whole number of that range). The scale is that range
  * grown through the labels near it (`grownScale`); it sets the weights and which labels are left out, but not the
  * scale's midpoint (which decides "opposite direction"). Only when every answer lies within −10…10 (a rating scale,
- * `ratingRange`): with larger numbers (percentages, years, counts) no number is left out for its distance.
+ * `ratingRange`): with larger numbers (percentages, years, counts) no number is left out for its distance. A codebook
+ * scale (not `scaleSeen`) with a `range`: `allowed` was widened to take in plain-text answers beyond the codebook
+ * (`combineFields`), and `range` is the codebook's own lowest and highest point, which set the midpoint.
  */
 export function agreement(
   a: string[],
@@ -543,7 +545,8 @@ export function agreement(
   const ac1Numeric = ac1Scale === points && points.length > 0;
   // Nothing left to compare (e.g. every label "NA"): the level asked for, not nominal.
   const alphaLevel = numeric || !pairs.length ? level : 'nominal';
-  const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : scale.map(Number), [...xs, ...ys]) : null;
+  // (A codebook widened for plain-text answers keeps its own midpoint: a stray 4 next to −3…3 doesn't move it to 0.5.)
+  const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : (range ?? scale.map(Number)), [...xs, ...ys]) : null;
   const stats = {
     percentAgreement,
     cohenKappa: (p: [string, string][]) => cohenKappa(p),

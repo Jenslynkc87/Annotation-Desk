@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { agreement, fixed, fmtPct, fmtStat, scaleStep, type Agreement, type Level } from '../lib/metrics';
-import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
+import { agreement, fixed, fmtPct, fmtStat, isMissingLabel, scaleStep, type Agreement, type Level } from '../lib/metrics';
+import { codebookField, combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
 import { words } from '../lib/subject';
 import { buildComparisonReport } from '../lib/export/packages';
 import { effectiveTemplate, normalizeLabel, toNumber } from '../lib/prompt';
-import { ABOUT_AUTHOR, cachingLabel, knownFieldNames, labelPairs, labelValue, namedField, NOTE_OR_RATING, preferredGoldColumn, runName } from '../lib/export/tables';
+import { ABOUT_AUTHOR, cachingLabel, knownFieldNames, labelColumnsFor, labelPairs, labelValue, namedField, NOTE_OR_RATING, preferredGoldColumn, runName } from '../lib/export/tables';
 import {
   batchParts,
   cancelBatch,
@@ -19,10 +19,11 @@ import {
   retryableCount,
   retryFailed,
   sharedBatches,
-  sharedUnknownUpload,
   toast,
   unknownUpload,
+  unknownUploadSharers,
   useStore,
+  type UploadHolder,
 } from '../lib/store';
 import type { Doc, Result, Run, Study } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
@@ -183,17 +184,24 @@ export function RunsView() {
                                   : '';
                               // A batch upload of unknown outcome may have reached the provider: looked up there and cancelled
                               // if found (deleting the run also lets Remaining send these requests again). Not one another study
-                              // here shares (a copy of this study, or the study it was copied from): left to it.
+                              // here shares (a copy of this study, or the study it was copied from): left to it. One whose Retry
+                              // failed has already found its batch has it: that batch did arrive, and that study collects it.
                               const unknown = unknownUpload(r);
-                              const sharers = unknown ? await sharedUnknownUpload(r).catch(() => [] as string[]) : [];
+                              const none = { waiting: [] as string[], holding: [] as UploadHolder[] };
+                              const sharers = unknown ? await unknownUploadSharers(r).catch(() => none) : none;
+                              const holders = [...new Set(sharers.holding.map((h) => h.study))];
+                              const waiting = sharers.waiting.filter((x) => !holders.includes(x));
+                              const one = holders.length === 1;
                               const upload = unknown
-                                ? `A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'}) may have reached the provider`
+                                ? `A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'})`
                                 : '';
                               const unsure = !unknown
                                 ? ''
-                                : sharers.length
-                                  ? ` ${upload}: it is left for ${quoted(sharers)} (${OTHER_STUDY_HERE}), which shares that upload and whose Retry failed finds it.`
-                                  : ` ${upload}: it is looked up there first and cancelled if found.`;
+                                : holders.length
+                                  ? ` ${upload} reached the provider as ${[...new Set(sharers.holding.map((h) => h.batchId))].join(', ')}, which ${quoted(holders)} (${OTHER_STUDY_HERE}) already ${one ? 'has' : 'have'} and ${sharers.holding.every((h) => h.collected) ? `${one ? 'has' : 'have'} collected` : one ? 'collects' : 'collect'}${waiting.length ? `, and Retry failed in ${quoted(waiting)} (which shares that upload) finds it` : ''}: it is not cancelled.`
+                                  : waiting.length
+                                    ? ` ${upload} may have reached the provider: it is left for ${quoted(waiting)} (${OTHER_STUDY_HERE}), which shares that upload and whose Retry failed finds it.`
+                                    : ` ${upload} may have reached the provider: it is looked up there first and cancelled if found.`;
                               if (!confirm(`Delete run #${runName(r, runs)} and its ${t.ok + t.failed} results?${pending}${unsure} This cannot be undone.`)) return;
                               // The upload is looked up, and asked about, before anything is cancelled (see removeRun).
                               await removeRun(r.id);
@@ -360,7 +368,8 @@ function runFields(run: Run, docs: Doc[], results: Result[]): ComparableField[] 
  * human–human rows, with its scale, level and yes/no rule. Taken from the newest run that has such a field, so
  * a later run of another prompt (a pilot, a renamed field) doesn't lose it. The columns' values are judged on every
  * text that has a label (as the panel compares them), not only that run's: a pilot on other texts still gives the
- * field. Undefined when no run has one. `known`: `studyFieldNames`, if already at hand.
+ * field. When no run has it yet, the field the current or a saved prompt names (`promptField`), listed with the latest
+ * run's fields (`run` is then that run). Undefined when neither has one. `known`: `studyFieldNames`, if already at hand.
  */
 export function columnsFieldRun(
   colA: string,
@@ -379,7 +388,56 @@ export function columnsFieldRun(
     const field = fields.find((x) => has(x.key, colA) && has(x.key, colB));
     if (field) return { run, fields, field };
   }
-  return undefined;
+  const latest = runs[runs.length - 1];
+  const field = latest && study ? promptField(colA, colB, study, docs, known) : undefined;
+  if (!latest || !field) return undefined;
+  // (In place of a field of the same name the run has on another scale, which the loop above passed over.)
+  return { run: latest, fields: [...runFields(latest, docs, results).filter((x) => x.key !== field.key), field], field };
+}
+
+/**
+ * Two label columns whose field no run has yet (e.g. coders' labels checked before the model is run): the field the
+ * current or a saved prompt names that both columns belong to, the longest such name first (race_negative before
+ * race), both holding mostly its values on every labelled text. A structured prompt's field has its codebook scale; a
+ * plain-text prompt's has no range of answers yet, so its numbers are compared as numbers and none is left out for its
+ * distance (ordinal when every label is a whole number). Either way a missing-value marker such as "NA" is a blank cell.
+ */
+export function promptField(colA: string, colB: string, study: Study, docs: Doc[], known: string[] = []): ComparableField | undefined {
+  const labels = docs.flatMap((d) => [d.meta[colA], d.meta[colB]]).map((v) => toNumber(v ?? '')).filter(Number.isFinite);
+  const candidates: ComparableField[] = [];
+  for (const p of [study.prompt, ...(study.savedPrompts ?? []).map((x) => x.prompt)])
+    for (const v of p.variables) {
+      if (v.type === 'text' || !namedAfter(colA, v.name) || !namedAfter(colB, v.name) || candidates.some((c) => c.key === v.name)) continue;
+      candidates.push(
+        p.outputMode === 'structured'
+          ? codebookField(p, v)
+          : { key: v.name, label: v.name, level: labels.every(Number.isInteger) ? 'ordinal' : 'interval', allowed: [], scaleSeen: true, yesNo: false },
+      );
+    }
+  candidates.sort((x, y) => y.key.length - x.key.length);
+  return candidates.find((f) => {
+    const { columns } = labelColumnsFor(f, docs, [...new Set([...known, ...candidates.map((c) => c.key)])], docs);
+    return columns.includes(colA) && columns.includes(colB);
+  });
+}
+
+const isNumberCell = (v: string) => Number.isFinite(toNumber(v));
+
+/**
+ * Does a "Compared with" column look like an identifier (nearly every text a different value, e.g. a file name picked
+ * by mistake), not labels? Not in fewer than 30 texts (e.g. a small pilot whose scores all differ); never a column the
+ * exports pair with the field (`paired`); and not numbers compared as numbers (years, counts, 0–100): a numeric field
+ * (ordinal or interval, plain-text scores, or a codebook of numbers), or a level other than nominal picked by hand,
+ * whose cells are mostly numbers once missing-value markers such as "NA" are blank (`labelValue`).
+ */
+export function looksLikeIdColumn(cells: (string | undefined)[], cf: ComparableField | undefined, level: Level, paired: boolean): boolean {
+  if (paired || cells.length < 30) return false;
+  const values = cells.map((v) => (cf ? labelValue(v, cf) : normalizeLabel(v)));
+  if (new Set(values).size <= cells.length * 0.7) return false;
+  const numericField = !!cf && !cf.yesNo && (cf.level !== 'nominal' || !!cf.scaleSeen || (cf.allowed.length > 0 && cf.allowed.every(isNumberCell)));
+  if (!numericField && level === 'nominal') return true;
+  const filled = values.filter((v) => v !== '' && !isMissingLabel(v));
+  return !(filled.length > 0 && filled.filter((v) => !isNumberCell(v)).length * 2 <= filled.length);
 }
 
 /**
@@ -521,10 +579,11 @@ function AgreementPanel() {
   // the exports leave out but named after a field (e.g. placeholders on most of the run's texts): the longest field it
   // is named after, not the first field (a coder's note or rating, or a column about the author, belongs to none).
   const column = srcB?.kind === 'meta' ? srcB.col : srcA?.kind === 'meta' ? srcA.col : '';
-  const columnField = useMemo(
-    () => (bothColumns || !column || !runA || !viewsA ? undefined : columnFieldOf(column, labelPairs(runA, docs, runs, results, study, viewsA, ownFieldsA, { known }))),
+  const columnPairs = useMemo(
+    () => (bothColumns || !column || !runA || !viewsA ? undefined : labelPairs(runA, docs, runs, results, study, viewsA, ownFieldsA, { known })),
     [bothColumns, column, runA, viewsA, ownFieldsA, docs, runs, results, study, known],
   );
+  const columnField = columnPairs ? columnFieldOf(column, columnPairs) : undefined;
   // A field picked in the menu, with the pair of sources it was picked for (see `chosenField`).
   const pair = `${a}\u0001${b}`;
   const [fieldPick, setFieldPick] = useState<{ pair: string; key: string } | null>(null);
@@ -708,14 +767,15 @@ function AgreementPanel() {
       setReporting(false);
     }
   };
-  // A metadata column where (almost) every row is different is an identifier, not a set of labels. (Not in fewer
-  // than 30 rows, e.g. a small pilot whose scores all differ, and not numbers compared as numbers, e.g. 0–100.)
-  const bValues = srcB?.kind === 'meta' ? docs.map((d) => d.meta[srcB.col] ?? '') : [];
-  const looksLikeIds =
-    srcB?.kind === 'meta' &&
-    docs.length >= 30 &&
-    new Set(bValues).size > docs.length * 0.7 &&
-    !(level === 'interval' && bValues.every((v) => v.trim() === '' || Number.isFinite(toNumber(v))));
+  // A metadata column where (almost) every row is different is an identifier, not a set of labels (`looksLikeIdColumn`),
+  // unless the exports pair it with this field (race_gold with race; two label columns with the field found for them).
+  const paired =
+    !!cf && srcB?.kind === 'meta' && (bothColumns ? columnsMatch?.field.key === cf.key : !!columnPairs?.pairs.some((p) => p.column === srcB.col && p.field === cf.key));
+  const looksLikeIds = useMemo(
+    () => srcB?.kind === 'meta' && looksLikeIdColumn(docs.map((d) => d.meta[srcB.col]), cf, level, paired),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [b, docs, cf, level, paired],
+  );
   const showMatrix = !isFreeText && !looksLikeIds && stats.categories.length > 1 && stats.categories.length <= 12;
 
   return (

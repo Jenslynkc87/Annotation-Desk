@@ -212,13 +212,13 @@ describe('methods text: texts with only some annotations (G26)', () => {
 describe('runs that share a number (G27, G36)', () => {
   const docs = mkDocs(2);
   const a = mkRun('aaaaaaaa-1111', 2, docs.map((d) => d.id), stancePrompt);
-  const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt, { label: 'pilot' });
+  const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt, { label: 'pilot', createdAt: '2026-10-01T10:30:00.000Z' });
   const c = mkRun('cccccccc-3333', 3, docs.map((d) => d.id), stancePrompt);
   const runs = [a, b, c];
 
   it('runTitle names them as the exports do, given the study’s runs', () => {
-    expect(runTitle(a, runs)).toBe('#2-aaaaaaaa');
-    expect(runTitle(b, runs)).toBe('#2-bbbbbbbb · pilot');
+    expect(runTitle(a, runs)).toBe('#2-20261001-100000');
+    expect(runTitle(b, runs)).toBe('#2-20261001-103000 · pilot');
     expect(runTitle(c, runs)).toBe('#3');
     // (Without the runs, as before.)
     expect(runTitle(b)).toBe('#2 · pilot');
@@ -228,14 +228,14 @@ describe('runs that share a number (G27, G36)', () => {
   it('metadata.json gives the run’s name and id; the README and the script say which run it is', async () => {
     const results = runs.flatMap((r) => docs.map((d) => mkResult(r, d, 1, { stance: 'for' })));
     const { meta, readme, read } = await supplementary({ study: mkStudy(stancePrompt), docs, runs, results }, b);
-    expect(meta.run).toMatchObject({ number: 2, name: '2-bbbbbbbb', id: 'bbbbbbbb-2222' });
-    expect(readme).toContain('(run #2-bbbbbbbb, "pilot")');
-    expect(readme).toContain('this one is named by its number and the start of its id (`run.id` in metadata.json)');
-    expect(await read('scripts/annotate.py')).toContain('#2-bbbbbbbb (pilot), started');
+    expect(meta.run).toMatchObject({ number: 2, name: '2-20261001-103000', id: 'bbbbbbbb-2222' });
+    expect(readme).toContain('(run #2-20261001-103000, "pilot")');
+    expect(readme).toContain('this one is named by its number and when it started (UTC; `run.started_at` in metadata.json)');
+    expect(await read('scripts/annotate.py')).toContain('#2-20261001-103000 (pilot), started');
     // A run with a number of its own: unchanged.
     const own = await supplementary({ study: mkStudy(stancePrompt), docs, runs, results }, c);
     expect(own.meta.run).toMatchObject({ number: 3, name: '3' });
-    expect(own.readme).not.toContain('start of its id');
+    expect(own.readme).not.toContain('when it started');
     expect(fillScript(SCRIPT_TEMPLATE, scriptValues(mkStudy(stancePrompt), c, 'now'))).toContain('#3, started');
   });
 });

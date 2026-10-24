@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { allocationNote, drawStratifiedSample, orderStrata, SAMPLING_METHOD } from '../lib/sample';
+import { allocationNote, drawStratifiedSample, heldValue, orderStrata, SAMPLING_METHOD, takenNote } from '../lib/sample';
 import { currentStudy, markSample, sampleNotePrefix, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import { Modal, NumberField } from './ui';
@@ -22,7 +22,15 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const [seed, setSeed] = useState(() => 1 + Math.floor(Math.random() * 99999));
   const [marking, setMarking] = useState(false);
   const exclude = excludeCol && excludeVal ? { column: excludeCol, value: excludeVal } : null;
-  const r = useMemo(() => drawStratifiedSample(docs, { size, strata, exclude, seed }), [docs, size, strata, excludeCol, excludeVal, seed]);
+  // Texts already marked with another value in the column (an earlier sample) are not drawn: samples marked in one
+  // column don't overlap, and an earlier sample keeps the texts its note counts. (A redraw, the same value, may take them.)
+  const markedAs = column.trim() && value.trim() ? { column: column.trim(), value: value.trim() } : null;
+  const r = useMemo(
+    () => drawStratifiedSample(docs, { size, strata, exclude, seed, markedAs }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [docs, size, strata, excludeCol, excludeVal, seed, markedAs?.column, markedAs?.value],
+  );
+  const takenCount = r.taken.reduce((n, t) => n + t.n, 0);
   const chosen = new Set(r.ids);
   const emptyGroups = r.strata.filter((s) => s.drawn === 0).length;
   const already = docs.filter((d) => d.meta[column.trim()] === value.trim()).length;
@@ -32,6 +40,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
     const all = new Map<string, [number, number]>();
     for (const d of docs) {
       if (exclude && (d.meta[exclude.column] ?? '').trim().toLowerCase() === exclude.value.trim().toLowerCase()) continue;
+      if (markedAs && heldValue(d, markedAs)) continue;
       const e = ext(d.meta.file);
       if (!e) continue;
       const [n, k] = all.get(e) ?? [0, 0];
@@ -48,6 +57,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       `${sampleNotePrefix(col, val)}${date}): ${r.ids.length} of ${r.eligible} ${w.many} drawn at random` +
       (strata.length ? ` within ${strata.join(' × ')} strata (${allocationNote(r, w.one)})` : '') +
       (exclude ? `, excluding ${exclude.column} = ${exclude.value}` : '') +
+      (r.taken.length ? `, ${takenNote(r, col, w)}` : '') +
       `; seed ${seed} (${SAMPLING_METHOD}).`;
     setMarking(true);
     const ok = await markSample(col, val, r.ids, note, seed).finally(() => setMarking(false));
@@ -139,6 +149,12 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
           {r.ids.length} of {r.eligible.toLocaleString()} eligible {w.many}{strata.length ? `, from ${r.strata.length} groups` : ''}.
           {types.length > 0 && <> File types: {types.map(([e, [n, k]]) => `${e} ${k} in the sample (${Math.round((100 * n) / Math.max(1, r.eligible))}% of eligible ${w.many})`).join(', ')}.</>}
         </div>
+        {takenCount > 0 && (
+          <div>
+            Leaves out {takenNote(r, column.trim(), w).replace(/^not from /, '')}, so the samples don’t overlap. To draw from {takenCount === 1 ? 'it' : 'them'} as well,
+            mark this sample in another column.
+          </div>
+        )}
         {already > 0 && <div>Replaces the {already} {already === 1 ? w.one : w.many} currently marked {column} = {value}.</div>}
       </div>
       {strata.length > 0 && (

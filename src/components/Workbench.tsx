@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { combineFields, comparableFields, fieldValue, type ComparableField } from '../lib/compare';
 import { labelValue, namedField } from '../lib/export/tables';
 import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
-import { fieldLabel, isYesNoField, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
+import { fieldLabel, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
 import { batchParts, batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
-import type { Doc, Run, Variable } from '../lib/types';
+import type { Doc, PromptSpec, Run, Variable } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
 import { sample } from '../lib/util';
@@ -86,10 +86,89 @@ export function comparableLabel(field: Variable | ComparableField | undefined, p
   return (v) => !missing(v) && (!strict || onScale(v));
 }
 
+/**
+ * The codebook fields (not free text) "Compare with" can compare, each with the prompt it comes from: those of the
+ * viewed run, if it is structured; in "Latest result per text", the current prompt's (if structured), then those of the
+ * structured runs shown, newest first.
+ */
+export function codebookFields(viewedRun: Run | null, prompt: PromptSpec, views: Iterable<DocView>, runs: Run[]): Map<string, PromptSpec> {
+  let prompts: PromptSpec[] = [];
+  if (viewedRun) {
+    if (viewedRun.snapshot.prompt.outputMode === 'structured') prompts = [viewedRun.snapshot.prompt];
+  } else {
+    const shown = new Set<string>();
+    for (const v of views) if (v.run?.snapshot.prompt.outputMode === 'structured') shown.add(v.run.id);
+    prompts = [...(prompt.outputMode === 'structured' ? [prompt] : []), ...runs.filter((r) => shown.has(r.id)).reverse().map((r) => r.snapshot.prompt)];
+  }
+  const out = new Map<string, PromptSpec>();
+  for (const p of prompts)
+    for (const key of outputFields(p)) {
+      const v = p.variables.find((x) => x.name === key);
+      if (v && v.type !== 'text' && !out.has(key)) out.set(key, p);
+    }
+  return out;
+}
+
+/**
+ * What "Compare with <column>" compares, the same rule for both kinds of run: the field the column is named after
+ * (race for race_gold, `namedField`), else the first, among the scores in plain-text JSON answers (`scoreFields`) and
+ * the codebook fields shown (`codebookFields`); with the score's range or the codebook's variable (its scale, and
+ * whether it is a yes/no field), taken from the run's own prompt. `fallback`: with neither, e.g. a plain-text answer.
+ */
+export function compareFieldFor(
+  col: string,
+  scoreFields: ComparableField[],
+  codebook: Map<string, PromptSpec>,
+  fallback: string,
+): { key: string; field?: ComparableField; variable?: Variable; yesNo: boolean } {
+  const keys = [...scoreFields.map((f) => f.key), ...codebook.keys()];
+  const key = namedField(col, keys) ?? keys[0] ?? fallback;
+  const field = scoreFields.find((f) => f.key === key);
+  if (field) return { key, field, yesNo: false };
+  const variable = codebook.get(key)?.variables.find((v) => v.name === key);
+  return { key, variable, yesNo: variable?.type === 'boolean' };
+}
+
+/**
+ * The batch notice's sentence about an upload of unknown outcome: when Retry failed, which looks for it first, is
+ * offered (once the run's batches have ended and what they returned is saved: the results, or only the run's record).
+ */
+export function unknownUploadNote(running: number, notSaved: number, recordOnly: boolean): string {
+  const until = [
+    running ? (running > 1 ? 'these batches have ended' : 'this batch has ended') : '',
+    notSaved ? (recordOnly ? 'the run’s record of its results is saved' : 'these results are saved') : '',
+  ]
+    .filter(Boolean)
+    .join(' and ');
+  return ` Another batch upload of this run may or may not have reached the provider. Retry failed (under Runs & agreement), which looks for it there first, is offered once ${until}; Delete looks for it too, and cancels it if found.`;
+}
+
+/**
+ * The runs `remainingDocs` names by number, by their names (`runName`, with the study's `runs`): of runs that share a
+ * number (two tabs of an earlier version), the one with an upload of unknown outcome. (A name is kept as it is.)
+ */
+export function unknownRunNames(unknownRuns: (number | string)[], runs: Run[]): (number | string)[] {
+  return [
+    ...new Set(
+      unknownRuns.flatMap((n) => {
+        if (typeof n !== 'number') return [n];
+        const same = runs.filter((r) => r.number === n);
+        const unsure = same.filter((r) => r.batch?.uploadUnknown || r.batch?.uploading);
+        return (unsure.length ? unsure : same).map((r) => runName(r, runs)).concat(same.length ? [] : [n]);
+      }),
+    ),
+  ];
+}
+
 /** What the Remaining button leaves out, said when it is clicked (`remainingDocs`'s `waiting`, `unknown` and `unknownRuns`). */
-export function remainingNotes(r: { waiting: number; unknown: number; unknownRuns: number[] }, w: { one: string; many: string }): { waiting: string; unknown: string } {
+export function remainingNotes(
+  r: { waiting: number; unknown: number; unknownRuns: (number | string)[] },
+  w: { one: string; many: string },
+  allRuns: Run[] = [],
+): { waiting: string; unknown: string } {
   const are = (n: number) => `${n.toLocaleString()} ${n === 1 ? `${w.one} is` : `${w.many} are`}`;
-  const runs = `run${r.unknownRuns.length === 1 ? '' : 's'} ${r.unknownRuns.map((n) => `#${n}`).join(', ')}`;
+  const names = unknownRunNames(r.unknownRuns, allRuns);
+  const runs = `run${names.length === 1 ? '' : 's'} ${names.map((n) => `#${n}`).join(', ')}`;
   return {
     waiting: r.waiting ? `${are(r.waiting)} still waiting in a batch and left out.` : '',
     unknown: r.unknown
@@ -159,10 +238,14 @@ function TextsAndResults() {
     return f;
   }, [study.prompt, runFilter, runs]);
   const viewedRun = runFilter === 'latest' ? null : (runs.find((r) => r.id === runFilter) ?? null);
-  // Display names: look the key up in the current prompt, then in the viewed run's prompt.
+  // Codebook fields that can be compared with a column: the viewed run's, or in "Latest" the current prompt's and those
+  // of the structured runs shown.
+  const codebook = useMemo(() => codebookFields(viewedRun, study.prompt, views.values(), runs), [viewedRun, study.prompt, views, runs]);
+  // Display names: look the key up in the current prompt, then in the viewed run's prompt (or the prompt of a structured
+  // run shown).
   const promptOf = (key: string) => {
     const inCurrent = study.prompt.variables.some((v) => v.name === key);
-    return inCurrent || !viewedRun ? study.prompt : viewedRun.snapshot.prompt;
+    return inCurrent ? study.prompt : (codebook.get(key) ?? viewedRun?.snapshot.prompt ?? study.prompt);
   };
   const fieldName = (key: string) => fieldLabel(promptOf(key), key);
   // Plain-text runs whose answers are JSON (the owner's layout): their scores, read inside the answers, as in the
@@ -180,19 +263,18 @@ function TextsAndResults() {
     for (const run of textRuns) for (const f of comparableFields(run, views.values())) byKey.set(f.key, combineFields(f, byKey.get(f.key)));
     return [...byKey.values()];
   }, [viewedRun, study.prompt.outputMode, views]);
-  // The score compared with a column: the one the column is named after (race for race_gold), else the first.
-  const scoreFor = (col: string) => scoreFields.find((x) => x.key === namedField(col, scoreFields.map((y) => y.key))) ?? scoreFields[0];
-  const scoreField = scoreFields.length ? scoreFor(compareCol) : undefined;
-  // Otherwise the first field shown (the viewed run's first, if it is structured and lacks the current prompt's).
-  const ownFields = viewedRun?.snapshot.prompt.outputMode === 'structured' ? outputFields(viewedRun.snapshot.prompt) : null;
-  const compareField = scoreField?.key ?? (ownFields?.length && !ownFields.includes(fields[0]) ? ownFields[0] : fields[0]);
-  const compareYesNo = !scoreField && isYesNoField(promptOf(compareField), compareField);
+  // The field compared with a column (`compareFieldFor`): the one the column is named after (race for race_gold), else
+  // the first, among the plain-text scores and the codebook fields shown.
+  const fieldFor = (col: string) => compareFieldFor(col, scoreFields, codebook, fields[0]);
+  const { key: compareField, field: scoreField, variable: compareVar, yesNo: compareYesNo } = fieldFor(compareCol);
+  // The compared field gets a column of its own where none shows it (e.g. a structured run's score in "Latest" under a
+  // plain-text prompt), so its value can be seen and marked.
+  const shownFields = compareCol && codebook.has(compareField) && !fields.includes(compareField) ? [...fields, compareField] : fields;
   // The compared value of a text, read inside the JSON answer for a plain-text run (also under a structured prompt).
   const modelValue = (v: DocView) =>
     normalizeLabel(compareField === TEXT_RESPONSE_KEY || !v.run ? (v.values[compareField] ?? '') : fieldValue(v.run, v.values, compareField), compareYesNo);
   // A label: for scores, a missing-value marker such as "NA" is a blank cell (`labelValue`), as in the panel.
   const labelOf = (d: Doc) => (scoreField ? labelValue(d.meta[compareCol], scoreField) : normalizeLabel(d.meta[compareCol], compareYesNo));
-  const compareVar = promptOf(compareField).variables.find((v) => v.name === compareField);
   // Labels the comparison leaves out, as the Agreement panel does (e.g. "NA", or a number off the scale).
   const comparable = useMemo(() => {
     const pairs: [string, string][] = [];
@@ -302,7 +384,8 @@ function TextsAndResults() {
     // whose outcome is unknown may be: sending them again would pay twice.
     const r = remainingDocs(study, docs, runs, getState().results);
     const { todo, waiting, unknown } = r;
-    const notes = remainingNotes(r, w);
+    // (By name: runs that share a number are told apart.)
+    const notes = remainingNotes({ ...r, unknownRuns: r.unknownRunNames }, w, runs);
     if (!todo.length) {
       const or = [waiting ? ', or is waiting in a batch' : '', unknown ? ', or is in a batch upload whose outcome is unknown' : ''].join('');
       return alert(
@@ -431,10 +514,8 @@ function TextsAndResults() {
                         ? `${uploading ? 'Once the provider has accepted it, results' : 'Results'} appear here automatically while this page is open.`
                         : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
                     {running.length > 0 && 'Unfinished requests expire 24 hours after submission.'}
-                    {/* Retry failed, which looks for such an upload at the provider first, is offered only once the run's batches have ended. */}
-                    {r.batch?.uploadUnknown &&
-                      (running.length > 0 || notSaved > 0) &&
-                      ` Another batch upload of this run may or may not have reached the provider. Retry failed (under Runs & agreement), which looks for it there first, is offered once ${running.length ? (running.length > 1 ? 'these batches have ended' : 'this batch has ended') : 'these results are saved'}; Delete looks for it too, and cancels it if found.`}
+                    {/* Retry failed, which looks for such an upload at the provider first, is offered only once the run's batches have ended and are saved. */}
+                    {r.batch?.uploadUnknown && (running.length > 0 || notSaved > 0) && unknownUploadNote(running.length, notSaved, recordOnly)}
                   </span>
                   <button className="btn small" style={{ marginLeft: 'auto' }} onClick={() => checkBatch(r.id)}>
                     Check now
@@ -481,12 +562,12 @@ function TextsAndResults() {
                 style={{ width: 'auto' }}
                 value={compareCol}
                 onChange={(e) => setCompareCol(e.target.value)}
-                title={`Compare ${scoreFields.length > 1 ? 'a score (the one a column is named after, else the first)' : fieldName(compareField)} with a metadata column (e.g. human labels)`}
+                title={`Compare ${scoreFields.length + codebook.size > 1 ? 'a field (the one a column is named after, else the first)' : fieldName(compareField)} with a metadata column (e.g. human labels)`}
               >
                 <option value="">Compare with…</option>
                 {metaColumns.map((c) => (
                   <option key={c} value={c}>
-                    {scoreFields.length ? scoreFor(c).key : fieldName(compareField)} vs {c}
+                    {fieldName(fieldFor(c).key)} vs {c}
                   </option>
                 ))}
               </select>
@@ -566,7 +647,7 @@ function TextsAndResults() {
                   </th>
                   <th>ID</th>
                   <th>{entries ? 'Details sent to the model' : 'Text'}</th>
-                  {fields.map((f) => (
+                  {shownFields.map((f) => (
                     <th key={f}>{fieldName(f)}</th>
                   ))}
                   {compareCol && <th>{compareCol}</th>}
@@ -581,7 +662,7 @@ function TextsAndResults() {
                   // when its score has no column of its own).
                   const [nv, ng] = compareCol ? [modelValue(v), labelOf(d)] : ['', ''];
                   const cmp = nv && ng && comparable(nv) && comparable(ng) ? (nv === ng ? 'match' : 'mismatch') : '';
-                  const cmpCell = v.run?.snapshot.prompt.outputMode === 'text' && !fields.includes(compareField) ? TEXT_RESPONSE_KEY : compareField;
+                  const cmpCell = v.run?.snapshot.prompt.outputMode === 'text' && !shownFields.includes(compareField) ? TEXT_RESPONSE_KEY : compareField;
                   return (
                     <tr
                       key={d.id}
@@ -597,7 +678,7 @@ function TextsAndResults() {
                       <td>
                         <div className="snippet">{entries ? d.text.split('\n').join(' · ') : d.text.slice(0, 300)}</div>
                       </td>
-                      {fields.map((f, i) => {
+                      {shownFields.map((f, i) => {
                         // (A plain-text run's score under a structured prompt's column of the same name.)
                         const val = v.values[f] ?? (v.run && f !== TEXT_RESPONSE_KEY ? fieldValue(v.run, v.values, f) : '');
                         return (

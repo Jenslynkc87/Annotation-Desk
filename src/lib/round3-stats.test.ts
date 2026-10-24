@@ -177,9 +177,9 @@ describe('plain-text JSON scores: a missing-value code far off the answers (F2, 
     expect([a.range, b.range, b.allowed]).toEqual([[0, 2], [-1, 3], []]);
     expect(combineFields(a, b).range).toEqual([-1, 3]);
     expect(combineFields(b, a).range).toEqual([-1, 3]);
-    // A codebook field and a plain-text one: the codebook's scale, no range.
+    // A codebook field and a plain-text one: the codebook's scale, and its own ends as the range (for the midpoint, H0).
     const coded = { key: 'race', label: 'race', level: 'ordinal' as const, allowed: SCALE, yesNo: false };
-    expect(combineFields(coded, a).range).toBeUndefined();
+    expect(combineFields(coded, a).range).toEqual([-3, 3]);
   });
 
   it('says where the scale comes from, and which labels outside the answers were kept', () => {

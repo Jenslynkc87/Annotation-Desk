@@ -1,11 +1,11 @@
 // Builds the downloadable exports: Excel workbook, research repository, supplementary repository.
-import JSZip from 'jszip';
+import { ZipDeflate } from 'fflate';
 import { logPagesForRun } from '../db';
 import { fixed, fmtStat } from '../metrics';
 import { combineFields, comparableFields, fieldValue } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY } from '../prompt';
-import { buildDocViews, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, type RetriedRequests } from '../view';
+import { buildDocViews, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, runOrder, type RetriedRequests } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
@@ -24,11 +24,11 @@ import {
   resultsLong,
   resultsWide,
   retryNotes,
-  runIdTag,
   runName,
   runSummaryRows,
+  runTag,
   sharesNumber,
-  toCsv,
+  toCsvBlob,
   type Row,
 } from './tables';
 
@@ -37,6 +37,210 @@ export interface ExportData {
   docs: Doc[];
   runs: Run[];
   results: Result[];
+}
+
+/** The runs in the order they were made, so runs that share a number keep their order (and the latest is the last made) in every copy of the study. */
+const inRunOrder = (d: ExportData): ExportData => ({ ...d, runs: [...d.runs].sort(runOrder) });
+
+const MAX32 = 0xffffffff;
+/** Deflate level: about as fast as the lowest (a full corpus's logs are gigabytes), and nearly as small as the default. */
+const ZIP_LEVEL = 3;
+
+interface ZipEntry {
+  name: Uint8Array;
+  utf8: boolean;
+  dir: boolean;
+  crc: number;
+  size: number;
+  compressed: number;
+  offset: number;
+}
+
+/** A folder of a zip being written: files and folders go in, in that order. */
+export interface ZipFolder {
+  folder(name: string): ZipFolder;
+  file(name: string, data: string | Blob): Promise<void>;
+}
+
+const set64 = (v: DataView, at: number, x: number) => {
+  v.setUint32(at, x % 2 ** 32, true);
+  v.setUint32(at + 4, Math.floor(x / 2 ** 32), true);
+};
+
+/**
+ * A zip file written as it is built (for the research and supplementary packages). Each file is compressed as it is
+ * read, a Blob a piece at a time, and its compressed data goes into Blobs of a few MB, so neither the inputs (a full
+ * corpus's logs hold every text several times, gigabytes) nor the zip ever have to be in memory at once. Entries keep
+ * the order they are added in, folders before their files. The zip format stops at 4 GB: past that, the entries that
+ * need it get ZIP64 records (read by current unzip tools).
+ */
+export class ZipWriter {
+  private parts: Blob[] = [];
+  private entries: ZipEntry[] = [];
+  private offset = 0;
+  private dirs = new Set<string>();
+  private busy = false;
+  private time: number;
+  private date: number;
+
+  /** `onFile`: told each file's path as it starts (a full corpus takes many minutes, so the page shows what it is on). */
+  constructor(
+    private level: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 = ZIP_LEVEL,
+    private onFile?: (path: string) => void,
+  ) {
+    // Local time, as zip tools show it.
+    const d = new Date();
+    this.time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    this.date = ((Math.max(1980, d.getFullYear()) - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  }
+
+  /** A folder (and the folders it is in), written now if new. */
+  folder(path: string): ZipFolder {
+    this.dir(path);
+    return { folder: (name) => this.folder(`${path}/${name}`), file: (name, data) => this.file(`${path}/${name}`, data) };
+  }
+
+  private dir(path: string) {
+    if (!path || this.dirs.has(path)) return;
+    this.dir(path.slice(0, Math.max(0, path.lastIndexOf('/'))));
+    this.dirs.add(path);
+    this.add(path + '/', true, 0, 0, 0, []);
+  }
+
+  /** One file, compressed as it is read; the next may only start once this one is written. */
+  async file(path: string, data: string | Blob): Promise<void> {
+    if (this.busy) throw new Error('A zip file is written one file at a time.');
+    this.busy = true;
+    try {
+      this.onFile?.(path);
+      this.dir(path.slice(0, Math.max(0, path.lastIndexOf('/'))));
+      const out: Blob[] = [];
+      let pending: Uint8Array<ArrayBuffer>[] = [];
+      let pendingBytes = 0;
+      let compressed = 0;
+      const z = new ZipDeflate(path, { level: this.level });
+      z.ondata = (err, chunk, final) => {
+        if (err) throw err;
+        // (fflate's output: new arrays, never reused.)
+        pending.push(chunk as Uint8Array<ArrayBuffer>);
+        pendingBytes += chunk.length;
+        compressed += chunk.length;
+        // Into a Blob every few MB, so the browser can keep the archive out of the page's memory.
+        if (pendingBytes >= 4_000_000 || final) {
+          out.push(new Blob(pending));
+          pending = [];
+          pendingBytes = 0;
+        }
+      };
+      if (typeof data === 'string') {
+        const bytes = new TextEncoder().encode(data);
+        for (let i = 0; i < bytes.length; i += 1 << 20) z.push(bytes.subarray(i, i + (1 << 20)));
+      } else {
+        const reader = data.stream().getReader();
+        for (let r = await reader.read(); !r.done; r = await reader.read()) z.push(r.value);
+      }
+      z.push(new Uint8Array(0), true);
+      this.add(path, false, z.crc >>> 0, z.size, compressed, out);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private add(path: string, dir: boolean, crc: number, size: number, compressed: number, data: Blob[]) {
+    const name = new TextEncoder().encode(path);
+    const e: ZipEntry = { name, utf8: /[^\x20-\x7e]/.test(path), dir, crc, size, compressed, offset: this.offset };
+    const big = size >= MAX32 || compressed >= MAX32;
+    const head = new Uint8Array(30 + name.length + (big ? 20 : 0));
+    const v = new DataView(head.buffer);
+    v.setUint32(0, 0x04034b50, true);
+    v.setUint16(4, big ? 45 : 20, true);
+    this.common(v, 6, e);
+    v.setUint32(18, big ? MAX32 : compressed, true);
+    v.setUint32(22, big ? MAX32 : size, true);
+    v.setUint16(26, name.length, true);
+    v.setUint16(28, big ? 20 : 0, true);
+    head.set(name, 30);
+    if (big) {
+      // ZIP64 extra field: both sizes.
+      v.setUint16(30 + name.length, 1, true);
+      v.setUint16(32 + name.length, 16, true);
+      set64(v, 34 + name.length, size);
+      set64(v, 42 + name.length, compressed);
+    }
+    this.parts.push(new Blob([head]), ...data);
+    this.offset += head.length + compressed;
+    this.entries.push(e);
+  }
+
+  /** Flags, method, time, date and CRC: the same in the local and the central header. */
+  private common(v: DataView, at: number, e: ZipEntry) {
+    v.setUint16(at, e.utf8 ? 0x0800 : 0, true);
+    v.setUint16(at + 2, e.dir ? 0 : 8, true);
+    v.setUint16(at + 4, this.time, true);
+    v.setUint16(at + 6, this.date, true);
+    v.setUint32(at + 8, e.crc, true);
+  }
+
+  /** The finished zip: the central directory after the files. */
+  blob(): Blob {
+    const start = this.offset;
+    const central = this.entries.map((e) => {
+      // ZIP64: the values too large for their field, in this order.
+      const wide = [...(e.size >= MAX32 || e.compressed >= MAX32 ? [e.size, e.compressed] : []), ...(e.offset >= MAX32 ? [e.offset] : [])];
+      const extra = wide.length ? 4 + 8 * wide.length : 0;
+      const h = new Uint8Array(46 + e.name.length + extra);
+      const v = new DataView(h.buffer);
+      v.setUint32(0, 0x02014b50, true);
+      v.setUint16(4, wide.length ? 45 : 20, true);
+      v.setUint16(6, wide.length ? 45 : 20, true);
+      this.common(v, 8, e);
+      const bigSizes = e.size >= MAX32 || e.compressed >= MAX32;
+      v.setUint32(20, bigSizes ? MAX32 : e.compressed, true);
+      v.setUint32(24, bigSizes ? MAX32 : e.size, true);
+      v.setUint16(28, e.name.length, true);
+      v.setUint16(30, extra, true);
+      // (Comment, disk and internal attributes: 0. External: the MS-DOS directory flag.)
+      v.setUint32(38, e.dir ? 0x10 : 0, true);
+      v.setUint32(42, e.offset >= MAX32 ? MAX32 : e.offset, true);
+      h.set(e.name, 46);
+      if (wide.length) {
+        v.setUint16(46 + e.name.length, 1, true);
+        v.setUint16(48 + e.name.length, 8 * wide.length, true);
+        wide.forEach((x, i) => set64(v, 50 + e.name.length + 8 * i, x));
+      }
+      return h;
+    });
+    const size = central.reduce((s, h) => s + h.length, 0);
+    const count = this.entries.length;
+    const big = start >= MAX32 || size >= MAX32 || count >= 0xffff;
+    const tail: Uint8Array<ArrayBuffer>[] = [];
+    if (big) {
+      // ZIP64 end of central directory record, and the locator that points to it.
+      const r = new Uint8Array(56 + 20);
+      const v = new DataView(r.buffer);
+      v.setUint32(0, 0x06064b50, true);
+      set64(v, 4, 44);
+      v.setUint16(12, 45, true);
+      v.setUint16(14, 45, true);
+      set64(v, 24, count);
+      set64(v, 32, count);
+      set64(v, 40, size);
+      set64(v, 48, start);
+      v.setUint32(56, 0x07064b50, true);
+      set64(v, 64, start + size);
+      v.setUint32(72, 1, true);
+      tail.push(r);
+    }
+    const end = new Uint8Array(22);
+    const v = new DataView(end.buffer);
+    v.setUint32(0, 0x06054b50, true);
+    v.setUint16(8, big ? 0xffff : count, true);
+    v.setUint16(10, big ? 0xffff : count, true);
+    v.setUint32(12, big ? MAX32 : size, true);
+    v.setUint32(16, big ? MAX32 : start, true);
+    tail.push(end);
+    return new Blob([...this.parts, ...central, ...tail], { type: 'application/zip' });
+  }
 }
 
 const EXCEL_CELL_MAX = 32000;
@@ -96,7 +300,8 @@ function sheetName(wb: Workbook, wanted: string): string {
   return name;
 }
 
-export async function buildExcel(d: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {
+export async function buildExcel(data: ExportData, run: Run, opts: { text: boolean; rationale: boolean }): Promise<Blob> {
+  const d = inRunOrder(data);
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
   const add = (name: string, rows: Row[]) => addSheet(wb, name, rows);
@@ -145,12 +350,12 @@ function settingsRows(study: Study, run: Run, runs: Run[]): Row[] {
 const runFolderBase = (r: Run) => `run-${String(r.number).padStart(2, '0')}${r.label ? '-' + slug(r.label) : ''}`;
 
 /**
- * Each run's folder in the research repository: run-NN[-label], plus the start of the run's id for runs that share a
+ * Each run's folder in the research repository: run-NN[-label], plus when the run started for runs that share a
  * number (earlier versions gave some the same number, in two tabs), as in the tables' run column (`runName`), so
  * neither overwrites the other.
  */
 function runFolders(runs: Run[]): Map<string, string> {
-  return new Map(runs.map((r) => [r.id, sharesNumber(r, runs) ? `${runFolderBase(r)}-${runIdTag(r)}` : runFolderBase(r)]));
+  return new Map(runs.map((r) => [r.id, sharesNumber(r, runs) ? `${runFolderBase(r)}-${runTag(r, runs)}` : runFolderBase(r)]));
 }
 
 /**
@@ -173,10 +378,10 @@ export function requestAsSent(run: Run, log: ResultLog, attempt: number): Record
 /**
  * The run's requests and responses as JSON Lines, in the study's order of texts, then replicate, then attempt (an
  * earlier attempt that "Retry failed" replaced comes first, with its outcome). The logs are read a page at a time
- * and each text's lines become their own Blob: a full run's logs (each holds a whole text) never have to be in
- * memory at once.
+ * and each text's lines become their own Blob, which the zip reads a piece at a time: a full run's logs (each holds
+ * a whole text) never have to be in memory at once.
  */
-async function addRunLogs(zip: JSZip, run: Run, docs: Doc[], results: Result[]) {
+async function addRunLogs(zip: ZipFolder, run: Run, docs: Doc[], results: Result[]) {
   const docById = new Map(docs.map((d) => [d.id, d.docId]));
   const position = new Map(docs.map((d, i) => [d.id, i]));
   const attemptOf = new Map(results.filter((r) => r.runId === run.id).map((r) => [r.id, r.attempt ?? 1]));
@@ -222,13 +427,30 @@ async function addRunLogs(zip: JSZip, run: Run, docs: Doc[], results: Result[]) 
   // Texts deleted from the study since: last.
   const at = (doc: string) => position.get(doc) ?? docs.length;
   parts.sort((p, q) => at(p.doc) - at(q.doc));
-  zip.file('requests.jsonl', new Blob(parts.map((p) => p.requests), { type: 'application/jsonl' }));
-  zip.file('responses.jsonl', new Blob(parts.map((p) => p.responses), { type: 'application/jsonl' }));
+  await zip.file('requests.jsonl', new Blob(parts.map((p) => p.requests), { type: 'application/jsonl' }));
+  await zip.file('responses.jsonl', new Blob(parts.map((p) => p.responses), { type: 'application/jsonl' }));
 }
 
-/** JSON Lines as a Blob, one line per item: the whole file never has to fit in one string (a full run's logs hold every text). */
+/**
+ * JSON Lines as a Blob, one line per item, folded into a Blob every few MB: the whole file never has to fit in one
+ * string, nor all its lines be in memory at once (a full run's logs, or the corpus, hold every text).
+ */
 function jsonlBlob(items: unknown[]): Blob {
-  return new Blob(items.map((x) => JSON.stringify(x) + '\n'), { type: 'application/jsonl' });
+  const parts: Blob[] = [];
+  let lines: string[] = [];
+  let length = 0;
+  for (const x of items) {
+    const line = JSON.stringify(x) + '\n';
+    lines.push(line);
+    length += line.length;
+    if (length >= 4_000_000) {
+      parts.push(new Blob(lines));
+      lines = [];
+      length = 0;
+    }
+  }
+  parts.push(new Blob(lines));
+  return new Blob(parts, { type: 'application/jsonl' });
 }
 
 /**
@@ -236,108 +458,112 @@ function jsonlBlob(items: unknown[]): Blob {
  * still holds the editor's, which were not sent): codebook.md says so, and output_schema.json and codebook.json are
  * left out.
  */
-function promptFiles(zip: JSZip, run: Run) {
+async function promptFiles(zip: ZipFolder, run: Run) {
   const p = run.snapshot.prompt;
-  zip.file('prompt.txt', effectiveTemplate(p.userTemplate, p.subject));
-  if (p.system.trim()) zip.file('system_prompt.txt', p.system);
-  zip.file('codebook.md', codebookMarkdown(run));
+  await zip.file('prompt.txt', effectiveTemplate(p.userTemplate, p.subject));
+  if (p.system.trim()) await zip.file('system_prompt.txt', p.system);
+  await zip.file('codebook.md', codebookMarkdown(run));
   if (p.outputMode !== 'structured') return;
-  zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
-  zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
+  await zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
+  await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
 }
 
-function scriptFiles(zip: JSZip, study: Study, run: Run, exportedAt: string, runs: Run[]) {
-  zip.file('annotate_template.py', SCRIPT_TEMPLATE);
-  zip.file('annotate.py', fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, exportedAt, runs)));
-  zip.file('requirements.txt', requirementsTxt(run));
+async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[]) {
+  await zip.file('annotate_template.py', SCRIPT_TEMPLATE);
+  await zip.file('annotate.py', fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, exportedAt, runs)));
+  await zip.file('requirements.txt', requirementsTxt(run));
 }
 
 export interface ResearchOptions {
   includeLogs: boolean;
+  /** Told the path of each file as it is written. */
+  onProgress?: (path: string) => void;
 }
 
-export async function buildResearchRepo(d: ExportData, opts: ResearchOptions): Promise<{ blob: Blob; name: string }> {
+export async function buildResearchRepo(data: ExportData, opts: ResearchOptions): Promise<{ blob: Blob; name: string }> {
+  const d = inRunOrder(data);
   const exportedAt = nowIso();
   const name = `${slug(d.study.name)}_research_${dateStamp()}`;
-  const zip = new JSZip();
-  const root = zip.folder(name)!;
+  const zip = new ZipWriter(ZIP_LEVEL, opts.onProgress);
+  const root = zip.folder(name);
+  // (The latest: the run with results made last.)
   const finished = d.runs.filter((r) => d.results.some((x) => x.runId === r.id));
 
-  root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
-  // Without the request/response logs: they are under runs/ already, and each holds the full text again, which
-  // would make the zip too large to build in the browser for a full corpus. (Export → Study backup has them.) The
-  // results as stored, read from the database.
-  root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, false));
-  const corpus = root.folder('corpus')!;
-  corpus.file('corpus.csv', toCsv(corpusRows(d.docs, true)));
-  corpus.file('corpus.jsonl', jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
+  await root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
+  // Without the request/response logs: they are under runs/ already, and each holds the full text again. (Export →
+  // Study backup has them.) The results as stored, read from the database.
+  await root.file('study-backup.json', await buildBackup(d.study, d.docs, d.runs, false));
+  const corpus = root.folder('corpus');
+  await corpus.file('corpus.csv', toCsvBlob(corpusRows(d.docs, true)));
+  await corpus.file('corpus.jsonl', jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
 
-  const results = root.folder('results')!;
-  results.file('runs.csv', toCsv(runSummaryRows(d.runs, d.results)));
-  results.file('results_all_runs_long.csv', toCsv(resultsLong(d.study, d.runs, d.docs, d.results, { rationale: true, reasoning: true })));
+  const results = root.folder('results');
+  await results.file('runs.csv', toCsvBlob(runSummaryRows(d.runs, d.results)));
+  await results.file('results_all_runs_long.csv', toCsvBlob(resultsLong(d.study, d.runs, d.docs, d.results, { rationale: true, reasoning: true })));
   const agr: Row[] = [];
 
   // One folder per prompt version.
-  const prompts = root.folder('prompts')!;
+  const prompts = root.folder('prompts');
   const seen = new Set<number>();
   for (const run of d.runs) {
     if (seen.has(run.snapshot.promptVersion)) continue;
     seen.add(run.snapshot.promptVersion);
-    promptFiles(prompts.folder(`v${run.snapshot.promptVersion}`)!, run);
+    await promptFiles(prompts.folder(`v${run.snapshot.promptVersion}`), run);
   }
 
-  const runsDir = root.folder('runs')!;
+  const runsDir = root.folder('runs');
   const folders = runFolders(d.runs);
   for (const run of d.runs) {
-    const f = runsDir.folder(folders.get(run.id)!)!;
-    f.file('run.json', JSON.stringify(run, null, 2));
+    const f = runsDir.folder(folders.get(run.id)!);
+    await f.file('run.json', JSON.stringify(run, null, 2));
     const rs = d.results.filter((r) => r.runId === run.id);
-    f.file('results_long.csv', toCsv(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
-    f.file('results_wide.csv', toCsv(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
+    await f.file('results_long.csv', toCsvBlob(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
+    await f.file('results_wide.csv', toCsvBlob(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
     if (opts.includeLogs) await addRunLogs(f, run, d.docs, d.results);
     agr.push(...agreementRows(agreementForRun(run, d.docs, d.runs, d.results, d.study), runName(run, d.runs)));
   }
-  if (agr.length) results.file('agreement.csv', toCsv(agr));
+  if (agr.length) await results.file('agreement.csv', toCsvBlob(agr));
 
   const latest = finished[finished.length - 1];
   if (latest) {
-    results.file(`results_${folders.get(latest.id)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
-    scriptFiles(root.folder('scripts')!, d.study, latest, exportedAt, d.runs);
+    await results.file(`results_${folders.get(latest.id)}.xlsx`, await buildExcel(d, latest, { text: false, rationale: true }));
+    await scriptFiles(root.folder('scripts'), d.study, latest, exportedAt, d.runs);
   }
-  root.file('README.md', researchReadme(d, exportedAt, latest, folders, opts));
-  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-  return { blob, name: `${name}.zip` };
+  await root.file('README.md', researchReadme(d, exportedAt, latest, folders, opts));
+  return { blob: zip.blob(), name: `${name}.zip` };
 }
 
 export interface SupplementaryOptions {
   includeTexts: boolean;
   includeRationales: boolean;
   includeLogs: boolean;
+  /** Told the path of each file as it is written. */
+  onProgress?: (path: string) => void;
 }
 
-export async function buildSupplementary(d: ExportData, run: Run, opts: SupplementaryOptions): Promise<{ blob: Blob; name: string }> {
+export async function buildSupplementary(data: ExportData, run: Run, opts: SupplementaryOptions): Promise<{ blob: Blob; name: string }> {
+  const d = inRunOrder(data);
   const exportedAt = nowIso();
   const name = `${slug(d.study.name)}_supplementary_${dateStamp()}`;
-  const zip = new JSZip();
-  const root = zip.folder(name)!;
+  const zip = new ZipWriter(ZIP_LEVEL, opts.onProgress);
+  const root = zip.folder(name);
   const rs = d.results.filter((r) => r.runId === run.id);
   const runDocs = d.docs.filter((x) => rs.some((r) => r.docId === x.id));
 
   const meta = supplementaryMetadata(d, run, exportedAt);
-  root.file('metadata.json', JSON.stringify(meta, null, 2));
-  promptFiles(root.folder('prompt')!, run);
-  const res = root.folder('results')!;
-  res.file('results.csv', toCsv(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
-  res.file('results_by_replicate.csv', toCsv(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
+  await root.file('metadata.json', JSON.stringify(meta, null, 2));
+  await promptFiles(root.folder('prompt'), run);
+  const res = root.folder('results');
+  await res.file('results.csv', toCsvBlob(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
+  await res.file('results_by_replicate.csv', toCsvBlob(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
   const agr = agreementForRun(run, d.docs, d.runs, d.results, d.study);
-  if (agr.length) res.file('agreement.csv', toCsv(agreementRows(agr, runName(run, d.runs))));
-  if (opts.includeTexts) root.folder('data')!.file('corpus.csv', toCsv(corpusRows(runDocs, true)));
-  if (opts.includeLogs) await addRunLogs(root.folder('logs')!, run, runDocs, rs);
-  scriptFiles(root.folder('scripts')!, d.study, run, exportedAt, d.runs);
-  root.file('README.md', supplementaryReadme(d, run, meta, agr, opts));
-  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-  return { blob, name: `${name}.zip` };
+  if (agr.length) await res.file('agreement.csv', toCsvBlob(agreementRows(agr, runName(run, d.runs))));
+  if (opts.includeTexts) await root.folder('data').file('corpus.csv', toCsvBlob(corpusRows(runDocs, true)));
+  if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
+  await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
+  await root.file('README.md', supplementaryReadme(d, run, meta, agr, opts));
+  return { blob: zip.blob(), name: `${name}.zip` };
 }
 
 function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
@@ -392,7 +618,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     study_notes: d.study.description.trim() || null,
     run: {
       number: run.number,
-      // As the tables and README name it ("5-ab12cd34" for runs that share a number), and its id.
+      // As the tables and README name it ("5-20261022-221754" for runs that share a number), and its id.
       name: String(runName(run, d.runs)),
       id: run.id,
       label: run.label,
@@ -543,11 +769,17 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   const howMany = !retry.lowerBound && !retry.interrupted ? `${n(k)} request${k === 1 ? '' : 's'}` : k ? `At least ${n(k)} request${k === 1 ? '' : 's'}` : 'Requests';
   const planned = `the app version used for the run recorded only the number planned for the ${retry.legacy === 1 ? 'retry' : 'retries'} made with it, ${n(retry.planned)}`;
   const u = retry.unanswered;
-  const legacyNote =
-    (retry.lowerBound ? (k ? ` (counted from the stored answers: ${planned})` : ` (how many is not known: ${planned}, and no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'})`) : '') +
-    (retry.interrupted ? ' (a retry was interrupted by the page closing: requests under way then got no recorded answer and are not counted)' : '') +
+  const [ni, ns] = [retry.retriesInterrupted, retry.retriesStopped];
+  // One parenthesis for every note, joined by semicolons.
+  const notes = [
+    retry.lowerBound ? (k ? `counted from the stored answers: ${planned}` : `how many is not known: ${planned}, and no stored answer dates from ${retry.legacy === 1 ? 'it' : 'them'}`) : '',
+    ni ? `${ni === 1 ? 'a retry was' : `${n(ni)} retries were`} interrupted by the page closing: requests under way then got no recorded answer and are not counted` : '',
     // (Cancel, or a result that could not be saved: sent, so counted, but with no answer.)
-    (u ? ` (a retry was stopped while ${n(u)} of ${u === 1 ? 'them was' : 'them were'} under way: ${u === 1 ? 'it' : 'they'} got no recorded answer)` : '');
+    u
+      ? `${ns === 1 ? (ni ? 'another retry was' : 'a retry was') : `${n(ns)} ${ni ? 'other ' : ''}retries were`} stopped while ${n(u)} of them ${u === 1 ? 'was' : 'were'} under way: ${u === 1 ? 'it' : 'they'} got no recorded answer`
+      : '',
+  ].filter(Boolean);
+  const legacyNote = notes.length ? ` (${notes.join('; ')})` : '';
   const retryText =
     retrying && !k && !retry.lowerBound && !retry.interrupted
       ? `Requests without a usable answer (failed, or not sent before the run was stopped) were being sent again with identical settings${retriedAs} when this was exported`
@@ -586,6 +818,25 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
     .join(' ');
 }
 
+/**
+ * Why requests sent may have no line in a run's logs (none: complete). Those under way when an immediate run or a retry
+ * was stopped (Cancel, a result that could not be saved, the page closing) got no result, so no log, also once a later
+ * Retry failed has sent them again (their first stored answer is then the retry's); and versions before October 22,
+ * 2026 overwrote the failed attempt a retry replaced.
+ */
+const LOG_GAPS = [
+  'requests under way when a run or a Retry failed was stopped (Cancel, a result that could not be saved, or the page closing) may have been sent but have no line',
+  'a version before October 22, 2026 did not keep the failed attempts its Retry failed replaced: they have no line',
+];
+function logGaps(run: Run, results: Result[], retry: RetriedRequests): string[] {
+  // (Retries of a version that overwrote the attempt they replaced look the same as a first answer: not those.)
+  const since = (run.retries ?? []).filter((x) => x.counted || !retry.tokensIncomplete).map((x) => x.at).sort()[0];
+  const firstStoredByRetry =
+    !!since && results.some((r) => r.runId === run.id && ((r.attempt ?? 1) > 1 ? (r.replacedAt?.[0] ?? '') : r.requestedAt) >= since);
+  const stopped = retry.unanswered > 0 || retry.interrupted || (run.mode !== 'batch' && (run.status === 'cancelled' || run.status === 'failed' || firstStoredByRetry));
+  return LOG_GAPS.filter((_, i) => (i ? retry.tokensIncomplete : stopped));
+}
+
 /** The CSVs are written for analysis software, exactly as the values are (not escaped for spreadsheet programs). */
 const CSV_NOTE = 'The CSV files are for analysis software: they keep every value exactly as it is (a value starting with =, +, - or @ is not escaped, so a spreadsheet program may read it as a formula).';
 
@@ -602,7 +853,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '',
     `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.` +
       // (Runs that share a number: given twice by an earlier version open in two tabs.)
-      (sharesNumber(run, d.runs) ? ` Another run of the study has the same number (#${run.number}), given twice by an earlier version open in two tabs: this one is named by its number and the start of its id (\`run.id\` in metadata.json).` : ''),
+      (sharesNumber(run, d.runs) ? ` Another run of the study has the same number (#${run.number}), given twice by an earlier version open in two tabs: this one is named by its number and when it started (UTC; \`run.started_at\` in metadata.json).` : ''),
     '',
     ...(runInProgress(run)
       ? [
@@ -691,10 +942,12 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   );
   if (agr.length) lines.push('| `results/agreement.csv` | Agreement statistics |');
   if (opts.includeTexts) lines.push(`| \`data/corpus.csv\` | The annotated ${w.many} and their metadata |`);
-  if (opts.includeLogs)
+  if (opts.includeLogs) {
+    const gaps = logGaps(run, d.results, retry);
     lines.push(
-      `| \`logs/requests.jsonl\`, \`responses.jsonl\` | Every request body and full API response${meta.requests.replaced_by_retries > 0 ? '; a request that Retry failed sent again has a line for each attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error' : ''} |`,
+      `| \`logs/requests.jsonl\`, \`responses.jsonl\` | Every request body and full API response${gaps.length ? ` stored; ${gaps.join('; ')}` : ''}${meta.requests.replaced_by_retries > 0 ? `; a request that Retry failed sent again has a line for each ${gaps.length ? 'stored ' : ''}attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error` : ''} |`,
     );
+  }
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
     '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
@@ -729,11 +982,17 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ['`runs/run-NN/results_long.csv`', 'One row per request: annotations, rationale, reasoning summary, status, tokens, timing'],
     ['`runs/run-NN/results_wide.csv`', `One row per ${w.one}: aggregated annotations`],
   ];
-  if (opts.includeLogs)
+  if (opts.includeLogs) {
+    const all = d.runs.flatMap((r) => {
+      const rs = d.results.filter((x) => x.runId === r.id);
+      return logGaps(r, rs, retriedRequests(r, rs));
+    });
+    const gaps = LOG_GAPS.filter((g) => all.includes(g));
     rows.push([
       '`runs/run-NN/requests.jsonl`, `responses.jsonl`',
-      'Every request body sent and every raw API response; a request that Retry failed sent again has a line for each attempt (same doc_id and replicate; `attempt` 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error',
+      `${gaps.length ? `Every request body sent and raw API response stored; ${gaps.join('; ')}` : 'Every request body sent and every raw API response'}; a request that Retry failed sent again has a line for each ${gaps.length ? 'stored ' : ''}attempt (same doc_id and replicate; \`attempt\` 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error`,
     ]);
+  }
   rows.push(
     ['`results/runs.csv`', 'Overview of all runs'],
     ['`results/results_all_runs_long.csv`', 'All responses from all runs in one table'],
@@ -746,8 +1005,8 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
       `Python script reproducing run #${runName(latest, d.runs)} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${folders.get(latest.id)}/results_long.csv\`)`,
     ]);
   }
-  // Runs that share a number (given by earlier versions in two tabs): their folders and run names end in the start of
-  // the run's id.
+  // Runs that share a number (given by earlier versions in two tabs): their folders and run names end in when the run
+  // started.
   const shared = d.runs.filter((r) => sharesNumber(r, d.runs));
   return [
     `# ${d.study.name}: research repository`,
@@ -765,7 +1024,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     '',
     ...(shared.length
       ? [
-          `Some runs share a number (${[...new Set(shared.map((r) => `#${r.number}`))].join(', ')}; given twice by an earlier version when the app was open in two tabs): each one’s folder, and its name in the tables’ \`run\` column (e.g. ${runName(shared[0], d.runs)}), ends in the start of its id (\`id\` in its run.json).`,
+          `Some runs share a number (${[...new Set(shared.map((r) => `#${r.number}`))].join(', ')}; given twice by an earlier version when the app was open in two tabs): each one’s folder, and its name in the tables’ \`run\` column (e.g. ${runName(shared[0], d.runs)}), ends in when it started (UTC; \`createdAt\` in its run.json, \`started_at\` in results/runs.csv).`,
           '',
         ]
       : []),

@@ -198,14 +198,14 @@ describe('research zip: runs that share a number (N63)', () => {
   it('each run gets its own folder', async () => {
     const docs = mkDocs(2);
     const a = mkRun('aaaaaaaa-1111', 2, docs.map((d) => d.id), stancePrompt);
-    const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt);
+    const b = mkRun('bbbbbbbb-2222', 2, docs.map((d) => d.id), stancePrompt, { createdAt: '2026-10-01T10:30:00Z' });
     const c = mkRun('cccccccc-3333', 3, docs.map((d) => d.id), stancePrompt, { label: 'pilot' });
     const results = [a, b, c].flatMap((r) => docs.map((d) => mkResult(r, d, 1, { stance: 'for' })));
     const { blob } = await buildResearchRepo({ study: mkStudy(stancePrompt), docs, runs: [a, b, c], results }, { includeLogs: false });
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const runJson = Object.keys(zip.files).filter((k) => k.endsWith('/run.json')).map((k) => k.split('/').slice(-2, -1)[0]).sort();
-    expect(runJson).toEqual(['run-02-aaaaaaaa', 'run-02-bbbbbbbb', 'run-03-pilot']);
-    for (const [folder, run] of [['run-02-aaaaaaaa', a], ['run-02-bbbbbbbb', b]] as const) {
+    expect(runJson).toEqual(['run-02-20261001-100000', 'run-02-20261001-103000', 'run-03-pilot']);
+    for (const [folder, run] of [['run-02-20261001-100000', a], ['run-02-20261001-103000', b]] as const) {
       const f = zip.file(Object.keys(zip.files).find((k) => k.endsWith(`runs/${folder}/run.json`))!)!;
       expect(JSON.parse(await f.async('string')).id).toBe(run.id);
     }
