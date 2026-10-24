@@ -168,25 +168,39 @@ export async function* logPagesForRun(runId: string, pageSize = 300): AsyncGener
   }
 }
 
-async function deleteByIndex(
-  store: 'docs' | 'runs' | 'results' | 'logs',
-  index: 'byStudy' | 'byRun',
-  key: string,
-) {
+/**
+ * Deletes, in ONE transaction, every record of `stores` that `index` gives for `key`, and then `last`'s record: all of
+ * it or (e.g. the browser's storage refuses) none of it, so a run or study is never left half deleted, with its
+ * results gone while it still shows (and Retry failed would then send every text again).
+ */
+async function deleteAll(stores: ('docs' | 'runs' | 'results' | 'logs')[], index: 'byStudy' | 'byRun', key: string, last: ['runs' | 'studies', string]) {
   // Untyped view: the typed schema can't express "any store that has this index".
   const d = (await db()) as unknown as IDBPDatabase;
-  const keys = await d.getAllKeysFromIndex(store, index, key);
-  const tx = d.transaction(store, 'readwrite');
-  await Promise.all([...keys.map((k) => tx.store.delete(k)), tx.done]);
+  const tx = d.transaction([...new Set([...stores, last[0]])], 'readwrite');
+  const work: Promise<unknown>[] = [];
+  try {
+    for (const store of stores) {
+      const keys = await tx.objectStore(store).index(index).getAllKeys(key);
+      for (const k of keys) work.push(tx.objectStore(store).delete(k));
+    }
+    work.push(tx.objectStore(last[0]).delete(last[1]));
+    await Promise.all([...work, tx.done]);
+  } catch (e) {
+    // (A failure the transaction itself didn't end with, e.g. one thrown while queuing: undo what was queued.)
+    try {
+      tx.abort();
+    } catch {
+      /* already ended */
+    }
+    await Promise.allSettled([...work, tx.done]);
+    throw e;
+  }
 }
 
 export async function deleteRun(runId: string) {
-  await deleteByIndex('results', 'byRun', runId);
-  await deleteByIndex('logs', 'byRun', runId);
-  await (await db()).delete('runs', runId);
+  await deleteAll(['results', 'logs'], 'byRun', runId, ['runs', runId]);
 }
 
 export async function deleteStudy(studyId: string) {
-  for (const s of ['docs', 'runs', 'results', 'logs'] as const) await deleteByIndex(s, 'byStudy', studyId);
-  await (await db()).delete('studies', studyId);
+  await deleteAll(['docs', 'runs', 'results', 'logs'], 'byStudy', studyId, ['studies', studyId]);
 }

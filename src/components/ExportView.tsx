@@ -70,6 +70,8 @@ const showStep = (step: string) => {
 /** Said while a download that reads stored results and logs as it goes has to wait for a run being sent. */
 const SENDING = 'Wait until the run being sent has finished: this download reads the stored results and logs as it goes, so it would hold answers from before and after.';
 
+const DELETING = 'Wait until the delete under way has finished.';
+
 /** The downloads that read stored results and logs while they are built (the study backup, the research zip, and the
  *  supplementary package with logs); the Excel workbook and the package without logs show the results so far. */
 const readsAsItGoes = (kind: BackgroundKind, picked: BuildChoices) => kind === 'backup' || kind === 'research' || (kind === 'supp' && !!picked.supp?.includeLogs);
@@ -107,7 +109,7 @@ export function ExportView() {
     // A download that reads the stored results and logs as it goes waits for a run or Retry failed being sent, so it
     // doesn't hold answers from before and after it.
     if (getState().deletingWhat) {
-      toast('Wait until the delete under way has finished.', 'error');
+      toast(DELETING, 'error');
       return;
     }
     if (readsAsItGoes(kind, picked) && isBusy()) {
@@ -131,7 +133,7 @@ export function ExportView() {
       // (Asked again: a run or a delete may have started during that wait. The data is taken right after, before
       // anything else can start.)
       if (getState().deletingWhat || (readsAsItGoes(kind, picked) && isBusy())) {
-        toast(getState().deletingWhat ? 'Wait until the delete under way has finished.' : SENDING, 'error');
+        toast(getState().deletingWhat ? DELETING : SENDING, 'error');
         return;
       }
       await fn();
@@ -173,6 +175,7 @@ export function ExportView() {
   const job = useStore((s) => s.job);
   // A run or Retry failed being sent (or a batch being uploaded) from this page.
   const sending = useStore((s) => isBusy(s));
+  const deleting = useStore((s) => s.deletingWhat);
   const w = words({ subject: useStore((s) => currentStudy(s)!.prompt.subject) });
 
   return (
@@ -252,7 +255,7 @@ export function ExportView() {
           <button
             className="btn primary export-btn"
             disabled={!!busy || sending || (!docs.length && !runs.length)}
-            title={sending ? SENDING : undefined}
+            title={deleting ? DELETING : sending ? SENDING : undefined}
             onClick={() =>
               go(
                 'research',
@@ -302,7 +305,7 @@ export function ExportView() {
           <button
             className="btn primary export-btn"
             disabled={!run || !!busy || (sending && supp.includeLogs)}
-            title={sending && supp.includeLogs ? SENDING : undefined}
+            title={deleting ? DELETING : sending && supp.includeLogs ? SENDING : undefined}
             onClick={() =>
               go(
                 'supp',
@@ -331,7 +334,7 @@ export function ExportView() {
           <button
             className="btn"
             disabled={!!busy || sending}
-            title={sending ? SENDING : undefined}
+            title={deleting ? DELETING : sending ? SENDING : undefined}
             onClick={() =>
               go('backup', 'study backup', async () => {
                 const d = exportData();

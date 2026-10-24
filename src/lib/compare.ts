@@ -82,11 +82,16 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       const far = (x: number) => x < -step || x > 1 + step;
       let zeroOrOne = 0;
       let near = 0;
+      const farValues: number[] = [];
       for (const x of nums) {
         if (x === 0 || x === 1) zeroOrOne++;
-        else if ((x < 0 || x > 1) && !far(x)) near++;
+        else if (far(x)) farValues.push(x);
+        else if (x < 0 || x > 1) near++;
       }
-      const zeroOne = nums.every((x) => x >= 0 && x <= 1) || (zeroOrOne * 2 > nums.length && near <= Math.max(1, nums.length / 100));
+      // The far answers must look like missing-value codes: one or two distinct values (9, 99, −9) and at most one in
+      // ten. A percentage, 0–10 intensity or year field that is mostly 0 has many different far values: its own scale.
+      const codes = new Set(farValues).size <= 2 && farValues.length <= nums.length / 10;
+      const zeroOne = nums.every((x) => x >= 0 && x <= 1) || (zeroOrOne * 2 > nums.length && near <= Math.max(1, nums.length / 100) && codes);
       // Whole-number scores: the scale is every value from the lowest to the highest seen, so weighted κ measures
       // distances on the scale even where a value (e.g. −2) was never used. (No codebook says what the scale is.)
       let lo = Infinity;

@@ -668,7 +668,7 @@ function AgreementPanel() {
   // (A codebook scale of numbers applies at the nominal level too: then the reason is the scale's.)
   const leftOutText =
     `${fmtInt(stats.leftOut.n)} ${stats.leftOut.n === 1 ? `${w.one} was` : `${w.many} were`} left out because ` +
-    `${leftOutReason(stats.leftOut.range ? 'interval' : level, stats.leftOut.range, !!cf?.scaleSeen, cf?.scaleSeen && cf.range ? scaleStep(cf.range) : undefined)}: ${stats.leftOut.values.map((v) => `“${v}”`).join(', ')}${stats.leftOut.values.length === 5 ? ', …' : ''}.`;
+    `${leftOutReason(stats.leftOut.range ? 'interval' : level, stats.leftOut.range, !!scf?.scaleSeen, scf?.scaleSeen && scf.range ? scaleStep(scf.range) : undefined)}: ${stats.leftOut.values.map((v) => `“${v}”`).join(', ')}${stats.leftOut.values.length === 5 ? ', …' : ''}.`;
 
   const sourceOptions = (allowMeta: boolean) => (
     <>
@@ -710,6 +710,8 @@ function AgreementPanel() {
   // A download being built (`startBackground`), kept outside this panel, so leaving Runs & agreement and coming back
   // still shows it. For the comparison report: how far it has got (e.g. "field 2 of 5"), else false.
   const building = useBackground();
+  // A study or run being deleted: no report starts meanwhile (it would read what is being deleted).
+  const deleting = useStore((s) => s.deletingWhat);
   // (Only this study's report: one of another study is named as such next to the button.)
   const reporting = building?.kind === 'report' && building.study.id === study.id ? building.progress : false;
   const [groupBy, setGroupBy] = useState('');
@@ -728,6 +730,10 @@ function AgreementPanel() {
     if (!ra || !rb) return;
     // Named now: the page stays usable while the report is built, so another study may be open when it is done.
     const file = `${slug(currentStudy(getState())?.name ?? 'study')}_run${runName(ra, runs)}_vs_run${runName(rb, runs)}_${dateStamp()}.xlsx`;
+    if (getState().deletingWhat) {
+      toast('Wait until the delete under way has finished.', 'error');
+      return;
+    }
     // One download is built at a time (a second would compete with the first for memory and leave two files).
     if (!startBackground('report', `comparison report (run #${runName(ra, runs)} vs run #${runName(rb, runs)})`, { id: study.id, name: study.name || 'Untitled' })) {
       toast('Another download is still being built: try again when it is done.', 'error');
@@ -846,10 +852,12 @@ function AgreementPanel() {
         <div className="row" style={{ margin: '2px 0 12px' }}>
           <button
             className="btn small wrap"
-            disabled={!!building}
+            disabled={!!building || !!deleting}
             onClick={downloadReport}
             title={
-              building && reporting === false
+              deleting
+                ? 'Wait until the delete under way has finished.'
+                : building && reporting === false
                 ? 'Another download is being built: one is built at a time.'
                 : 'All comparable fields of the two runs in one Excel file, with intervals, systematic differences and draft text for a paper'
             }
@@ -907,7 +915,8 @@ function AgreementPanel() {
               {leftOutText}
             </div>
           )}
-          {stats.outsideAnswers && (
+          {/* (Not for 0/1 scores against labels: their scale is 0…1, not the range of the answers, `labelScale`.) */}
+          {stats.outsideAnswers && scf === cf && (
             <div className="hint" style={{ marginTop: 6 }}>
               {outsideAnswersNote(stats.outsideAnswers, w)}
             </div>

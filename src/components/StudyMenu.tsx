@@ -30,6 +30,7 @@ export function StudyMenu() {
   const current = useStore((s) => currentStudy(s));
   // While a run is being sent or uploaded, the open study must stay open (and in place).
   const busy = useStore((s) => isBusy(s));
+  const deleting = useStore((s) => s.deletingWhat);
   // A download of the open study being built reads its stored results and logs as it goes: the study is not deleted
   // meanwhile (the store refuses too).
   const building = useBuildingFor(current?.id);
@@ -90,7 +91,7 @@ export function StudyMenu() {
               </button>
             ))}
             <div className="menu-sep" />
-            {busy && <div className="menu-note">A run is in progress: switch, add or delete studies when it has finished.</div>}
+            {busy && <div className="menu-note">{deleting ? `${deleting} Switch, add or delete studies once it is done.` : 'A run is in progress: switch, add or delete studies when it has finished.'}</div>}
             <button
               className="menu-item"
               disabled={busy}

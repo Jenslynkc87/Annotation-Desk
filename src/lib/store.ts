@@ -290,7 +290,7 @@ function replacedFrom(results: Result[]): Run['replaced'] {
 export async function selectStudy(id: string, afterDelete = false) {
   // (`afterDelete`: the study just deleted is replaced by another while its delete still holds everything else back.)
   if (isBusy() && !afterDelete) {
-    toast('Finish or cancel the running job before switching studies.', 'error');
+    toast(state.deletingWhat ? 'Wait until the delete under way has finished.' : 'Finish or cancel the running job before switching studies.', 'error');
     return;
   }
   const data = await dbApi.loadStudyData(id);
@@ -504,7 +504,11 @@ async function removeStudyNow(id: string) {
   try {
     await checksEnded((_, studyId) => studyId === id, 'Batch results of this study are being collected: the study is deleted once that is done.');
     if (waitsForDownload(id, 'delete the study')) return;
+    // (One transaction: if storage refuses, nothing is deleted.)
     await dbApi.deleteStudy(id);
+  } catch (e) {
+    toast(`The study was not deleted: ${storageError(e)}. Nothing of it was removed.`, 'error', true);
+    return;
   } finally {
     deleting.delete(id);
   }
@@ -1731,6 +1735,14 @@ export async function retryFailed(runId: string) {
     const stored = await dbApi.getResultsForRun(runId);
     applyTodaysRules(stored, state.runs);
     ok = new Set(stored.filter((r) => r.status === 'ok').map((r) => r.id));
+    // Fewer results stored than this page shows (e.g. a delete that stopped part-way in an earlier version): sending
+    // "the failed ones" would send texts this page counts as done. Never more than the page showed as failed.
+    const shown = state.results.filter((r) => r.runId === runId);
+    if (stored.length < shown.length) {
+      toast(`Run ${runLabel(original)}: fewer results are stored than this page shows, so nothing was sent. Reload the page, then retry.`, 'error', true);
+      return;
+    }
+    for (const r of shown) if (r.status === 'ok') ok.add(r.id);
   } catch (e) {
     toast(`Could not prepare the retry: ${storageError(e)}`, 'error', true);
     return;
@@ -1976,7 +1988,8 @@ export async function deleteRunById(runId: string) {
     if (run && waitsForDownload(run.studyId, 'delete the run')) return;
     await dbApi.deleteRun(runId);
   } catch (e) {
-    return toast(`The run was not deleted: ${storageError(e)}.`, 'error', true);
+    // (One transaction: nothing of it was removed.)
+    return toast(`The run was not deleted: ${storageError(e)}. Nothing of it was removed.`, 'error', true);
   } finally {
     deleting.delete(runId);
   }

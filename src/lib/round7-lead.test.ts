@@ -109,3 +109,81 @@ describe('re-importing a paragraph table whose IDs are built from the file name 
     expect(again.already).toBe(3);
   });
 });
+
+describe('the short check after the final round (lead)', () => {
+  it('a percentage or 0–10 score that is mostly 0 is not a 0/1 item: its values are kept against labels', () => {
+    // 200 texts, 85% scored 0, the rest a spread of percentages; the coder agrees on all but two.
+    const pct = (i: number) => (i % 7 === 0 ? [10, 25, 40, 60, 75, 90][i % 6] : 0);
+    const docs = Array.from({ length: 200 }, (_, i) => mkDoc(i, { share_gold: String(i === 7 || i === 14 ? 5 : pct(i)) }));
+    const run = mkRun(docs.map((d) => d.id));
+    const results = docs.map((d, i) => mkResult('p', d.id, { share: pct(i) }));
+    const f = comparableFields(run, buildDocViews(docs, [run], results, run.id).values()).find((x) => x.key === 'share')!;
+    expect(f.zeroOne).toBe(false);
+    const [row] = agreementForRun(run, docs, [run], results);
+    expect([row.stats.n, row.stats.leftOut.n]).toEqual([200, 0]);
+    expect(row.stats.percentAgreement).toBeCloseTo(198 / 200, 12);
+  });
+
+  it('a 0/1 item with a 9 for can’t tell is still one (the 9s look like a code)', () => {
+    const docs = Array.from({ length: 100 }, (_, i) => mkDoc(i, {}));
+    const run = mkRun(docs.map((d) => d.id));
+    const results = docs.map((d, i) => mkResult('p', d.id, { flag: i < 4 ? 9 : i % 2 }));
+    const f = comparableFields(run, buildDocViews(docs, [run], results, run.id).values()).find((x) => x.key === 'flag')!;
+    expect(f.zeroOne).toBe(true);
+  });
+
+  it('a run or study is deleted in one transaction: if storage refuses, nothing of it is removed', async () => {
+    const dbApi = await import('./db');
+    await store.createStudy('Atomic');
+    const ids = (await store.addDocs([1, 2, 3].map((i) => ({ docId: `t${i}`, text: `x${i}`, meta: {}, source: `t${i}.txt` })))) && store.getState().docs.map((d) => d.id);
+    const studyId = store.currentStudy()!.id;
+    const run: Run = { ...mkRun(ids || []), id: 'atomic-run', studyId };
+    await dbApi.putRun(run);
+    for (const d of ids || []) await dbApi.putResult({ ...mkResult('atomic-run', d, { flag: 1 }), studyId, runId: 'atomic-run', id: `atomic-run:${d}:1` }, { id: `atomic-run:${d}:1`, runId: 'atomic-run', studyId, requestPart: {}, response: {} } as never);
+    // The logs store refuses its deletes, as a full disk may: the whole delete is undone.
+    const orig = IDBObjectStore.prototype.delete;
+    IDBObjectStore.prototype.delete = function (this: IDBObjectStore, key: IDBValidKey | IDBKeyRange) {
+      if (this.name === 'logs') throw new DOMException('full', 'QuotaExceededError');
+      return orig.call(this, key);
+    };
+    try {
+      await expect(dbApi.deleteRun('atomic-run')).rejects.toBeTruthy();
+      await expect(dbApi.deleteStudy(studyId)).rejects.toBeTruthy();
+    } finally {
+      IDBObjectStore.prototype.delete = orig;
+    }
+    expect((await dbApi.getResultsForRun('atomic-run')).length).toBe(3);
+    expect(await dbApi.getRun('atomic-run')).toBeTruthy();
+    expect((await dbApi.getDocsForStudy(studyId)).length).toBe(3);
+  });
+});
+
+describe('Retry failed never sends more than the page shows as failed (lead)', () => {
+  it('refuses when fewer results are stored than the page shows', async () => {
+    const dbApi = await import('./db');
+    vi.stubGlobal('fetch', async (u: unknown) => {
+      throw new Error(`unexpected request: ${String(u)}`);
+    });
+    await store.createStudy('Bound');
+    store.setKey('anthropic', 'sk-ant-test');
+    store.setKey('openai', 'sk-test');
+    await store.addDocs([1, 2, 3, 4].map((i) => ({ docId: `b${i}`, text: `y${i}`, meta: {}, source: `b${i}.txt` })));
+    const studyId = store.currentStudy()!.id;
+    const ids = store.getState().docs.map((d) => d.id);
+    const run: Run = { ...mkRun(ids), id: 'bound-run', studyId };
+    await dbApi.putRun(run);
+    for (const [i, d] of ids.entries()) {
+      const r = { ...mkResult('bound-run', d, { flag: 1 }), studyId, id: `bound-run:${d}:1`, ...(i === 3 ? { status: 'error' as const, error: 'overloaded' } : {}) };
+      await dbApi.putResult(r, { id: r.id, runId: 'bound-run', studyId, requestPart: {}, response: {} } as never);
+    }
+    await store.selectStudy(studyId);
+    expect(store.getState().results.filter((r) => r.runId === 'bound-run').length).toBe(4);
+    // Two stored results gone (e.g. a delete that stopped part-way in an earlier version).
+    const d = await dbApi.db();
+    await d.delete('results', `bound-run:${ids[0]}:1`);
+    await d.delete('results', `bound-run:${ids[1]}:1`);
+    await store.retryFailed('bound-run');
+    expect(store.getState().toasts.some((t) => t.text.includes('fewer results are stored than this page shows'))).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});

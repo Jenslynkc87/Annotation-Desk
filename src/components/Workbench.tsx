@@ -617,7 +617,7 @@ function TextsAndResults() {
                     Draw a sample…
                   </button>
                   <div className="menu-sep" />
-                  {busy && <div className="menu-note">A run is in progress: delete {w.many} when it has finished.</div>}
+                  {busy && <div className="menu-note">{deletingWhat ? `${deletingWhat} Delete ${w.many} once it is done.` : `A run is in progress: delete ${w.many} when it has finished.`}</div>}
                   <button
                     className="menu-item"
                     style={{ color: 'var(--err)' }}
