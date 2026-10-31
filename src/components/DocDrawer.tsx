@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getLog } from '../lib/db';
 import { requestAsSent } from '../lib/export/packages';
-import { fieldLabel, outputFields } from '../lib/prompt';
+import { fieldLabel, isProseField, outputFields } from '../lib/prompt';
 import { currentStudy, isBusy, startRun, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import type { Result, ResultLog, Run } from '../lib/types';
@@ -152,7 +152,8 @@ function ResultCard({ run, result: r, showRep }: { run: Run; result: Result; sho
       {r.status === 'ok' && (
         <div className="annot">
           {fields.map((f) => (
-            <div key={f} className={f === 'response' ? 'annot-item wide' : 'annot-item'}>
+            // Prose (the plain-text answer, explanations, free text) at full width in plain type; labels as tiles.
+            <div key={f} className={f === 'response' || isProseField(run.snapshot.prompt, f) ? 'annot-item wide' : 'annot-item'}>
               <div className="annot-k">{fieldLabel(run.snapshot.prompt, f)}</div>
               <div className="annot-v">{r.values[f] || <span className="hint">—</span>}</div>
             </div>

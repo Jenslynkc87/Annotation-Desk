@@ -266,6 +266,14 @@ export function isExplanationKey(k: string): boolean {
   return k === 'explanation' || k === 'reasoning' || k.endsWith('_explanation') || k.endsWith('_reasoning');
 }
 
+/**
+ * A field holding running prose rather than a label: a Free text field of the codebook, or an explanation
+ * (`<score>_explanation`, or such a key in plain-text JSON answers). Shown in plain type and at full width.
+ */
+export function isProseField(p: Pick<PromptSpec, 'variables'>, f: string): boolean {
+  return p.variables.find((v) => v.name === f)?.type === 'text' || isExplanationKey(f);
+}
+
 /** Canonical form for comparing labels across sources (gold columns, runs).
  *  For yes/no fields (`yesNo`), 1 and 0 and y and n also count as yes and no. */
 export function normalizeLabel(v: string | undefined, yesNo = false): string {

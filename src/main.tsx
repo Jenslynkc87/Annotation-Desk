@@ -17,6 +17,18 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>,
 );
 
+// Ask the browser to keep this site's data (studies, texts, results) even when the disk runs low; without this it may
+// clear it without asking. The browser decides (Chrome and Edge silently, Firefox may ask once); asked again on each
+// load, since Chrome grants it more readily to sites used often. Nothing changes if it is refused or unsupported.
+try {
+  void navigator.storage
+    ?.persisted?.()
+    .then((kept) => kept || navigator.storage.persist())
+    .catch(() => undefined);
+} catch {
+  /* not available */
+}
+
 // Anything that goes wrong outside a handler (e.g. a failed save) is shown, not left silent.
 window.addEventListener('unhandledrejection', (e) =>
   toast(`Something went wrong: ${isQuotaError(e.reason) ? storageError(e.reason) : errorMessage(e.reason) || 'unknown error'}`, 'error'),

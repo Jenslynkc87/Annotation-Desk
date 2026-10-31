@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { codebookField, comparableFields, fieldValue, labelScale, type ComparableField } from '../lib/compare';
 import { labelValue, namedField } from '../lib/export/tables';
 import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
-import { fieldLabel, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
+import { fieldLabel, isProseField, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
 import { batchParts, batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
 import type { Doc, PromptSpec, Run, Variable } from '../lib/types';
 import { provider } from '../lib/providers';
@@ -725,7 +725,14 @@ function TextsAndResults() {
                               i === 0 && <span className="badge err">failed</span>
                             ) : (
                               <span className={`val ${f === cmpCell ? cmp : ''}`} title={v.consistency[f] !== undefined ? `${Math.round(v.consistency[f] * 100)}% of the annotations agree` : undefined}>
-                                {f === 'response' ? <span className="snippet" style={{ fontWeight: 400 }}>{val}</span> : val || (v.status === 'none' ? '' : '—')}
+                                {f === 'response' ? (
+                                  <span className="snippet" style={{ fontWeight: 400 }}>{val}</span>
+                                ) : val && v.run && isProseField(v.run.snapshot.prompt, f) ? (
+                                  // An explanation or other prose: plain type, its first lines (the whole of it when the text is opened).
+                                  <span className="prose-cell">{val}</span>
+                                ) : (
+                                  val || (v.status === 'none' ? '' : '—')
+                                )}
                                 {v.consistency[f] !== undefined && v.consistency[f] < 1 && <span className="badge warn" style={{ marginLeft: 6 }}>{Math.round(v.consistency[f] * 100)}%</span>}
                               </span>
                             )}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildOutputSchema, fieldLabel, outputFields, flattenJsonResponse, invalidPlaceholders, isExplanationKey, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
+import { buildOutputSchema, fieldLabel, outputFields, flattenJsonResponse, invalidPlaceholders, isExplanationKey, isProseField, normalizeLabel, parseModelOutput, renderMessage, renderMessageParts, slugKey, uniqueKey } from './prompt';
 import { DEFAULT_PROMPT } from './types';
 
 describe('field names', () => {
@@ -106,5 +106,23 @@ describe('entries (model-knowledge studies)', () => {
     const doc = { docId: 'Niels Bohr', text: 'name: Niels Bohr\nborn: 1885', meta: {} };
     expect(renderMessage('Rate this person.', doc, 'entries')).toBe('Rate this person.\n\n<entry>\nname: Niels Bohr\nborn: 1885\n</entry>');
     expect(renderMessage('Rate this person.', doc)).toContain('<text>');
+  });
+});
+
+describe('isProseField', () => {
+  const p = {
+    variables: [
+      { name: 'orientation', type: 'ordinal' as const, values: ['-1', '0', '1'], description: '' },
+      { name: 'notes', type: 'text' as const, values: [], description: '' },
+      { name: 'orientation_explanation', type: 'text' as const, values: [], description: '' },
+    ],
+  };
+  it('treats free text and explanations as prose, labels not', () => {
+    expect(isProseField(p, 'orientation')).toBe(false);
+    expect(isProseField(p, 'notes')).toBe(true);
+    expect(isProseField(p, 'orientation_explanation')).toBe(true);
+    // A plain-text run's JSON keys, which are not codebook fields.
+    expect(isProseField({ variables: [] }, 'explanation')).toBe(true);
+    expect(isProseField({ variables: [] }, 'score')).toBe(false);
   });
 });
