@@ -229,6 +229,13 @@ function TextsAndResults() {
   const job = useStore((s) => s.job);
   const submitting = useStore((s) => s.submitting);
   const deletingWhat = useStore((s) => s.deletingWhat);
+  // What deleting texts costs, said only when some of them have results: those results are tied to the texts, so they
+  // no longer show anywhere, and the same texts added again are new texts that earlier runs don't reconnect to.
+  const resultsLost = (ids: Set<string>, one: boolean) => {
+    if (!results.some((r) => ids.has(r.docId))) return '';
+    const it = one ? `this ${w.one}` : `these ${w.many}`;
+    return ` The results for ${it} will no longer appear in the list, the agreement figures or the exports’ results tables (only the per-request tables keep them, marked as deleted), and adding the same ${one ? w.one : w.many} again won’t bring them back. The runs themselves, with their recorded requests and costs, are kept.`;
+  };
   const keys = useStore((s) => s.keys);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
@@ -624,7 +631,8 @@ function TextsAndResults() {
                     disabled={!selected.size || busy}
                     onClick={() => {
                       close();
-                      if (confirm(`Delete ${selected.size} selected ${selected.size === 1 ? w.one : w.many}? Their results stay in past runs but are hidden.`)) {
+                      const n = selected.size;
+                      if (confirm(`Delete ${n} selected ${n === 1 ? w.one : w.many}?${resultsLost(selected, n === 1)}`)) {
                         void removeDocs([...selected]);
                         setSelected(new Set());
                       }
@@ -638,7 +646,11 @@ function TextsAndResults() {
                     disabled={busy}
                     onClick={() => {
                       close();
-                      if (confirm(`Delete all ${docs.length} ${w.many} from this study? Runs are kept.`)) void removeDocs(docs.map((d) => d.id));
+                      const all = new Set(docs.map((d) => d.id));
+                      const lost = resultsLost(all, docs.length === 1);
+                      const instead = lost ? ' To keep those results, start a new study instead (Studies → Duplicate settings & prompt).' : '';
+                      const what = docs.length === 1 ? `the only ${w.one}` : `all ${docs.length} ${w.many}`;
+                      if (confirm(`Delete ${what} from this study?${lost}${instead}`)) void removeDocs([...all]);
                     }}
                   >
                     Delete all {w.many}
