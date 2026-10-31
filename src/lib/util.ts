@@ -84,6 +84,16 @@ export function download(filename: string, data: Blob | string, type = 'text/pla
 }
 
 export function errorMessage(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
+  const m = e instanceof Error ? e.message : String(e);
+  return isStaleBuildError(m) ? STALE_BUILD : m;
 }
+
+/**
+ * A part of the site loaded only when needed (e.g. the Excel writer) that is no longer on the server: the site was
+ * published again after this page was opened, and the old files are gone. Chrome, Firefox and Safari word it differently.
+ */
+export function isStaleBuildError(message: string): boolean {
+  return /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS/i.test(message);
+}
+
+export const STALE_BUILD = 'the site has been updated since this page was opened. Reload the page and try again (your studies are kept).';
