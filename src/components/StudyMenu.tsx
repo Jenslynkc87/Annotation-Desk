@@ -19,6 +19,7 @@ import {
   unknownUpload,
   useStore,
 } from '../lib/store';
+import { sharedPrompts } from '../lib/savedPrompts';
 import { words } from '../lib/subject';
 import { fmtDateTime } from '../lib/util';
 import { runName } from '../lib/view';
@@ -160,7 +161,12 @@ export function StudyMenu() {
                   (leftUploads.length
                     ? ` A batch upload of unknown outcome of ${runsWord(leftUploads)} is left for ${quoted([...sharers])} (${OTHER_STUDY_HERE}), which ${sharers.size === 1 ? 'shares' : 'share'} that upload.`
                     : '');
-                if (confirm(`Delete “${cur.name}” with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note} This cannot be undone.`)) {
+                // Saved prompts are listed in every study, but kept in the one they were saved in.
+                const onlyHere = sharedPrompts(s.studies, cur.id).filter((x) => x.copies.every((c) => c.studyId === cur.id)).length;
+                const promptsNote = onlyHere
+                  ? ` Its ${onlyHere === 1 ? 'saved prompt' : `${onlyHere} saved prompts`} (kept only in this study) ${onlyHere === 1 ? 'goes' : 'go'} too.`
+                  : '';
+                if (confirm(`Delete “${cur.name}” with all ${s.docs.length} ${words(cur.prompt).many} and ${s.runs.length} runs?${note}${promptsNote} This cannot be undone.`)) {
                   void removeStudy(cur.id);
                 }
               }}

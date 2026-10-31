@@ -384,8 +384,9 @@ export async function selectStudy(id: string, afterDelete = false) {
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 const dirty = new Set<string>();
-export function updateStudy(mutate: (s: Study) => void) {
-  const cur = currentStudy();
+/** Change the open study, or with `id` another one (e.g. deleting a saved prompt kept there). */
+export function updateStudy(mutate: (s: Study) => void, id?: string) {
+  const cur = id ? state.studies.find((x) => x.id === id) : currentStudy();
   if (!cur) return;
   const next = structuredClone(cur);
   mutate(next);

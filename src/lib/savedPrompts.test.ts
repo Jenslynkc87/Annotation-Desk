@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { findSavedByName, samePrompt, upsertSavedPrompt } from './savedPrompts';
-import { DEFAULT_PROMPT } from './types';
+import { findSavedByName, samePrompt, samePromptAnyKind, sharedPrompts, upsertSavedPrompt } from './savedPrompts';
+import { DEFAULT_PROMPT, type SavedPrompt, type Study } from './types';
 
 const prompt = (text: string) => ({ ...structuredClone(DEFAULT_PROMPT), userTemplate: text });
 
@@ -31,5 +31,39 @@ describe('saved prompts', () => {
     expect(samePrompt(list[0].prompt, prompt('A'))).toBe(true);
     expect(samePrompt(list[0].prompt, prompt('B'))).toBe(false);
     expect(findSavedByName(list, 'p')?.id).toBe('id1');
+  });
+
+  describe('shared across studies', () => {
+    const sp = (id: string, name: string, text: string, subject?: 'entries'): SavedPrompt => ({ id, name, savedAt: '', prompt: { ...prompt(text), subject } });
+    const study = (id: string, name: string, saved: SavedPrompt[]) => ({ id, name, savedPrompts: saved }) as unknown as Study;
+
+    it('lists the open study’s prompts first, then those of other studies with their study’s name', () => {
+      const list = sharedPrompts([study('a', 'Pilot', [sp('1', 'Prompt 1', 'A')]), study('b', 'Main', [sp('2', 'Prompt 2', 'B')])], 'b');
+      expect(list.map((x) => [x.entry.name, x.here, x.studyName])).toEqual([
+        ['Prompt 2', true, 'Main'],
+        ['Prompt 1', false, 'Pilot'],
+      ]);
+    });
+    it('lists an identical copy (same name, text and fields) once, with every study that keeps it', () => {
+      const list = sharedPrompts([study('a', 'Main', [sp('1', 'Prompt 1', 'A')]), study('b', 'Main (copy)', [sp('1', 'prompt 1', 'A')])], 'a');
+      expect(list).toHaveLength(1);
+      expect(list[0].copies).toEqual([
+        { studyId: 'a', id: '1' },
+        { studyId: 'b', id: '1' },
+      ]);
+    });
+    it('keeps prompts apart that share a name but differ in text', () => {
+      const list = sharedPrompts([study('a', 'A', [sp('1', 'Prompt 1', 'A')]), study('b', 'B', [sp('2', 'Prompt 1', 'other')])], 'a');
+      expect(list.map((x) => x.here)).toEqual([true, false]);
+    });
+    it('treats a prompt from an entries study as the same prompt in a texts study', () => {
+      expect(samePromptAnyKind(prompt('A'), { ...prompt('A'), subject: 'entries' })).toBe(true);
+      expect(samePrompt(prompt('A'), { ...prompt('A'), subject: 'entries' })).toBe(false);
+      const list = sharedPrompts([study('a', 'Texts', [sp('1', 'P', 'A')]), study('b', 'Entries', [sp('2', 'P', 'A', 'entries')])], 'a');
+      expect(list).toHaveLength(1);
+    });
+    it('handles studies without saved prompts', () => {
+      expect(sharedPrompts([study('a', 'A', undefined as unknown as SavedPrompt[])], 'a')).toEqual([]);
+    });
   });
 });

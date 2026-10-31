@@ -4,7 +4,7 @@ import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
 import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
-import { samePrompt, upsertSavedPrompt } from '../lib/savedPrompts';
+import { samePromptAnyKind, sharedPrompts, upsertSavedPrompt, type SharedPrompt } from '../lib/savedPrompts';
 import type { ProviderId, SavedPrompt, Variable, VariableType } from '../lib/types';
 import { builtInPrice, PRICES_AS_OF, setPriceOverride, usePriceOverrides } from '../lib/pricing';
 import { nowIso, uid } from '../lib/util';
@@ -429,10 +429,15 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
   );
 }
 
-/** Named prompts (text, output mode and fields) kept in the study, so the corpus and run settings stay put while the prompt is switched. */
+/**
+ * Named prompts (text, output mode and fields), so the corpus and run settings stay put while the prompt is switched.
+ * Each is kept in the study it was saved in; the menu lists those of every study, the open study's first.
+ */
 function SavedPrompts() {
   const study = useStore((s) => currentStudy(s)!);
+  const studies = useStore((s) => s.studies);
   const saved = study.savedPrompts ?? [];
+  const shared = useMemo(() => sharedPrompts(studies, study.id), [studies, study.id]);
   const save = () => {
     const name = window.prompt('Name for this prompt and its fields (e.g. Prompt 3):')?.trim();
     if (!name) return;
@@ -441,20 +446,23 @@ function SavedPrompts() {
     updateStudy((s) => void (s.savedPrompts = upsertSavedPrompt(s.savedPrompts ?? [], name, s.prompt, uid(), nowIso())));
   };
   const load = (sp: SavedPrompt) => {
-    const kept = saved.some((x) => samePrompt(x.prompt, study.prompt));
+    const kept = shared.some((x) => samePromptAnyKind(x.entry.prompt, study.prompt));
     if (!kept && !confirm(`Replace the current prompt and fields with “${sp.name}”? The current ones are not saved under a name.`)) return;
     // The kind of study (texts or entries) stays as it is.
     updateStudy((s) => void (s.prompt = { ...structuredClone(sp.prompt), subject: s.prompt.subject }));
   };
-  const remove = (sp: SavedPrompt) => {
-    if (confirm(`Delete the saved prompt “${sp.name}”? Runs already made with it are not affected.`)) updateStudy((s) => void (s.savedPrompts = (s.savedPrompts ?? []).filter((x) => x.id !== sp.id)));
+  const remove = (x: SharedPrompt) => {
+    const n = new Set(x.copies.map((c) => c.studyId)).size;
+    const where = n > 1 ? ` It is removed from all ${n} studies that keep it.` : x.here ? '' : ` It is removed from “${x.studyName}”, where it was saved.`;
+    if (!confirm(`Delete the saved prompt “${x.entry.name}”?${where} Runs already made with it are not affected.`)) return;
+    for (const c of x.copies) updateStudy((s) => void (s.savedPrompts = (s.savedPrompts ?? []).filter((p) => p.id !== c.id)), c.studyId);
   };
   return (
     <div className="row" style={{ marginBottom: 8 }}>
       <Menu
         align="left"
         button={(t) => (
-          <button className="btn small" onClick={t} title="Keep several prompts, each with its own fields, and switch between them">
+          <button className="btn small" onClick={t} title="Keep several prompts, each with its own fields, and switch between them (in any of your studies)">
             Saved prompts <Icon name="chevron" size={12} />
           </button>
         )}
@@ -464,14 +472,35 @@ function SavedPrompts() {
             <button className="menu-item" onClick={() => (close(), save())}>
               Save current prompt and fields…
             </button>
-            {saved.length > 0 && <div className="menu-sep" />}
-            {saved.map((sp) => (
-              <div key={sp.id} className="row" style={{ gap: 0 }}>
-                <button className="menu-item" style={{ flex: 1 }} onClick={() => (close(), load(sp))} title="Load this prompt and its fields">
-                  {sp.name}
-                  {samePrompt(sp.prompt, study.prompt) && <span className="badge" style={{ marginLeft: 'auto' }}>in use</span>}
+            {shared.length > 0 && <div className="menu-sep" />}
+            {shared.map((x) => (
+              <div key={`${x.copies[0].studyId}/${x.entry.id}`} className="row" style={{ gap: 0 }}>
+                <button
+                  className="menu-item"
+                  style={{ flex: 1 }}
+                  onClick={() => (close(), load(x.entry))}
+                  title={x.here ? 'Load this prompt and its fields' : `Load this prompt and its fields (saved in “${x.studyName}”)`}
+                >
+                  <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                    {x.entry.name}
+                    {!x.here && (
+                      <span style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+                        from “{x.studyName}”
+                      </span>
+                    )}
+                  </span>
+                  {samePromptAnyKind(x.entry.prompt, study.prompt) && (
+                    <span className="badge" style={{ marginLeft: 'auto' }}>
+                      in use
+                    </span>
+                  )}
                 </button>
-                <button className="btn ghost small icon" title="Delete this saved prompt" aria-label={`Delete saved prompt ${sp.name}`} onClick={() => (close(), remove(sp))}>
+                <button
+                  className="btn ghost small icon"
+                  title="Delete this saved prompt"
+                  aria-label={`Delete saved prompt ${x.entry.name}`}
+                  onClick={() => (close(), remove(x))}
+                >
                   <Icon name="trash" size={15} />
                 </button>
               </div>
