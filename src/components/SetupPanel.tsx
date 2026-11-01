@@ -391,7 +391,14 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             <NumberField id="reps" className="input" min={1} max={10} value={o.replicates} onChange={(n) => updateStudy((s) => void (s.options.replicates = n))} />
           </div>
         </div>
-        <div className="hint tight">{o.replicates > 1 ? `Each ${w.one} is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}` : 'Use 2 or more to measure how consistent the model is.'}</div>
+        <div className="hint tight">
+          {o.replicates > 1
+            ? p.outputMode === 'structured'
+              ? `Each ${w.one} is annotated ${o.replicates}×; results show the majority (categories), the median (ordinal scales) or the mean (numbers), and how consistent the repeats were.${p.variables.some((v) => v.type === 'ordinal') && o.replicates % 2 === 0 ? ' Use an odd number so the median of an ordinal scale is a whole number.' : ''}`
+              : // Plain-text JSON answers are combined value by value; there is no per-field consistency share.
+                `Each ${w.one} is annotated ${o.replicates}×; scores in JSON answers are combined by their median (other values by majority). Compare the repeats with each other under Runs & agreement (choose single replicates on both sides).${o.replicates % 2 === 0 ? ' Use an odd number: with an even one the median of two middle scores can be a half point (e.g. 0.5), which never counts as the same score.' : ''}`
+            : 'Use 2 or more to measure how consistent the model is.'}
+        </div>
 
         <label className="check" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={o.caching} onChange={(e) => updateStudy((s) => void (s.options.caching = e.target.checked))} />

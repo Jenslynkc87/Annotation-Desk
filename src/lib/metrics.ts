@@ -361,6 +361,20 @@ function bootstrapCI(pairs: [string, string][], stats: Partial<Record<CiStat, (p
   );
 }
 
+/**
+ * 95% Wilson score interval for a share of n texts (exact agreement, within ±1, 2+ points, opposite direction).
+ * Used instead of the bootstrap for shares: at 0% or 100% the bootstrap collapses to [0, 0] or [1, 1], and it is
+ * too narrow for rare outcomes. Null below 10 texts, as for the other intervals.
+ */
+export function wilsonCI(share: number | null, n: number): [number, number] | null {
+  if (share === null || n < 10) return null;
+  const z = 1.959963984540054;
+  const z2 = z * z;
+  const centre = (share + z2 / (2 * n)) / (1 + z2 / n);
+  const half = (z / (1 + z2 / n)) * Math.sqrt((share * (1 - share)) / n + z2 / (4 * n * n));
+  return [Math.max(0, centre - half), Math.min(1, centre + half)];
+}
+
 const numPairs = (p: [string, string][]) => p.map(([x, y]) => [Number(x), Number(y)] as const);
 const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null);
 export const withinTolerance = (p: [string, string][], tol: number) => mean(numPairs(p).map(([x, y]) => (Math.abs(x - y) <= tol + 1e-9 ? 1 : 0)));
@@ -549,28 +563,31 @@ export function agreement(
   const alphaLevel = numeric || !pairs.length ? level : 'nominal';
   // (A codebook widened for plain-text answers keeps its own midpoint: a stray 4 next to −3…3 doesn't move it to 0.5.)
   const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : (range ?? scale.map(Number)), [...xs, ...ys]) : null;
+  // Bootstrap intervals for the coefficients and differences; shares get Wilson intervals (see `wilsonCI`).
   const stats = {
-    percentAgreement,
     cohenKappa: (p: [string, string][]) => cohenKappa(p),
     ...(numeric
       ? {
           weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale),
           weightedKappaLinear: (p: [string, string][]) => cohenKappa(p, 'linear', scale),
           gwetAC2Linear: (p: [string, string][]) => gwetAC2Linear(p, scale),
-          largeDifference,
-          ...(midpoint !== null ? { oppositeDirection: (p: [string, string][]) => oppositeDirection(p, midpoint) } : {}),
         }
       : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
     gwetAC1: (p: [string, string][]) => gwetAC1(p, ac1Scale, ac1Numeric),
+    ...(numeric ? { meanDifference, mae: meanAbsoluteError } : {}),
+  };
+  const n = pairs.length;
+  const shareCI = () => ({
+    percentAgreement: wilsonCI(percentAgreement(pairs), n),
     ...(numeric
       ? {
-          withinTolerance: (p: [string, string][]) => withinTolerance(p, tolerance),
-          meanDifference,
-          mae: meanAbsoluteError,
+          withinTolerance: wilsonCI(withinTolerance(pairs, tolerance), n),
+          largeDifference: wilsonCI(largeDifference(pairs), n),
+          ...(midpoint !== null ? { oppositeDirection: wilsonCI(oppositeDirection(pairs, midpoint), n) } : {}),
         }
       : {}),
-  };
+  });
   return {
     n: pairs.length,
     level: alphaLevel,
@@ -583,7 +600,7 @@ export function agreement(
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
     gwetAC1: gwetAC1(pairs, ac1Scale, ac1Numeric),
     gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
-    ci: withIntervals ? bootstrapCI(pairs, stats) : {},
+    ci: withIntervals ? { ...bootstrapCI(pairs, stats), ...shareCI() } : {},
     spearman: numeric ? spearman(xs, ys) : null,
     pearson: numeric ? pearson(xs, ys) : null,
     mae: numeric ? meanAbsoluteError(pairs) : null,

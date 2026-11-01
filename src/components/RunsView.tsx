@@ -943,12 +943,12 @@ function AgreementPanel() {
             {stats.gwetAC2Linear !== null && <Stat k="Gwet's AC2 (linear)" v={fmtStat(stats.gwetAC2Linear)} sub={ciText(stats.ci.gwetAC2Linear)} />}
             {stats.spearman !== null && <Stat k="Spearman ρ" v={fmtStat(stats.spearman)} />}
             {stats.meanDifference !== null && (
-              <Stat k="Mean difference (second − first)" v={fmtStat(stats.meanDifference)} sub={ciText(stats.ci.meanDifference)} />
+              <Stat k="Mean difference (Compared with − Annotations)" v={fmtStat(stats.meanDifference)} sub={ciText(stats.ci.meanDifference)} />
             )}
             {stats.mae !== null && <Stat k="Mean absolute difference" v={fmtStat(stats.mae)} sub={ciText(stats.ci.mae)} />}
           </div>
           <p className="hint">
-            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95% bootstrap (2,000 resamples of {w.many}). When
+            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95%; Wilson intervals for shares (exact, within ±1, 2+ points, opposite direction), bootstrap (2,000 resamples of {w.many}) for the rest. No interval below 10 {w.many}; “—” means a figure can’t be computed (e.g. one side gave the same value every time). When
             you iterate on prompts, keep a held-out set of labelled {w.many} for the final estimate so the reported agreement isn't inflated by prompt selection.
           </p>
           {showMatrix && (
@@ -1075,7 +1075,8 @@ function Glance({ stats, w }: { stats: Agreement; w: Words }) {
 function formatCi(ci: [number, number] | null | undefined, pct = false): string {
   if (!ci) return '';
   const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : fixed(x, 2));
-  return `95% CI ${f(ci[0])}–${f(ci[1])}`;
+  // "to", not a dash: "−0.05–0.00" is hard to read with negative numbers.
+  return `95% CI ${f(ci[0])} to ${f(ci[1])}`;
 }
 
 function Stat({ k, v, sub }: { k: string; v: string; sub?: string }) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregate, agreement, cohenKappa, gwetAC1, krippendorffAlpha } from './metrics';
+import { aggregate, agreement, cohenKappa, gwetAC1, krippendorffAlpha, wilsonCI } from './metrics';
 
 // Reference values computed with the Python packages `krippendorff`, scikit-learn and scipy.
 const s = (xs: number[]) => xs.map(String);
@@ -114,5 +114,26 @@ describe('serious disagreement and linear weights (−3…+3 scale)', () => {
   it('counts same, small and large gaps with their direction', () => {
     const r = agreement(['0', '1', '1', '-2', '3', '0'], ['0', '2', '0', '1', '3', '-3'], 'ordinal', ['-3', '-2', '-1', '0', '1', '2', '3']);
     expect(r.gaps).toEqual({ same: 2, secondHigherSmall: 1, secondLowerSmall: 1, secondHigherLarge: 1, secondLowerLarge: 1, fractional: 0 });
+  });
+});
+
+describe('intervals for shares (Nov 2026 audit)', () => {
+  it('uses Wilson score intervals, which stay open at 0% and 100%', () => {
+    // 0 of 30: the upper end is z²/(n + z²) = 0.1135 (the bootstrap gave [0, 0]).
+    const [lo, hi] = wilsonCI(0, 30)!;
+    expect(lo).toBe(0);
+    expect(hi).toBeCloseTo(0.11351, 4);
+    // 50 of 100: 0.4038–0.5962 (standard Wilson values).
+    expect(wilsonCI(0.5, 100)!.map((x) => Math.round(x * 10000) / 10000)).toEqual([0.4038, 0.5962]);
+    expect(wilsonCI(0.5, 9)).toBeNull();
+  });
+  it('gives the shares in agreement() Wilson intervals', () => {
+    const a = [...Array(25).fill('0'), '1', '2', '1', '-1', '1'];
+    const b = [...Array(25).fill('0'), '1', '1', '2', '-1', '0'];
+    const r = agreement(a, b, 'ordinal', ['-3', '-2', '-1', '0', '1', '2', '3']);
+    expect(r.withinTolerance).toBe(1);
+    expect(r.ci.withinTolerance![0]).toBeLessThan(1);
+    expect(r.ci.oppositeDirection![1]).toBeGreaterThan(0.1);
+    expect(r.ci.percentAgreement).toEqual(wilsonCI(r.percentAgreement, 30));
   });
 });
