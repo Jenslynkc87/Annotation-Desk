@@ -7,7 +7,7 @@ import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
 import { buildDocViews, replacedAttempts, retriedRequests, runInProgress, runName, runTag, sharesNumber, type DocView, type RetriedRequests } from '../view';
-import { sleep } from '../util';
+import { yieldToPage } from '../util';
 
 export type Row = Record<string, string | number | null>;
 
@@ -36,7 +36,7 @@ export async function toCsvBlobPaced(rows: Row[], columns?: string[]): Promise<B
   const out = csvPieces(cols);
   for (let i = 0; i < rows.length; i++) {
     out.add(rows[i], i);
-    if (i % 500 === 499) await sleep(0);
+    if (i % 500 === 499) await yieldToPage();
   }
   return out.done();
 }

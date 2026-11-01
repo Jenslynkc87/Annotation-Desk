@@ -952,7 +952,7 @@ function AgreementPanel() {
             {stats.mae !== null && <Stat k="Mean absolute difference" v={fmtStat(stats.mae)} sub={ciText(stats.ci.mae)} />}
           </div>
           <p className="hint">
-            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95%; Wilson intervals for shares (exact, within ±1, 2+ points, opposite direction), bootstrap (2,000 resamples of {w.many}) for the rest. No interval below 10 {w.many}; “—” means a figure can’t be computed (e.g. one side gave the same value every time). When
+            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95%; Wilson intervals for shares (exact, within the tolerance, 2+ points, opposite direction), bootstrap (2,000 resamples of {w.many}) for the rest. No interval below 10 {w.many}; “—” means a figure can’t be computed (e.g. one side gave the same value every time). When
             you iterate on prompts, keep a held-out set of labelled {w.many} for the final estimate so the reported agreement isn't inflated by prompt selection.
           </p>
           {showMatrix && (

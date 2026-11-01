@@ -9,7 +9,7 @@ import { buildDocViews, replacedAttempts, retriedRequests, retryInProgress, retr
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
-import { dateStamp, nowIso, sleep, slug } from '../util';
+import { dateStamp, nowIso, slug, yieldToPage } from '../util';
 import { buildBackup } from './backup';
 import { fillScript, requirementsTxt, SCRIPT_TEMPLATE, scriptValues } from './python';
 import {
@@ -183,12 +183,25 @@ export class ZipWriter {
           pendingBytes = 0;
         }
       };
+      // Compressing is the slow part (seconds per large file): the page gets a turn after every MB or so, so it stays
+      // responsive while a full corpus's files are written.
       if (typeof data === 'string') {
         const bytes = new TextEncoder().encode(data);
-        for (let i = 0; i < bytes.length; i += 1 << 20) z.push(bytes.subarray(i, i + (1 << 20)));
+        for (let i = 0; i < bytes.length; i += 1 << 20) {
+          z.push(bytes.subarray(i, i + (1 << 20)));
+          await yieldToPage();
+        }
       } else {
         const reader = data.stream().getReader();
-        for (let r = await reader.read(); !r.done; r = await reader.read()) z.push(r.value);
+        let since = 0;
+        for (let r = await reader.read(); !r.done; r = await reader.read()) {
+          z.push(r.value);
+          since += r.value.length;
+          if (since >= 1 << 20) {
+            since = 0;
+            await yieldToPage();
+          }
+        }
       }
       z.push(new Uint8Array(0), true);
       this.add(path, false, z.crc >>> 0, z.size, compressed, out);
@@ -503,7 +516,7 @@ async function jsonlBlob(items: unknown[]): Promise<Blob> {
   let n = 0;
   for (const x of items) {
     // (A pause every 200 lines, so the page stays responsive: each line may hold a whole text.)
-    if (++n % 200 === 0) await sleep(0);
+    if (++n % 200 === 0) await yieldToPage();
     const line = JSON.stringify(x) + '\n';
     lines.push(line);
     length += line.length;
@@ -591,9 +604,9 @@ export async function buildResearchRepo(data: ExportData, opts: ResearchOptions)
   const agr = d.runs.flatMap((run, i) => agreementRows(perRun[i], runName(run, d.runs)));
   if (agr.length) await results.file('agreement.csv', () => toCsvBlobPaced(agr));
 
-  // The workbook and script are for the main run: the one over the most texts, the latest of those (not a "Test on
-  // 1" or sample run made after it).
-  const textsOf = (r: Run) => new Set(d.results.filter((x) => x.runId === r.id).map((x) => x.docId)).size;
+  // The workbook and script are for the main run: the one with usable answers for the most texts, the latest of those
+  // (not a "Test on 1" or sample run made after it, nor a batch whose requests all expired).
+  const textsOf = (r: Run) => new Set(d.results.filter((x) => x.runId === r.id && x.status === 'ok').map((x) => x.docId)).size;
   const most = Math.max(0, ...finished.map(textsOf));
   const latest = [...finished].reverse().find((r) => textsOf(r) === most);
   if (latest) {
@@ -1090,7 +1103,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ['`results/agreement.csv`', 'Agreement between model fields and matching metadata columns (only if such columns exist)'],
   );
   if (latest) {
-    rows.push([`\`results/results_${folders.get(latest.id)}.xlsx\``, `Excel workbook for run #${runName(latest, d.runs)}, the run over the most ${w.many} (the latest of those)`]);
+    rows.push([`\`results/results_${folders.get(latest.id)}.xlsx\``, `Excel workbook for run #${runName(latest, d.runs)}, the run with usable answers for the most ${w.many} (the latest of those)`]);
     rows.push([
       '`scripts/`',
       `Python script reproducing run #${runName(latest, d.runs)} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${folders.get(latest.id)}/results_long.csv\`)`,

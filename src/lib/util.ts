@@ -46,6 +46,21 @@ export function fmtDateTime(iso: string | null): string {
   });
 }
 
+/**
+ * Let the page handle input and repaint before going on, during long work (writing a full corpus's files). A message
+ * to itself, not a timer: timers in a chain are slowed down, and in a background tab to about one a minute.
+ */
+export function yieldToPage(): Promise<void> {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => {
+      ch.port1.close();
+      resolve();
+    };
+    ch.port2.postMessage(null);
+  });
+}
+
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);

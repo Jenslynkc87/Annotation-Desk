@@ -181,7 +181,7 @@ describe('runs that share a number (H19)', () => {
     expect(before.runColumn).toEqual(['1', '2-20261019-090000Z', '2-20261019-093000Z']);
     expect(before.xlsx).toEqual(['results/results_run-02-second-tab-20261019-093000Z.xlsx']);
     expect(before.script.join('\n')).toContain('claude-sonnet-5-5');
-    expect(before.readme).toContain('`results/results_run-02-second-tab-20261019-093000Z.xlsx` | Excel workbook for run #2-20261019-093000Z, the run over the most texts (the latest of those)');
+    expect(before.readme).toContain('`results/results_run-02-second-tab-20261019-093000Z.xlsx` | Excel workbook for run #2-20261019-093000Z, the run with usable answers for the most texts (the latest of those)');
     expect(before.readme).toContain('ends in when it started (UTC;');
     // "Latest result per text": the run started last too.
     expect(buildDocViews(docs, loaded.runs, loaded.results, 'latest').get(docs[0].id)!.run!.id).toBe(late.id);
