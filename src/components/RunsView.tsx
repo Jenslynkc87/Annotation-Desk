@@ -1078,7 +1078,8 @@ function Glance({ stats, w }: { stats: Agreement; w: Words }) {
 /** "95% CI 0.71–0.86" (percentages for percent agreement); empty when there are too few texts. */
 function formatCi(ci: [number, number] | null | undefined, pct = false): string {
   if (!ci) return '';
-  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : fixed(x, 2));
+  // (A real minus sign; and 3 decimals where 2 would show a bound that isn't 0 as 0.00.)
+  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : fixed(x, x !== 0 && Math.abs(x) < 0.005 ? 3 : 2).replace(/^-/, '−'));
   // "to", not a dash: "−0.05–0.00" is hard to read with negative numbers.
   return `95% CI ${f(ci[0])} to ${f(ci[1])}`;
 }

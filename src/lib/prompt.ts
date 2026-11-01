@@ -215,15 +215,35 @@ export function parseModelOutput(rawText: string, p: PromptSpec): ParsedOutput {
   const rec = obj as Record<string, unknown>;
   const values: Record<string, string> = {};
   const missing: string[] = [];
+  const notAllowed: string[] = [];
   for (const v of p.variables) {
-    if (v.name in rec) values[v.name] = valueToString(rec[v.name]);
-    else missing.push(v.name);
+    if (!(v.name in rec)) {
+      missing.push(v.name);
+      continue;
+    }
+    values[v.name] = valueToString(rec[v.name]);
+    if (!fitsField(v, rec[v.name])) notAllowed.push(`${v.name} = ${JSON.stringify(rec[v.name])}`);
   }
+  // A value the codebook doesn't allow (e.g. 5 on a −3…3 scale, or null) is no label: the answer counts as failed, so
+  // it is never combined into a median or shown as a score, and Retry failed sends it again. (Structured outputs
+  // keep answers to the schema, so this should not happen with current models.)
+  const problems = [missing.length ? `Missing field(s): ${missing.join(', ')}` : '', notAllowed.length ? `Value(s) not allowed by the codebook: ${notAllowed.slice(0, 3).join(', ')}${notAllowed.length > 3 ? ', …' : ''}` : ''].filter(Boolean);
   return {
     values,
     rationale: valueToString(rec[RATIONALE_KEY]),
-    parseError: missing.length ? `Missing field(s): ${missing.join(', ')}` : null,
+    parseError: problems.length ? problems.join('; ') : null,
   };
+}
+
+/** Whether an answer's value is one the field allows (its type, and for a scale or categories one of its values). */
+function fitsField(v: Variable, x: unknown): boolean {
+  if (v.type === 'text') return true;
+  if (x === null || x === undefined || x === '') return false;
+  const allowed = v.values.map((y) => y.trim()).filter(Boolean);
+  if (v.type === 'boolean') return typeof x === 'boolean' || ['true', 'false'].includes(normalizeLabel(valueToString(x)));
+  if (v.type === 'number') return Number.isFinite(toNumber(valueToString(x)));
+  if (v.type === 'ordinal') return Number.isFinite(toNumber(valueToString(x))) && (!allowed.length || allowed.some((y) => toNumber(y) === toNumber(valueToString(x))));
+  return !allowed.length || allowed.some((y) => normalizeLabel(y) === normalizeLabel(valueToString(x)));
 }
 
 /**

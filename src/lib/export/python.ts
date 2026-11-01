@@ -298,7 +298,36 @@ def parse_output(text):
     if "rationale" in obj:
         values["rationale"] = as_text(obj["rationale"])
     missing = [f for f in FIELDS if f not in obj]
-    return values, ("Missing field(s): " + ", ".join(missing)) if missing else ""
+    # As in Annotation Desk: a value the codebook (the schema) doesn't allow, e.g. 5 on -3..3 or null, is no label.
+    props = (OUTPUT_SCHEMA or {}).get("properties", {})
+    bad = []
+    for f in FIELDS:
+        spec = props.get(f, {})
+        if f not in obj or spec.get("type") == "string" and "enum" not in spec:
+            continue
+        x = obj[f]
+        ok = x is not None and (
+            in_enum(x, spec["enum"]) if "enum" in spec
+            else isinstance(x, bool) or str(x).strip().lower() in ("true", "false", "yes", "no") if spec.get("type") == "boolean"
+            else isinstance(x, (int, float)) and not isinstance(x, bool) if spec.get("type") in ("number", "integer")
+            else True
+        )
+        if not ok:
+            bad.append(f"{f} = {json.dumps(x)}")
+    problems = (["Missing field(s): " + ", ".join(missing)] if missing else []) + (
+        ["Value(s) not allowed by the codebook: " + ", ".join(bad[:3]) + (", …" if len(bad) > 3 else "")] if bad else [])
+    return values, "; ".join(problems)
+
+
+def in_enum(x, enum):
+    """Whether x is one of the allowed values, read as Annotation Desk reads them (case, spaces, a typed minus)."""
+    def norm(v):
+        t = " ".join(str(v).replace("\u2212", "-").replace("\u2013", "-").lower().split())
+        try:
+            return float(t)
+        except ValueError:
+            return {"true": True, "yes": True, "false": False, "no": False}.get(t, t)
+    return x in enum or norm(x) in [norm(e) for e in enum]
 
 
 def make_client():

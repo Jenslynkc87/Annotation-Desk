@@ -146,6 +146,38 @@ describe('exported script', () => {
     expect(JSON.stringify(out)).toContain(long.trim());
   });
 
+  it('judges structured answers off the codebook as the app does', () => {
+    if (!hasPython()) return;
+    const prompt: PromptSpec = {
+      ...promptPlain,
+      variables: [
+        { name: 'gender', type: 'ordinal', values: ['−3', '−2', '−1', '0', '1', '2', '3'], description: '' },
+        { name: 'gender_explanation', type: 'text', values: [], description: '' },
+        { name: 'stance', type: 'category', values: ['for', 'against'], description: '' },
+        { name: 'flag', type: 'boolean', values: [], description: '' },
+      ],
+    };
+    const { study, run } = makeRun('anthropic', prompt);
+    const dir = mkdtempSync(join(tmpdir(), 'annot-'));
+    writeFileSync(join(dir, 'annotate.py'), fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now')));
+    const ok = { rationale: 'r', gender: -2, gender_explanation: 'x', stance: 'for', flag: true };
+    const answers = [
+      ok,
+      { ...ok, gender: 5 },
+      { ...ok, gender: null },
+      { ...ok, stance: 'maybe' },
+      { ...ok, stance: 'For' },
+      { ...ok, flag: 'yes' },
+      { ...ok, gender_explanation: null },
+      { ...ok, gender: 5, stance: 'maybe', flag: null },
+      { rationale: 'r', gender: 1 },
+    ].map((x) => JSON.stringify(x));
+    const code = `import sys, json, runpy\nns = runpy.run_path(sys.argv[1], run_name="x")\nprint(json.dumps([ns["parse_output"](t)[1] for t in json.loads(sys.argv[2])]))`;
+    const errors = JSON.parse(execFileSync('python3', ['-I', '-c', code, join(dir, 'annotate.py'), JSON.stringify(answers)]).toString());
+    expect(errors).toEqual(answers.map((t) => parseModelOutput(t, run.snapshot.prompt).parseError ?? ''));
+    expect(errors.filter(Boolean).length).toBe(5);
+  });
+
   it('judges plain-text answers with JSON as the app does', () => {
     if (!hasPython()) return;
     const { study, run } = makeRun('anthropic', { ...promptPlain, outputMode: 'text' });

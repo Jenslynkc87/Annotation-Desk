@@ -142,10 +142,12 @@ describe('comparisonSentence', () => {
     const base = agreement(['1', '0', '-1', '1'], ['1', '0', '-1', '0'], 'ordinal', ['-1', '0', '1'], 1, { withIntervals: false });
     const s = { ...base, meanDifference: -0.0025, ci: { meanDifference: [-0.004, 0.002] as [number, number] } };
     const text = comparisonSentence('race', 'A', 'B', s, 4);
-    expect(text).toContain('mean difference 0.00, 95% CI 0.00 to 0.00');
+    // A value that isn't 0 gets a third decimal rather than reading as 0.00 (and never as -0.00).
+    expect(text).toContain('mean difference −0.003, 95% CI −0.004 to 0.002');
     expect(text).not.toMatch(/-0\.00/);
+    // An interval that excludes 0 never reads as touching it (before: "−0.02 to 0.00" beside "scored lower").
     const clear = comparisonSentence('race', 'A', 'B', { ...s, meanDifference: -0.012, ci: { meanDifference: [-0.02, -0.001] as [number, number] } }, 4);
-    expect(clear).toContain('B scored on average 0.01 points lower than A (95% CI -0.02 to 0.00)');
+    expect(clear).toContain('B scored on average 0.01 points lower than A (95% CI −0.02 to −0.001)');
   });
 });
 

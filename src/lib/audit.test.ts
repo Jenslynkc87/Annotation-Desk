@@ -4,7 +4,7 @@ import { comparableFields } from './compare';
 import { pyStr } from './export/python';
 import { agreementForRun, goldColumnsFor, resultsLong, resultsWide } from './export/tables';
 import { agreement } from './metrics';
-import { buildOutputSchema, normalizeLabel, toNumber } from './prompt';
+import { buildOutputSchema, normalizeLabel, parseModelOutput, toNumber } from './prompt';
 import { groupForBatches, incompleteAnswer } from './store';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type Run } from './types';
 import { buildDocViews } from './view';
@@ -268,5 +268,21 @@ describe('“Disagree with” on a scale set for plain-text scores (Nov 2026 aud
     const field = { key: 'race', label: 'race', level: 'ordinal' as const, allowed: ['-3', '-2', '-1', '0', '1', '2', '3'], range: [-3, 3] as [number, number], yesNo: false };
     const fits = comparableLabel(field, [['1', '99'], ['0', '0']]);
     expect([fits('99'), fits('-3'), fits('NA')]).toEqual([false, true, false]);
+  });
+});
+
+describe('structured answers off the codebook (Nov 2026 audit, structured round)', () => {
+  const p = {
+    ...DEFAULT_PROMPT,
+    variables: [
+      { name: 'gender', type: 'ordinal' as const, values: ['−3', '−2', '−1', '0', '1', '2', '3'], description: '' },
+      { name: 'gender_explanation', type: 'text' as const, values: [], description: '' },
+      { name: 'stance', type: 'category' as const, values: ['for', 'against'], description: '' },
+    ],
+  };
+  it('count as failed (no label), naming the value', () => {
+    expect(parseModelOutput('{"gender": -2, "gender_explanation": "x", "stance": "For"}', p).parseError).toBeNull();
+    expect(parseModelOutput('{"gender": 5, "gender_explanation": "x", "stance": "for"}', p).parseError).toBe('Value(s) not allowed by the codebook: gender = 5');
+    expect(parseModelOutput('{"gender": null, "gender_explanation": null, "stance": "maybe"}', p).parseError).toBe('Value(s) not allowed by the codebook: gender = null, stance = "maybe"');
   });
 });

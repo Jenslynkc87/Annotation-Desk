@@ -171,7 +171,7 @@ describe('comparison report (N111, N112)', () => {
     const rows = await workbook(await buildComparisonReport(a, b, docs, [a, b], results, 1));
     expect(rows('Summary')[0]).toMatchObject({ n_compared: 11, n_texts_in_both_runs: 12 });
     const draft = String(rows('Draft text')[0].draft_text);
-    expect(draft).toContain('N = 11 of 12 texts annotated in both runs');
+    expect(draft).toContain('N = 11 of 12 texts sent in both runs');
     expect(rows('Notes').map((r) => r.note)).toContain(`Run #2 has no result for 8 of its 20 texts (e.g. the run was cancelled, stopped or not finished); they are not compared.`);
   });
 

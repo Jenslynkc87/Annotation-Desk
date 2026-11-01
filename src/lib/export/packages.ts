@@ -1172,7 +1172,7 @@ export async function buildComparisonReport(
   const fieldsB = new Map(comparableFields(runB, viewsB.values()).map((f) => [f.key, f]));
   // Plain-text scores: the range seen in either run, so the figures don't depend on which run is first.
   const fields = comparableFields(runA, viewsA.values()).flatMap((f) => (fieldsB.has(f.key) ? [combineFields(f, fieldsB.get(f.key))] : []));
-  // Texts annotated in both runs: with a result (usable or failed) in each, not those a run never sent (e.g. one
+  // Texts sent in both runs: with a result (usable or failed) in each, not those a run never sent (e.g. one
   // cancelled or stopped part way).
   const sent = (views: typeof viewsA, run: Run) => new Set(run.docIds.filter((id) => views.has(id) && views.get(id)!.status !== 'none'));
   const [sentA, sentB] = [sent(viewsA, runA), sent(viewsB, runB)];
@@ -1375,7 +1375,7 @@ export async function buildComparisonReport(
 
   addSheet(wb, 'Notes', [
     { note: `Exported from Annotation Desk ${__APP_VERSION__} on ${nowIso().slice(0, 10)}${runA.snapshot.appVersion === runB.snapshot.appVersion ? `; both runs were made with ${runA.snapshot.appVersion}` : `; the runs were made with ${runA.snapshot.appVersion} and ${runB.snapshot.appVersion}`}.` },
-    { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those annotated in both runs with a usable value for the field.` },
+    { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those with a usable value for the field in both runs. n_texts_in_both_runs: ${w.many} sent in both runs, including those whose request failed in one (no usable answer).` },
     ...unsentNote(runA, sentA),
     ...unsentNote(runB, sentB),
     ...unfinishedNote(runA),
@@ -1394,14 +1394,24 @@ export async function buildComparisonReport(
 }
 
 const pct = (x: number | null) => (x === null ? '—' : `${(x * 100).toFixed(1)}%`);
-const num2 = (x: number | null) => (x === null ? '—' : fixed(x, 2));
+/**
+ * A number for the draft text: 2 decimals, or more when that would show a value that isn't 0 as 0.00 (so an interval
+ * that excludes 0 never reads as touching it), with a real minus sign.
+ */
+const num2 = (x: number | null) => {
+  if (x === null) return '—';
+  let d = 2;
+  while (d < 4 && x !== 0 && Math.abs(x) < 0.5 * 10 ** -d) d++;
+  return fixed(x, d).replace(/^-/, '−');
+};
 
 /** Draft sentence for a paper describing how well two runs agree on one field. */
 export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number, w = words({})): string {
   if (!s.n) return `No ${w.many} had a usable value for ${label} in both runs.`;
   const ciP = (k: CiStat) => (s.ci[k] ? ` (95% CI ${pct(s.ci[k]![0])}–${pct(s.ci[k]![1])})` : '');
   const ciN = (k: CiStat) => (s.ci[k] ? ` [${num2(s.ci[k]![0])}, ${num2(s.ci[k]![1])}]` : '');
-  const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} ${w.many} annotated in both runs` : ''}`;
+  // (Sent: a request whose answer failed counts there too, so "annotated" would claim too much.)
+  const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} ${w.many} sent in both runs` : ''}`;
   if (s.meanDifference === null) {
     return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}; Cohen's κ = ${num2(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
   }
@@ -1413,8 +1423,8 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
   const ci = s.ci.meanDifference;
   const shift =
     ci && (ci[0] > 0 || ci[1] < 0)
-      ? ` ${b} scored on average ${fixed(Math.abs(d), 2)} points ${d > 0 ? 'higher' : 'lower'} than ${a} (95% CI ${fixed(ci[0], 2)} to ${fixed(ci[1], 2)}).`
-      : ` There was no clear systematic difference between the two (mean difference ${fixed(d, 2)}${ci ? `, 95% CI ${fixed(ci[0], 2)} to ${fixed(ci[1], 2)}` : ''}).`;
+      ? ` ${b} scored on average ${num2(Math.abs(d))} points ${d > 0 ? 'higher' : 'lower'} than ${a} (95% CI ${num2(ci[0])} to ${num2(ci[1])}).`
+      : ` There was no clear systematic difference between the two (mean difference ${num2(d)}${ci ? `, 95% CI ${num2(ci[0])} to ${num2(ci[1])}` : ''}).`;
   return first + serious + shift;
 }
 

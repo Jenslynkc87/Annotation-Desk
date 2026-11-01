@@ -279,7 +279,8 @@ function applyTodaysRules(results: Result[], runs: Run[]) {
     else if (incompleteAnswer(r.stopReason) || !r.rawText.trim()) {
       r.status = 'error';
       r.error ??= incompleteMessage(r.rawText, r.stopReason);
-    } else if (prompt?.outputMode === 'text') {
+    } else if (prompt) {
+      // (Structured answers too: a value the codebook doesn't allow, e.g. 5 on −3…3, is no label.)
       const parseError = parseModelOutput(r.rawText, prompt).parseError;
       if (parseError) [r.status, r.parseError] = ['error', parseError];
     }
