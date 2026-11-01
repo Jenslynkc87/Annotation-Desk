@@ -563,6 +563,9 @@ export function agreement(
   const alphaLevel = numeric || !pairs.length ? level : 'nominal';
   // (A codebook widened for plain-text answers keeps its own midpoint: a stray 4 next to −3…3 doesn't move it to 0.5.)
   const midpoint = numeric ? scaleMidpoint(scaleSeen ? [] : (range ?? scale.map(Number)), [...xs, ...ys]) : null;
+  // Numbers with no scale (a Number field): Gwet's AC1/AC2 need a fixed set of points (their q), which free numbers
+  // don't have (each distinct value would be a category, and one far value would change AC2): not given.
+  const unbounded = numeric && !scaleSeen && !range && !allowedNums.length;
   // Bootstrap intervals for the coefficients and differences; shares get Wilson intervals (see `wilsonCI`).
   const stats = {
     cohenKappa: (p: [string, string][]) => cohenKappa(p),
@@ -570,11 +573,11 @@ export function agreement(
       ? {
           weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale),
           weightedKappaLinear: (p: [string, string][]) => cohenKappa(p, 'linear', scale),
-          gwetAC2Linear: (p: [string, string][]) => gwetAC2Linear(p, scale),
+          ...(unbounded ? {} : { gwetAC2Linear: (p: [string, string][]) => gwetAC2Linear(p, scale) }),
         }
       : {}),
     krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
-    gwetAC1: (p: [string, string][]) => gwetAC1(p, ac1Scale, ac1Numeric),
+    ...(unbounded ? {} : { gwetAC1: (p: [string, string][]) => gwetAC1(p, ac1Scale, ac1Numeric) }),
     ...(numeric ? { meanDifference, mae: meanAbsoluteError } : {}),
   };
   const n = pairs.length;
@@ -598,8 +601,8 @@ export function agreement(
     weightedKappa: numeric ? cohenKappa(pairs, 'quadratic', scale) : null,
     weightedKappaLinear: numeric ? cohenKappa(pairs, 'linear', scale) : null,
     krippendorffAlpha: krippendorffAlpha(pairs, alphaLevel),
-    gwetAC1: gwetAC1(pairs, ac1Scale, ac1Numeric),
-    gwetAC2Linear: numeric ? gwetAC2Linear(pairs, scale) : null,
+    gwetAC1: unbounded ? null : gwetAC1(pairs, ac1Scale, ac1Numeric),
+    gwetAC2Linear: numeric && !unbounded ? gwetAC2Linear(pairs, scale) : null,
     ci: withIntervals ? { ...bootstrapCI(pairs, stats), ...shareCI() } : {},
     spearman: numeric ? spearman(xs, ys) : null,
     pearson: numeric ? pearson(xs, ys) : null,

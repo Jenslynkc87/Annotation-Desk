@@ -570,8 +570,8 @@ function ScoreScaleField() {
       {!empty && !valid && <div className="hint err">Give two whole numbers, the lowest first (e.g. −3 to 3).</div>}
       <div className="hint">
         If the answers are JSON with scores (e.g. "race": −2), give their scale. Agreement then uses all of it, as for an ordinal field: Gwet’s AC1/AC2
-        count every point, and a number off the scale (e.g. 7) is left out and reported. Empty: the range of scores the model gave. Not sent to the
-        model; applies to every plain-text run of this study, also earlier ones.
+        count every point, and a number off the scale (e.g. 7) is left out and reported. A key answered only with 0 and 1 is still read as a yes/no. Empty:
+        the range of scores the model gave. Not sent to the model; applies to every plain-text run of this study, also earlier ones.
       </div>
     </div>
   );

@@ -76,7 +76,9 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
     .map(([key, xs]) => [key, xs.filter(Number.isFinite)] as const)
     .filter(([key, nums]) => nums.length > 0 && nums.length >= (values.get(key)?.length ?? 0) / 2)
     .map(([key, nums]): ComparableField => {
-      if (declared && nums.filter((x) => x >= declared.min && x <= declared.max).length * 2 >= nums.length) {
+      // (Not a key answered only with 0 and 1, e.g. a flag: that is read as a yes/no, as without the scale.)
+      const flag = nums.every((x) => x === 0 || x === 1);
+      if (declared && !flag && nums.filter((x) => x >= declared.min && x <= declared.max).length * 2 >= nums.length) {
         const allowed = Array.from({ length: declared.max - declared.min + 1 }, (_, i) => String(declared.min + i));
         return { key, label: key, level: 'ordinal', allowed, range: [declared.min, declared.max], yesNo: false };
       }

@@ -58,6 +58,12 @@ export function comparableLabel(field: Variable | ComparableField | undefined, p
       const values = pairs.flat().map(toNumber).filter(Number.isFinite);
       const [lo, hi] = ratingRange(r) ? grownScale(r, values) : [-Infinity, Infinity];
       fits = (v) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
+    } else if (field.level !== 'nominal' && field.allowed.length >= 2 && field.allowed.every((x) => Number.isFinite(toNumber(x)))) {
+      // A scale set for plain-text scores (Setup → Output): as an ordinal codebook field, a number off it is left out.
+      onNumbers = true;
+      const scale = field.allowed.map(toNumber);
+      const [lo, hi] = [Math.min(...scale), Math.max(...scale)];
+      fits = (v) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
     }
   } else if (field?.type === 'ordinal' || field?.type === 'number') {
     onNumbers = true;

@@ -229,3 +229,44 @@ describe('the scale of plain-text scores (Nov 2026 audit)', () => {
     expect(comparableFields(run, views)[0].scaleSeen).toBe(true);
   });
 });
+
+describe('field types reaching the statistics (Nov 2026 audit, second round)', () => {
+  const text = { ...DEFAULT_PROMPT, outputMode: 'text' as const };
+  const flagViews = (run: Run) =>
+    Array.from({ length: 20 }, (_, i) => {
+      const r = { ...mkResult(1, { response: `{"race": ${(i % 5) - 2}, "flag": ${i % 3 === 0 ? 1 : 0}}` }), id: `r:d${i}:1`, docId: `d${i}` };
+      return { run, results: [r], values: r.values, consistency: {}, rationale: '', status: 'ok' as const };
+    });
+  it('a set scale leaves a key answered only 0 or 1 (a flag) a yes/no, as without it', () => {
+    const run = { ...mkRun(text), scoreScale: { min: -3, max: 3 } };
+    const fields = comparableFields(run, flagViews(run));
+    const race = fields.find((f) => f.key === 'race')!;
+    const flag = fields.find((f) => f.key === 'flag')!;
+    expect([race.allowed.length, race.scaleSeen]).toEqual([7, undefined]);
+    expect([flag.scaleSeen, flag.zeroOne]).toEqual([true, true]);
+  });
+  it('gives no Gwet AC1/AC2 for a Number field (no fixed scale), the rest as before', () => {
+    const a = ['10', '20', '30', '40', '50', '60', '70', '80', '90', '100', '15'];
+    const b = ['12', '20', '28', '40', '55', '60', '70', '85', '90', '100', '15'];
+    const s = agreement(a, b, 'interval', []);
+    expect([s.gwetAC1, s.gwetAC2Linear]).toEqual([null, null]);
+    expect(s.krippendorffAlpha).not.toBeNull();
+    expect(s.weightedKappaLinear).not.toBeNull();
+    expect(s.ci.gwetAC1 ?? null).toBeNull();
+    // An ordinal codebook still has them.
+    expect(agreement(['1', '2', '3', '2', '1', '3', '2', '1', '2', '3'], ['1', '2', '3', '1', '1', '3', '2', '2', '2', '3'], 'ordinal', ['1', '2', '3']).gwetAC2Linear).not.toBeNull();
+  });
+  it('reads Danish ja/nej in a yes/no field, and runs of spaces inside a label as one', () => {
+    expect([normalizeLabel('Ja', true), normalizeLabel(' nej ', true), normalizeLabel('ja')]).toEqual(['true', 'false', 'ja']);
+    expect(normalizeLabel('very  positive')).toBe('very positive');
+  });
+});
+
+describe('“Disagree with” on a scale set for plain-text scores (Nov 2026 audit)', () => {
+  it('leaves out a label off the scale (e.g. 99), as the Agreement panel does', async () => {
+    const { comparableLabel } = await import('../components/Workbench');
+    const field = { key: 'race', label: 'race', level: 'ordinal' as const, allowed: ['-3', '-2', '-1', '0', '1', '2', '3'], range: [-3, 3] as [number, number], yesNo: false };
+    const fits = comparableLabel(field, [['1', '99'], ['0', '0']]);
+    expect([fits('99'), fits('-3'), fits('NA')]).toEqual([false, true, false]);
+  });
+});

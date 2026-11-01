@@ -278,9 +278,11 @@ export function isProseField(p: Pick<PromptSpec, 'variables'>, f: string): boole
  *  For yes/no fields (`yesNo`), 1 and 0 and y and n also count as yes and no. */
 export function normalizeLabel(v: string | undefined, yesNo = false): string {
   if (v === undefined) return '';
-  const s = v.trim().toLowerCase();
-  if (s === 'true' || s === 'yes' || (yesNo && (s === '1' || s === 'y'))) return 'true';
-  if (s === 'false' || s === 'no' || (yesNo && (s === '0' || s === 'n'))) return 'false';
+  // (Runs of spaces inside count as one: "very  positive" is "very positive".)
+  const s = v.trim().toLowerCase().replace(/\s+/g, ' ');
+  // A yes/no field also reads 1/0, y/n and Danish ja/nej.
+  if (s === 'true' || s === 'yes' || (yesNo && (s === '1' || s === 'y' || s === 'ja'))) return 'true';
+  if (s === 'false' || s === 'no' || (yesNo && (s === '0' || s === 'n' || s === 'nej'))) return 'false';
   if (!Number.isNaN(toNumber(s))) return String(toNumber(s));
   // A majority tie of a yes/no field reads the same in every encoding ("no | yes", "0 | 1" → "false | true").
   if (yesNo && s.includes(' | ')) return [...new Set(s.split(' | ').map((x) => normalizeLabel(x, true)))].sort().join(' | ');
