@@ -1097,7 +1097,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     '',
     `Complete record of this annotation study, exported from Annotation Desk ${__APP_VERSION__} on ${exportedAt}.`,
     '',
-    `- ${d.docs.length.toLocaleString('en-US')} ${w.many}, ${d.runs.length} run(s), ${d.results.length.toLocaleString('en-US')} model responses.`,
+    `- ${d.docs.filter((x) => !x.removedAt).length.toLocaleString('en-US')} ${w.many}${removedNote(d.docs, w.many)}, ${d.runs.length} run(s), ${d.results.length.toLocaleString('en-US')} model responses.`,
     '- API keys are never stored or exported.',
     '',
     '## Layout',
@@ -1402,4 +1402,10 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
 function nonZeroSentence(s: Agreement, w: ReturnType<typeof words>): string {
   if (!s.n) return `No ${w.one} received a non-zero score from either run.`;
   return `On the ${s.n.toLocaleString('en-US')} ${w.many} where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)}, linear-weighted κ = ${num2(s.weightedKappaLinear)} and AC2 = ${num2(s.gwetAC2Linear)}.`;
+}
+
+/** Texts removed from the study but kept for the runs that used them, if any: said next to the study's own. */
+function removedNote(docs: Doc[], many: string): string {
+  const n = docs.filter((x) => x.removedAt).length;
+  return n ? ` (plus ${n.toLocaleString('en-US')} ${many} removed from the study but kept for the runs that used them; marked in \`corpus/corpus.csv\`)` : '';
 }

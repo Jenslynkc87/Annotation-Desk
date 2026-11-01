@@ -50,12 +50,15 @@ export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
   const cols = metaColumns(docs);
   // A metadata column with the same name as one of ours (e.g. "source") gets a prefix instead of overwriting it.
   const own = new Set(['doc_id', 'text', 'n_characters', 'source']);
+  // Texts removed from the study but kept for the runs that used them: marked with the date (a column only then).
+  const anyRemoved = docs.some((d) => d.removedAt);
   return docs.map((d) => ({
     doc_id: d.docId,
     ...(includeText ? { text: d.text } : {}),
     n_characters: d.text.length,
     source: d.source,
-    ...Object.fromEntries(cols.map((c) => [own.has(c) ? `meta_${c}` : c, d.meta[c] ?? ''])),
+    ...(anyRemoved ? { removed_from_study: d.removedAt ? d.removedAt.slice(0, 10) : '' } : {}),
+    ...Object.fromEntries(cols.map((c) => [own.has(c) || c === 'removed_from_study' ? `meta_${c}` : c, d.meta[c] ?? ''])),
   }));
 }
 

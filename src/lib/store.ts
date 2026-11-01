@@ -24,6 +24,7 @@ import {
   type UploadAttempt,
   type Usage,
 } from './types';
+import { matchLostTexts, type LostText } from './reconnect';
 import { replaceSampleNotes } from './sample';
 import { words } from './subject';
 import { errorMessage, fmtDateTime, nowIso, shortHash, uid } from './util';
@@ -48,6 +49,8 @@ export interface State {
   studies: Study[];
   currentId: string | null;
   docs: Doc[];
+  /** Texts removed from the study but kept for the runs that used them (their results, exports, comparisons). */
+  removedDocs: Doc[];
   runs: Run[];
   results: Result[];
   keys: Record<ProviderId, string>;
@@ -91,6 +94,7 @@ let state: State = {
   studies: [],
   currentId: null,
   docs: [],
+  removedDocs: [],
   runs: [],
   results: [],
   keys: saved.keys,
@@ -380,6 +384,7 @@ export async function selectStudy(id: string, afterDelete = false) {
     /* ignore */
   }
   set({ currentId: id, ...data });
+  void reconnectLostTexts();
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -567,10 +572,27 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
   }
   if (!items.length) return true;
   const taken = new Set(state.docs.map((d) => d.docId));
-  let order = state.docs.reduce((m, d) => Math.max(m, d.order), 0);
+  let order = state.docs.reduce((m, d) => Math.max(m, d.order), [...state.docs, ...state.removedDocs].reduce((m, d) => Math.max(m, d.order), 0));
   const t = nowIso();
   const renamed: string[] = [];
+  // A text removed earlier but kept for its runs, added again (same name, identical text or details): it gets its
+  // record back, so those runs' results are its results again. Its columns are updated from this addition.
+  const entries = w.one === 'entry';
+  const sameText = (a: string, b: string) => (entries ? a.trim().split('\n').sort().join('\n') === b.trim().split('\n').sort().join('\n') : a === b || a === b.trim());
+  const removed = [...state.removedDocs].sort((a, b) => (b.removedAt ?? '').localeCompare(a.removedAt ?? ''));
+  const restoredIds = new Set<string>();
+  const restored: Doc[] = [];
   const docs: Doc[] = items.map((it) => {
+    const back = removed.find((d) => !restoredIds.has(d.id) && d.docId === it.docId.trim() && !taken.has(d.docId) && sameText(d.text, it.text));
+    if (back) {
+      restoredIds.add(back.id);
+      taken.add(back.docId);
+      order++;
+      const { removedAt: _r, ...doc } = back;
+      const again: Doc = { ...doc, meta: { ...back.meta, ...it.meta }, source: it.source, order, addedAt: t };
+      restored.push(again);
+      return again;
+    }
     let docId = it.docId.trim() || `text_${order + 1}`;
     if (taken.has(docId)) {
       let k = 2;
@@ -593,9 +615,14 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
     toast(`Added ${docs.length} ${docs.length === 1 ? w.one : w.many} to “${cur.name}” (not to the study now open).`, 'success', true);
     return true;
   }
-  set((s) => ({ docs: [...s.docs, ...docs] }));
+  set((s) => ({ docs: [...s.docs, ...docs], removedDocs: s.removedDocs.filter((d) => !restoredIds.has(d.id)) }));
   // (Named: another study may be opening while they were saved, and would be in view by the time this shows.)
-  toast(`Added ${docs.length.toLocaleString()} ${docs.length === 1 ? w.one : w.many} to “${cur.name}”.`, 'success');
+  toast(
+    `Added ${docs.length.toLocaleString()} ${docs.length === 1 ? w.one : w.many} to “${cur.name}”.${restored.length ? ` ${restored.length === docs.length ? (restored.length === 1 ? 'It had' : 'They had') : `${restored.length.toLocaleString()} of them had`} been deleted before: the results earlier runs made for ${restored.length === 1 ? 'it are its' : 'them are theirs'} again.` : ''}`,
+    'success',
+  );
+  // Results of texts an earlier version deleted outright may belong to some of these: reconnected if so.
+  void reconnectLostTexts();
   // Ask the browser not to clear this site's data when disk space runs low (some browsers ask the user once).
   void navigator.storage?.persist?.().catch(() => undefined);
   if (renamed.length) {
@@ -707,9 +734,91 @@ export async function removeDocs(ids: string[]) {
   // Only texts of the open study (a selection must never reach into another study).
   const own = new Set(state.docs.map((d) => d.id));
   ids = ids.filter((id) => own.has(id));
-  await dbApi.deleteDocs(ids);
+  // A text a run used is kept, marked removed: its results, exports and comparisons still need its name, columns and
+  // text. One no run used is deleted outright.
+  const used = new Set(state.runs.flatMap((r) => r.docIds));
+  const t = nowIso();
+  const kept = state.docs.filter((d) => ids.includes(d.id) && used.has(d.id)).map((d) => ({ ...d, removedAt: t }));
+  const gone = ids.filter((id) => !used.has(id));
+  try {
+    await dbApi.deleteAndPutDocs(gone, kept);
+  } catch (e) {
+    toast(`Nothing was deleted: ${storageError(e)}.`, 'error', true);
+    return;
+  }
   const drop = new Set(ids);
-  set((s) => ({ docs: s.docs.filter((d) => !drop.has(d.id)) }));
+  set((s) => ({ docs: s.docs.filter((d) => !drop.has(d.id)), removedDocs: [...s.removedDocs, ...kept] }));
+}
+
+/** The study's texts with those removed but kept for their runs, in the order they were added (for runs' views and exports). */
+export function withRemoved(docs: Doc[], removed: Doc[]): Doc[] {
+  return removed.length ? [...docs, ...removed].sort((a, b) => a.order - b.order) : docs;
+}
+
+/** Removed texts no run uses any more (its runs were deleted): deleted outright. Best effort. */
+async function dropUnusedRemoved() {
+  const used = new Set(state.runs.flatMap((r) => r.docIds));
+  const unused = state.removedDocs.filter((d) => !used.has(d.id)).map((d) => d.id);
+  if (!unused.length) return;
+  try {
+    await dbApi.deleteDocs(unused);
+    const drop = new Set(unused);
+    set((s) => ({ removedDocs: s.removedDocs.filter((d) => !drop.has(d.id)) }));
+  } catch {
+    /* left until the next delete */
+  }
+}
+
+// Lost texts (see `reconnect.ts`) already looked for in this page, by study, with what they were compared against:
+// looked for again only when the study's texts change.
+const lookedFor = new Map<string, string>();
+
+/**
+ * Results whose text record a version before November 2026 deleted (the text was deleted from the study and perhaps
+ * added again): matched by their logged requests to a text of the study, or one kept as removed, whose request would
+ * be identical, and attached to it, so their runs show and compare them again. Run when a study is opened and after
+ * texts are added; never while a run, delete or download is under way. Results that match nothing stay as they are.
+ */
+export async function reconnectLostTexts(): Promise<void> {
+  const studyId = state.currentId;
+  if (!studyId || isBusy() || buildingFor(studyId)) return;
+  const known = new Set([...state.docs, ...state.removedDocs].map((d) => d.id));
+  const lostIds = [...new Set(state.results.filter((r) => !known.has(r.docId)).map((r) => r.docId))];
+  if (!lostIds.length) return;
+  const signature = `${lostIds.sort().join(',')}|${[...known].sort().join(',')}`;
+  if (lookedFor.get(studyId) === signature) return;
+  lookedFor.set(studyId, signature);
+  const runsById = new Map(state.runs.map((r) => [r.id, r]));
+  const lost: LostText[] = [];
+  try {
+    for (const id of lostIds) {
+      // One logged request of the text is enough (an answered one first).
+      const rs = state.results.filter((r) => r.docId === id && runsById.has(r.runId)).sort((a, b) => (a.status === 'ok' ? 0 : 1) - (b.status === 'ok' ? 0 : 1));
+      for (const r of rs) {
+        const log = await dbApi.getLog(r.id);
+        if (log?.requestPart) {
+          lost.push({ id, run: runsById.get(r.runId)!, requestPart: log.requestPart });
+          break;
+        }
+      }
+    }
+  } catch {
+    return;
+  }
+  const found = matchLostTexts(lost, [...state.docs, ...state.removedDocs]);
+  if (!found.size || state.currentId !== studyId || isBusy() || buildingFor(studyId)) return;
+  let moved = 0;
+  try {
+    moved = await dbApi.reassignDocs(studyId, [...found]);
+  } catch (e) {
+    toast(`Earlier results of deleted texts could not be reconnected: ${storageError(e)}.`, 'error', true);
+    return;
+  }
+  if (!moved || state.currentId !== studyId) return;
+  // (Read again as when the study is opened.)
+  await selectStudy(studyId);
+  const n = new Set([...found.values()]).size;
+  toast(`Reconnected ${moved.toLocaleString()} earlier result${moved === 1 ? '' : 's'} to ${n.toLocaleString()} ${n === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many} of this study: the ${words(currentStudy()!.prompt).many} had been deleted and added again, which an earlier version of this site didn’t connect.`, 'success', true);
 }
 
 // ---------- keys & models ----------
@@ -1995,6 +2104,8 @@ export async function deleteRunById(runId: string) {
     deleting.delete(runId);
   }
   set((s) => ({ runs: s.runs.filter((r) => r.id !== runId), results: s.results.filter((r) => r.runId !== runId) }));
+  // Removed texts kept only for this run are no longer needed.
+  await dropUnusedRemoved();
 }
 
 export async function renameRun(runId: string, label: string) {

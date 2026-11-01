@@ -50,7 +50,8 @@ export async function loadStudyData(studyId: string) {
   docs.sort((a, b) => a.order - b.order);
   // (Runs that share a number, from an earlier version used in two tabs: the one started later last, as in the exports.)
   runs.sort(runOrder);
-  return { docs, runs, results };
+  // Texts removed from the study but kept for the runs that used them are held apart from the study's own.
+  return { docs: docs.filter((d) => !d.removedAt), removedDocs: docs.filter((d) => !!d.removedAt), runs, results };
 }
 
 export async function getDocsForStudy(studyId: string): Promise<Doc[]> {
@@ -65,6 +66,49 @@ export async function putDocs(docs: Doc[]) {
 export async function deleteDocs(ids: string[]) {
   const tx = (await db()).transaction('docs', 'readwrite');
   await Promise.all([...ids.map((id) => tx.store.delete(id)), tx.done]);
+}
+
+/** Delete some texts and store others (e.g. marked removed) in one transaction: both, or (storage full) neither. */
+export async function deleteAndPutDocs(ids: string[], docs: Doc[]) {
+  const tx = (await db()).transaction('docs', 'readwrite');
+  await Promise.all([...ids.map((id) => tx.store.delete(id)), ...docs.map((d) => tx.store.put(d)), tx.done]);
+}
+
+/**
+ * Attach results stored under texts that no longer exist (`from`, deleted by a version before November 2026) to the
+ * text each turned out to be (`to`): the results and logs of every run of the study get the new text's id, and the
+ * runs list it. One transaction: all of it, or (e.g. storage full) nothing. A pair whose new ids are already taken
+ * in a run (that run has both texts) is left as it is for that run. Returns the number of results moved.
+ */
+export async function reassignDocs(studyId: string, pairs: [string, string][]): Promise<number> {
+  const tx = (await db()).transaction(['runs', 'results', 'logs'], 'readwrite');
+  const runs = await tx.objectStore('runs').index('byStudy').getAll(studyId);
+  let moved = 0;
+  for (const run of runs) {
+    let changed = false;
+    for (const [from, to] of pairs) {
+      if (!run.docIds.includes(from) && !Object.values(run.batch?.map ?? {}).some(([d]) => d === from)) continue;
+      const range = (id: string) => IDBKeyRange.bound(`${run.id}:${id}:`, `${run.id}:${id}:\uffff`);
+      // (A run that has both texts keeps them apart: nothing of it is moved.)
+      if ((await tx.objectStore('results').count(range(to))) > 0 || run.docIds.includes(to)) continue;
+      const rename = (id: string) => `${run.id}:${to}:${id.slice(`${run.id}:${from}:`.length)}`;
+      for (const r of await tx.objectStore('results').getAll(range(from))) {
+        await tx.objectStore('results').delete(r.id);
+        await tx.objectStore('results').put({ ...r, id: rename(r.id), docId: to });
+        moved++;
+      }
+      for (const l of await tx.objectStore('logs').getAll(range(from))) {
+        await tx.objectStore('logs').delete(l.id);
+        await tx.objectStore('logs').put({ ...l, id: rename(l.id) });
+      }
+      run.docIds = run.docIds.map((d) => (d === from ? to : d));
+      if (run.batch) run.batch.map = Object.fromEntries(Object.entries(run.batch.map).map(([k, [d, rep]]) => [k, [d === from ? to : d, rep] as [string, number]]));
+      changed = true;
+    }
+    if (changed) await tx.objectStore('runs').put(run);
+  }
+  await tx.done;
+  return moved;
 }
 
 export async function putRun(r: Run) {

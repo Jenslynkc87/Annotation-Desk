@@ -90,6 +90,9 @@ export interface Doc {
   source: string; // file name or "pasted"
   order: number;
   addedAt: string;
+  /** Removed from the study (Delete), but kept because runs used it: their results, exports and comparisons still
+   *  need its name, columns and text. Not shown or annotated any more; adding the identical text again restores it. */
+  removedAt?: string;
 }
 
 export type RunStatus = 'running' | 'submitted' | 'completed' | 'cancelled' | 'failed';

@@ -4,7 +4,7 @@ import { buildBackup } from '../lib/export/backup';
 import { agreementData, agreementHere, buildExcel, buildResearchRepo, buildSupplementary, type AgreementFor, type ExportData } from '../lib/export/packages';
 import { labelPairs } from '../lib/export/tables';
 import type { AgreementJob, AgreementMessage } from '../lib/report.worker';
-import { batchChecksDone, currentStudy, getState, isBusy, toast, useStore } from '../lib/store';
+import { batchChecksDone, currentStudy, getState, isBusy, toast, useStore, withRemoved } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
 import { words } from '../lib/subject';
 import { retryInProgress, runInProgress, runName, runOrder, runTitle } from '../lib/view';
@@ -12,7 +12,8 @@ import { Icon } from './ui';
 
 function exportData(): ExportData {
   const s = getState();
-  return { study: currentStudy(s)!, docs: s.docs, runs: s.runs, results: s.results };
+  // (With the texts removed from the study but kept for the runs that used them: each run is reported on all its texts.)
+  return { study: currentStudy(s)!, docs: withRemoved(s.docs, s.removedDocs), runs: s.runs, results: s.results };
 }
 
 /**
@@ -79,7 +80,9 @@ const readsAsItGoes = (kind: BackgroundKind, picked: BuildChoices) => kind === '
 export function ExportView() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
-  const docs = useStore((s) => s.docs);
+  const activeDocs = useStore((s) => s.docs);
+  const removedDocs = useStore((s) => s.removedDocs);
+  const docs = useMemo(() => withRemoved(activeDocs, removedDocs), [activeDocs, removedDocs]);
   // The download being built (`startBackground`), kept outside this tab: leaving the tab and coming back still shows it
   // (the build goes on meanwhile), and a second one can't start before it is done. Its progress: the step it is on,
   // e.g. the file a zip is writing (a full corpus with logs takes many minutes).

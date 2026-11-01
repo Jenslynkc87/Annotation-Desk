@@ -24,6 +24,7 @@ import {
   unknownUpload,
   unknownUploadSharers,
   useStore,
+  withRemoved,
   type UploadHolder,
 } from '../lib/store';
 import type { Doc, Result, Run, Study } from '../lib/types';
@@ -521,7 +522,10 @@ function AgreementPanel() {
   const study = useStore((s) => currentStudy(s))!;
   const w = words({ subject: study.prompt.subject });
   const runs = useStore((s) => s.runs);
-  const docs = useStore((s) => s.docs);
+  // The study's texts and those removed from it but kept for the runs that used them: a run is compared on all its texts.
+  const activeDocs = useStore((s) => s.docs);
+  const removedDocs = useStore((s) => s.removedDocs);
+  const docs = useMemo(() => withRemoved(activeDocs, removedDocs), [activeDocs, removedDocs]);
   const liveResults = useStore((s) => s.results);
   const results = useThrottled(liveResults, 1000);
   const metaCols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
@@ -631,12 +635,14 @@ function AgreementPanel() {
     // Coverage: texts with a value in the second source (for a run on the left: among that run's texts).
     const runLeft = runOf(srcA);
     const inScope = runLeft ? new Set(runLeft.docIds) : null;
+    // A removed text counts only for a run compared here that used it (not, e.g., for two coders' columns).
+    const usedHere = new Set([runLeft, runOf(decode(b))].flatMap((r) => r?.docIds ?? []));
     const xs: string[] = [];
     const ys: string[] = [];
     let nLabelled = 0;
     for (const d of docs) {
       const y = vb.get(d.id);
-      if (!y || (inScope && !inScope.has(d.id))) continue;
+      if (!y || (inScope && !inScope.has(d.id)) || (d.removedAt && !usedHere.has(d.id))) continue;
       nLabelled++;
       const x = va.get(d.id);
       if (x) {

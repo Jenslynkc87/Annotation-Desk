@@ -159,7 +159,7 @@ describe('study backup', () => {
     await init();
     // Gone, with everything written so far; the complete studies stay.
     expect((await dbApi.listStudies()).map((s) => s.id).sort()).toEqual(before.sort());
-    expect(await dbApi.loadStudyData(partial.id)).toEqual({ docs: [], runs: [], results: [] });
+    expect(await dbApi.loadStudyData(partial.id)).toEqual({ docs: [], removedDocs: [], runs: [], results: [] });
   });
 
   it('reports a full storage as such, and leaves the study marked when even removing it fails', async () => {
