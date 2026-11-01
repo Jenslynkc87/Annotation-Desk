@@ -98,7 +98,7 @@ export function DocDrawer({
       </section>
 
       <section>
-        <p className="section-title">{w.one === 'entry' ? 'Details sent to the model' : `Text (${doc.text.length.toLocaleString()} characters)`}</p>
+        <p className="section-title">{w.one === 'entry' ? 'Details sent to the model' : `Text (${doc.text.length.toLocaleString('en-US')} characters)`}</p>
         <div className="textblock" style={{ maxHeight: 280 }}>{doc.text}</div>
         <div className="hint" style={{ marginTop: 6 }}>
           Source: {doc.source}

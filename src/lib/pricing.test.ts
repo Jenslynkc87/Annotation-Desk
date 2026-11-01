@@ -32,7 +32,7 @@ describe('pricing', () => {
       caching: false,
       replicates: 1,
       batch: false,
-      calibration: { ...NO_CALIBRATION, charsPerToken: 4, inputN: 1, answer: 100, answerN: 1 },
+      calibration: { ...NO_CALIBRATION, charsPerToken: 4, inputN: 20, answer: 100, answerN: 20 },
     };
     const e = estimateRun(base);
     // 1,000 input tokens ±5% at $1; 100 answer tokens −20%/+30% at $5
@@ -44,6 +44,15 @@ describe('pricing', () => {
     expect(estimateRun({ ...base, batch: true }).total!.high).toBeCloseTo(0.00085, 8);
     expect(estimateRun({ ...base, replicates: 3 }).total!.high).toBeCloseTo(0.0051, 8);
     expect(estimateRun({ ...base, replicates: 3 }).requests).toBe(3);
+  });
+
+  it('keeps the assumed range while fewer than 20 results were measured', () => {
+    const base: EstimateInput = { docs: [doc(4000)], prompt: bare, model: model('claude-haiku-4-5'), caching: false, replicates: 1, batch: false, calibration: NO_CALIBRATION };
+    const assumed = estimateRun(base).answer.tokens;
+    // One short test answer: the range still reaches the assumed high end.
+    const one = estimateRun({ ...base, calibration: { ...NO_CALIBRATION, answer: 10, answerN: 1 } }).answer.tokens;
+    expect(one.low).toBe(8);
+    expect(one.high).toBe(assumed.high);
   });
 
   it('assumes reasoning from the effort, capped by the output limit', () => {

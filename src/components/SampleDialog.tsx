@@ -151,8 +151,8 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
       </div>
       <div className="notice">
         <div>
-          {r.ids.length} of {r.eligible.toLocaleString()} eligible {w.many}{strata.length ? `, from ${r.strata.length} groups` : ''}.
-          {types.length > 0 && <> File types: {types.map(([e, [n, k]]) => `${e} ${k} in the sample (${Math.round((100 * n) / Math.max(1, r.eligible))}% of eligible ${w.many})`).join(', ')}.</>}
+          {r.ids.length} of {r.eligible.toLocaleString('en-US')} eligible {w.many}{strata.length ? `, from ${r.strata.length} groups` : ''}.
+          {types.length > 0 && <> File types: {types.map(([e, [n, k]]) => `.${e} ${Math.round((100 * k) / Math.max(1, r.ids.length))}% of the sample (${k}) vs ${Math.round((100 * n) / Math.max(1, r.eligible))}% of eligible ${w.many}`).join(', ')}.</>}
         </div>
         {takenCount > 0 && (
           <div>

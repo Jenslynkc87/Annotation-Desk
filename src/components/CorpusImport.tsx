@@ -114,7 +114,7 @@ export function CorpusImport() {
       const groups = [...errors].sort((a, b) => b[1].length - a[1].length);
       const n = groups.reduce((k, [, names]) => k + names.length, 0);
       const parts = groups.map(([reason, names]) => `${names.join(', ')}: ${reason === notUtf8(1) ? notUtf8(names.length) : reason}`);
-      toast(`Skipped ${n.toLocaleString()} file${n === 1 ? '' : 's'}. ${parts.join(' ')}`, 'error', true);
+      toast(`Skipped ${n.toLocaleString('en-US')} file${n === 1 ? '' : 's'}. ${parts.join(' ')}`, 'error', true);
     }
   };
 
@@ -258,7 +258,7 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
           <button className="btn" onClick={close} disabled={adding}>Cancel</button>
           {asTable ? (
             <button className="btn primary" disabled={!table?.rows.length || !table.columns.length} onClick={() => table && onTable(table)}>
-              Continue with {table?.rows.length.toLocaleString() ?? 0} row{table?.rows.length === 1 ? '' : 's'}…
+              Continue with {table?.rows.length.toLocaleString('en-US') ?? 0} row{table?.rows.length === 1 ? '' : 's'}…
             </button>
           ) : (
             <button className="btn primary" disabled={!items.length || adding} onClick={add}>
@@ -301,7 +301,7 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
             {table && table.columns.length > 0 && (
               <>
                 {' '}
-                {table.rows.length.toLocaleString()} row{table.rows.length === 1 ? '' : 's'} · columns: {table.columns.join(', ')}
+                {table.rows.length.toLocaleString('en-US')} row{table.rows.length === 1 ? '' : 's'} · columns: {table.columns.join(', ')}
               </>
             )}
           </div>
@@ -313,7 +313,7 @@ function PasteDialog({ tableOnly, onClose, onTable }: { tableOnly: boolean; onCl
         </>
       ) : (
         <div className="hint">
-          {items.length} text{items.length === 1 ? '' : 's'} · {countWords(text).toLocaleString()} words
+          {items.length} text{items.length === 1 ? '' : 's'} · {countWords(text).toLocaleString('en-US')} words
         </div>
       )}
     </Modal>
@@ -395,14 +395,14 @@ function TableDialog({
         <>
           <button className="btn" onClick={close} disabled={adding}>Cancel</button>
           <button className="btn primary" disabled={(entry ? !shown.length : !textCol) || !nAdded || adding} onClick={add}>
-            {adding ? 'Importing…' : `Import ${nAdded.toLocaleString()} ${entry ? (nAdded === 1 ? 'entry' : 'entries') : nAdded === 1 ? 'text' : 'texts'}`}
+            {adding ? 'Importing…' : `Import ${nAdded.toLocaleString('en-US')} ${entry ? (nAdded === 1 ? 'entry' : 'entries') : nAdded === 1 ? 'text' : 'texts'}`}
           </button>
         </>
       }
     >
       {matched > 0 && matched >= table.rows.length / 2 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
-          {matched.toLocaleString()} of {table.rows.length.toLocaleString()} rows match {entry ? 'entries' : 'texts'} already in this study by name or ID. If this file holds
+          {matched.toLocaleString('en-US')} of {table.rows.length.toLocaleString('en-US')} rows match {entry ? 'entries' : 'texts'} already in this study by name or ID. If this file holds
           labels or metadata for those {entry ? 'entries' : 'texts'}, add it as columns instead of importing them again.{' '}
           <button className="btn small" disabled={adding} onClick={() => onUseAsLabels(table)}>
             Add as labels or metadata instead
@@ -411,23 +411,23 @@ function TableDialog({
       )}
       {repeated.length > 0 && (
         <div className="notice warn" style={{ marginBottom: 12 }}>
-          {repeated.length.toLocaleString()} {entry ? (repeated.length === 1 ? 'entry has' : 'entries have') : repeated.length === 1 ? 'text has' : 'texts have'} the same ID as another
+          {repeated.length.toLocaleString('en-US')} {entry ? (repeated.length === 1 ? 'entry has' : 'entries have') : repeated.length === 1 ? 'text has' : 'texts have'} the same ID as another
           (e.g. “{repeated[0]}”) and will get _2, _3 and so on. Choose an ID column with a different value in each row, so that labels or answers in a spreadsheet can be
           matched to them later.
         </div>
       )}
       {(entry ? shown.length > 0 : !!textCol) && (left.twice > 0 || left.here > 0) && (
         <div className="notice" style={{ marginBottom: 12 }}>
-          {nAdded.toLocaleString()} of the {rows.length.toLocaleString()} rows will be added:{' '}
+          {nAdded.toLocaleString('en-US')} of the {rows.length.toLocaleString('en-US')} rows will be added:{' '}
           {left.twice > 0 && (
             <>
-              {left.twice.toLocaleString()} {left.twice === 1 ? 'is' : 'are'} the same as another row in every column (e.g. “{plan.twice[0]}”), so {left.twice === 1 ? 'it is' : 'they are'} left out
+              {left.twice.toLocaleString('en-US')} {left.twice === 1 ? 'is' : 'are'} the same as another row in every column (e.g. “{plan.twice[0]}”), so {left.twice === 1 ? 'it is' : 'they are'} left out
             </>
           )}
           {left.twice > 0 && left.here > 0 && ', and '}
           {left.here > 0 && (
             <>
-              {left.here.toLocaleString()} {left.here === 1 ? 'is' : 'are'} already in this study
+              {left.here.toLocaleString('en-US')} {left.here === 1 ? 'is' : 'are'} already in this study
             </>
           )}
           .
@@ -589,7 +589,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
   const sameAs = (c: string) => {
     const x = exported.sameAs[c];
     const run = runs.find((r) => r.id === x?.run);
-    return `run #${run ? runName(run, runs) : '?'}’s answers for all ${(x?.texts ?? 0).toLocaleString()} ${x?.texts === 1 ? one : many} with a value there`;
+    return `run #${run ? runName(run, runs) : '?'}’s answers for all ${(x?.texts ?? 0).toLocaleString('en-US')} ${x?.texts === 1 ? one : many} with a value there`;
   };
   // Several rows for texts that the study has twice under one name (John Smith, John Smith_2) need other advice.
   const sameName = m.sameName;
@@ -611,7 +611,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
         <>
           <button className="btn" onClick={close} disabled={adding}>Cancel</button>
           <button className="btn primary" disabled={!m.updates.size || !m.columns.length || blocked || adding} onClick={apply}>
-            {adding ? 'Adding…' : `Add to ${m.updates.size.toLocaleString()} ${m.updates.size === 1 ? one : many}`}
+            {adding ? 'Adding…' : `Add to ${m.updates.size.toLocaleString('en-US')} ${m.updates.size === 1 ? one : many}`}
           </button>
         </>
       }
@@ -737,7 +737,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
       </div>
       <div className={`notice ${m.unmatched.length || m.ambiguous.length || blocked || clear.size || sameName.length ? 'warn' : ''}`}>
         <div>
-          <strong>{m.matchedRows.toLocaleString()}</strong> of {table.rows.length.toLocaleString()} rows matched {m.matchedTexts.toLocaleString()}{' '}
+          <strong>{m.matchedRows.toLocaleString('en-US')}</strong> of {table.rows.length.toLocaleString('en-US')} rows matched {m.matchedTexts.toLocaleString('en-US')}{' '}
           {m.matchedTexts === 1 ? one : many}. Columns to add: {m.columns.length ? m.columns.join(', ') : '(none)'}.
         </div>
         {otherConflicts.length > 0 && (
@@ -777,7 +777,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
             Already present, replaced for the {many} this sheet lists:{' '}
             {m.replaced.map((c) => {
               const n = removedBy(c);
-              return `${c}${n ? ` (${n.toLocaleString()} earlier value${n === 1 ? '' : 's'} removed: blank here${removeUnlisted ? ' or not listed' : ''})` : ''}`;
+              return `${c}${n ? ` (${n.toLocaleString('en-US')} earlier value${n === 1 ? '' : 's'} removed: blank here${removeUnlisted ? ' or not listed' : ''})` : ''}`;
             }).join(', ')}
             .
           </div>
@@ -792,7 +792,7 @@ function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: Par
       {unlisted > 0 && (
         <label className="check" style={{ marginTop: 10 }}>
           <input type="checkbox" checked={removeUnlisted} onChange={(e) => setRemoveUnlisted(e.target.checked)} /> Also remove the values of the{' '}
-          {unlisted.toLocaleString()} {unlisted === 1 ? one : many} this sheet doesn’t list (in {list(m.replaced)}), e.g. when this sheet replaces an earlier one
+          {unlisted.toLocaleString('en-US')} {unlisted === 1 ? one : many} this sheet doesn’t list (in {list(m.replaced)}), e.g. when this sheet replaces an earlier one
           for all {many}
         </label>
       )}
@@ -813,7 +813,7 @@ function RemoveColumnDialog({ onDone }: { onDone: () => void }) {
   const n = docs.filter((d) => col in d.meta).length;
   const inPrompt = useMemo(() => promptColumns(prompt, runs), [prompt, runs]).has(col);
   const remove = async () => {
-    if (!confirm(`Remove the column "${col}" from ${n.toLocaleString()} ${n === 1 ? w.one : w.many}? This cannot be undone (add it again from a spreadsheet if needed).`)) return;
+    if (!confirm(`Remove the column "${col}" from ${n.toLocaleString('en-US')} ${n === 1 ? w.one : w.many}? This cannot be undone (add it again from a spreadsheet if needed).`)) return;
     if (await removeMetaColumn(col)) onDone();
   };
   return (
@@ -841,7 +841,7 @@ function RemoveColumnDialog({ onDone }: { onDone: () => void }) {
           ))}
         </select>
       </div>
-      <div className="hint">{n.toLocaleString()} {n === 1 ? `${w.one} has` : `${w.many} have`} a value in this column.</div>
+      <div className="hint">{n.toLocaleString('en-US')} {n === 1 ? `${w.one} has` : `${w.many} have`} a value in this column.</div>
       {inPrompt && (
         <div className="notice warn" style={{ marginTop: 10 }}>
           The prompt inserts <code>{`{{meta.${col}}}`}</code>: after this, later requests (also with Retry failed) get an empty value there.

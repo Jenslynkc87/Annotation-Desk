@@ -233,6 +233,8 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .prose-cell { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; max-width: 420px; font-weight: 400; }
 .val.mismatch { color: var(--err); }
 .val.match { color: var(--ok); }
+.val.mismatch .snippet { color: var(--err); }
+.val.match .snippet { color: var(--ok); }
 .cbx { width: 16px; height: 16px; accent-color: var(--navy); }
 .empty { text-align: center; padding: 40px 20px; color: var(--muted); }
 .empty strong { display: block; color: var(--ink); font-size: 15px; font-weight: 550; margin-bottom: 4px; }

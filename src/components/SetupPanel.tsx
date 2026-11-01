@@ -225,7 +225,14 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
           {showCustom && list.length > 0 && (
             <>
               {' '}
-              <button className="linkbtn" onClick={() => setCustomModel(false)}>
+              <button
+                className="linkbtn"
+                onClick={() => {
+                  setCustomModel(false);
+                  // A typed id that isn't listed would keep the box open: go back to a listed model.
+                  if (!info) updateStudy((s) => void (s.model.model = list[0].id));
+                }}
+              >
                 Back to the list
               </button>
             </>

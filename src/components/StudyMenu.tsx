@@ -5,6 +5,7 @@ import {
   batchParts,
   createStudy,
   currentStudy,
+  dismissToast,
   duplicateStudy,
   getState,
   isBusy,
@@ -14,6 +15,7 @@ import {
   setImporting,
   sharedBatches,
   sharedUnknownUpload,
+  stickyToast,
   storageError,
   toast,
   unknownUpload,
@@ -48,8 +50,9 @@ export function StudyMenu() {
     if (!f) return;
     // (Meanwhile, closing the tab asks first: a partial study would be removed at the next start.)
     setImporting(true);
+    // Shown until the import ends: a large backup can take a minute with nothing else to see.
+    const note = stickyToast(`Importing ${f.name}… This can take a minute for a large backup.`);
     try {
-      toast(`Importing ${f.name}…`);
       const s = await importBackup(f);
       toast(`Imported “${s.name}”.`, 'success');
       try {
@@ -62,6 +65,7 @@ export function StudyMenu() {
       // (A full storage often comes with no message at all.)
       toast(`Import failed: ${storageError(e)}`, 'error');
     } finally {
+      dismissToast(note);
       setImporting(false);
     }
   };

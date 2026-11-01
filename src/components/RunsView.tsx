@@ -99,7 +99,7 @@ export function RunsView() {
                       <td>
                         <input
                           className="input small"
-                          style={{ width: 150 }}
+                          style={{ width: 120 }}
                           placeholder="Add label…"
                           defaultValue={r.label}
                           onBlur={(e) => e.target.value !== r.label && renameRun(r.id, e.target.value)}
@@ -124,7 +124,7 @@ export function RunsView() {
                         {r.error && <div className="hint err" style={{ maxWidth: 260 }}>{r.error}</div>}
                       </td>
                       <td className="num">
-                        {t.ok} / {t.failed}
+                        {fmtInt(t.ok)} / {fmtInt(t.failed)}
                       </td>
                       <td className="num">
                         {fmtInt(t.input)} / {fmtInt(t.output)}
@@ -133,7 +133,7 @@ export function RunsView() {
                         {fmtInt(t.cacheRead)} / {fmtInt(t.cacheWrite)}
                       </td>
                       <td>
-                        <div className="row" style={{ flexWrap: 'nowrap' }}>
+                        <div className="row" style={{ gap: 6, maxWidth: 210 }}>
                           <button className="btn small" onClick={() => setInspect(r)}>
                             Settings
                           </button>
@@ -147,7 +147,7 @@ export function RunsView() {
                                 // A run with a batch upload of unknown outcome is not asked here: Retry failed first looks
                                 // for that batch (free), and asks before sending anything again if it isn't found.
                                 const asBatch = r.mode === 'batch';
-                                const what = `${retry.toLocaleString()} request${retry === 1 ? '' : 's'} in run #${runName(r, runs)}`;
+                                const what = `${retry.toLocaleString('en-US')} request${retry === 1 ? '' : 's'} in run #${runName(r, runs)}`;
                                 if (asBatch && !r.batch?.uploadUnknown && !confirm(`Re-send ${what} as a new batch (half price; results usually within an hour, collected into the same run)?`)) return;
                                 if (!asBatch && retry > 50 && !confirm(`Re-send ${what} now (immediate requests, full price)?`)) return;
                                 void retryFailed(r.id);
@@ -201,7 +201,7 @@ export function RunsView() {
                               const waiting = sharers.waiting.filter((x) => !holders.includes(x));
                               const one = holders.length === 1;
                               const upload = unknown
-                                ? `A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'})`
+                                ? `A batch upload of this run (${fmtDateTime(unknown.since)}, ${unknown.requests.toLocaleString('en-US')} request${unknown.requests === 1 ? '' : 's'})`
                                 : '';
                               const unsure = !unknown
                                 ? ''
@@ -612,8 +612,12 @@ function AgreementPanel() {
     if (!src) return out;
     if (src.kind === 'meta') {
       // A missing-value marker such as "NA" is a blank cell (not a label), unless it is a value of the field. With
-      // no field (two label columns compared as they are), the cells are taken as they are.
-      for (const d of docs) out.set(d.id, cf ? labelValue(d.meta[src.col], cf) : normalizeLabel(d.meta[src.col]));
+      // no field (two label columns compared as they are), the cells are taken as they are, markers still blank.
+      const asIs = (v: string | undefined) => {
+        const x = normalizeLabel(v);
+        return isMissingLabel(x) ? '' : x;
+      };
+      for (const d of docs) out.set(d.id, cf ? labelValue(d.meta[src.col], cf) : asIs(d.meta[src.col]));
       return out;
     }
     const run = runOf(src);

@@ -27,7 +27,7 @@ import {
 import { matchLostTexts, type LostText } from './reconnect';
 import { replaceSampleNotes } from './sample';
 import { words } from './subject';
-import { errorMessage, fmtDateTime, nowIso, shortHash, uid } from './util';
+import { errorMessage, fmtDateTime, fmtInt, nowIso, shortHash, uid } from './util';
 import { runName } from './view';
 
 export interface Job {
@@ -142,6 +142,11 @@ export function currentStudy(s: State = state): Study | null {
 /** A message at the bottom of the page. `sticky`: stays until dismissed (for something that must not be missed). */
 export function toast(text: string, kind: Toast['kind'] = 'info', sticky = false) {
   showToast(text, kind, sticky);
+}
+
+/** A message that stays until `dismissToast(id)` (e.g. while a long import runs). */
+export function stickyToast(text: string): string {
+  return showToast(text, 'info', true);
 }
 
 /** The same, returning the message's id (to dismiss it later). */
@@ -560,15 +565,15 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
   const what = w.one === 'entry' ? 'details' : 'text';
   const { kept, already: skipped, elsewhere, twice } = sortAddition(items, state.docs, w.one === 'entry');
   items = kept;
-  if (skipped) toast(`Skipped ${skipped.toLocaleString()} ${skipped === 1 ? w.one : w.many} already in this study (same name and identical ${what}).`);
+  if (skipped) toast(`Skipped ${skipped.toLocaleString('en-US')} ${skipped === 1 ? w.one : w.many} already in this study (same name and identical ${what}).`);
   if (elsewhere.length) {
     toast(
-      `Skipped ${elsewhere.length.toLocaleString()} ${elsewhere.length === 1 ? w.one : w.many} already in this study under another ID (identical ${what} and columns): ${elsewhere.slice(0, 3).join(', ')}${elsewhere.length > 3 ? ', …' : ''}.`,
+      `Skipped ${elsewhere.length.toLocaleString('en-US')} ${elsewhere.length === 1 ? w.one : w.many} already in this study under another ID (identical ${what} and columns): ${elsewhere.slice(0, 3).join(', ')}${elsewhere.length > 3 ? ', …' : ''}.`,
     );
   }
   if (twice.length) {
     const names = [...new Set(twice)];
-    toast(`Skipped ${twice.length.toLocaleString()} ${twice.length === 1 ? w.one : w.many} included twice in this addition (same name, identical ${what} and columns): ${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''}.`);
+    toast(`Skipped ${twice.length.toLocaleString('en-US')} ${twice.length === 1 ? w.one : w.many} included twice in this addition (same name, identical ${what} and columns): ${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''}.`);
   }
   if (!items.length) return true;
   // Names in use: the study's, and those of removed texts kept for their runs (a changed text under such a name gets
@@ -622,7 +627,7 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
   set((s) => ({ docs: [...s.docs, ...docs], removedDocs: s.removedDocs.filter((d) => !restoredIds.has(d.id)) }));
   // (Named: another study may be opening while they were saved, and would be in view by the time this shows.)
   toast(
-    `Added ${docs.length.toLocaleString()} ${docs.length === 1 ? w.one : w.many} to “${cur.name}”.${restored.length ? ` ${restored.length === docs.length ? (restored.length === 1 ? 'It had' : 'They had') : `${restored.length.toLocaleString()} of them had`} been deleted before: the results earlier runs made for ${restored.length === 1 ? 'it are its' : 'them are theirs'} again.` : ''}`,
+    `Added ${docs.length.toLocaleString('en-US')} ${docs.length === 1 ? w.one : w.many} to “${cur.name}”.${restored.length ? ` ${restored.length === docs.length ? (restored.length === 1 ? 'It had' : 'They had') : `${restored.length.toLocaleString('en-US')} of them had`} been deleted before: the results earlier runs made for ${restored.length === 1 ? 'it are its' : 'them are theirs'} again.` : ''}`,
     'success',
   );
   // Results of texts an earlier version deleted outright may belong to some of these: reconnected if so.
@@ -642,9 +647,9 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
 function rewriteFailed(what: string, docs: Doc[], e: unknown): string {
   if (!isQuotaError(e)) return `${what}: ${storageError(e)}. Nothing was changed.`;
   const chars = docs.reduce((n, d) => n + d.text.length + JSON.stringify(d.meta).length, 0);
-  const size = chars >= 1e6 ? `${Math.ceil(chars / 1e6).toLocaleString()} MB` : `${Math.max(1, Math.ceil(chars / 1e3)).toLocaleString()} KB`;
+  const size = chars >= 1e6 ? `${Math.ceil(chars / 1e6).toLocaleString('en-US')} MB` : `${Math.max(1, Math.ceil(chars / 1e3)).toLocaleString('en-US')} KB`;
   const w = words(currentStudy()?.prompt ?? {});
-  return `${what}: ${storageError(e)}. The change rewrites each of the ${docs.length.toLocaleString()} ${docs.length === 1 ? w.one : w.many} it touches in full, ${w.one === 'entry' ? 'details' : 'text'} included, so it needs about ${size} of free space. Nothing was changed.`;
+  return `${what}: ${storageError(e)}. The change rewrites each of the ${docs.length.toLocaleString('en-US')} ${docs.length === 1 ? w.one : w.many} it touches in full, ${w.one === 'entry' ? 'details' : 'text'} included, so it needs about ${size} of free space. Nothing was changed.`;
 }
 
 /**
@@ -671,7 +676,7 @@ export async function addLabels(updates: Map<string, Record<string, string>>, cl
   const byId = new Map(changed.map((d) => [d.id, d]));
   set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d), removedDocs: s.removedDocs.map((d) => byId.get(d.id) ?? d) }));
   const w = words(currentStudy()!.prompt);
-  toast(`Updated the columns of ${changed.length} ${changed.length === 1 ? w.one : w.many}.`, 'success');
+  toast(`Updated the columns of ${fmtInt(changed.length)} ${changed.length === 1 ? w.one : w.many}.`, 'success');
   return true;
 }
 
@@ -693,7 +698,7 @@ export async function removeMetaColumn(column: string): Promise<boolean> {
   }
   const byId = new Map(changed.map((d) => [d.id, d]));
   set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d), removedDocs: s.removedDocs.map((d) => byId.get(d.id) ?? d) }));
-  toast(`Removed the column "${column}" from ${changed.length} ${changed.length === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many}.`, 'success');
+  toast(`Removed the column "${column}" from ${fmtInt(changed.length)} ${changed.length === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many}.`, 'success');
   return true;
 }
 
@@ -836,7 +841,7 @@ export async function reconnectLostTexts(): Promise<void> {
   }
   if (!moved || state.currentId !== studyId) return;
   const n = new Set([...found.values()]).size;
-  toast(`Reconnected ${moved.toLocaleString()} earlier result${moved === 1 ? '' : 's'} to ${n.toLocaleString()} ${n === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many} of this study: the ${words(currentStudy()!.prompt).many} had been deleted and added again, which an earlier version of this site didn’t connect.`, 'success', true);
+  toast(`Reconnected ${moved.toLocaleString('en-US')} earlier result${moved === 1 ? '' : 's'} to ${n.toLocaleString('en-US')} ${n === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many} of this study: the ${words(currentStudy()!.prompt).many} had been deleted and added again, which an earlier version of this site didn’t connect.`, 'success', true);
 }
 
 // ---------- keys & models ----------
@@ -1471,7 +1476,7 @@ async function submitBatches(
     for (const [g, group] of groups.entries()) {
       if (cancelRequested.has(run.id)) break;
       const which = groups.length > 1 ? `batch ${g + 1} of ${groups.length}` : 'a batch';
-      set({ submitting: `Uploading ${which} (${group.length.toLocaleString()} request${group.length === 1 ? '' : 's'}) to ${adapter.label}…` });
+      set({ submitting: `Uploading ${which} (${group.length.toLocaleString('en-US')} request${group.length === 1 ? '' : 's'}) to ${adapter.label}…` });
       const attempt: UploadAttempt = {
         since: nowIso(),
         requests: group.length,
@@ -1780,7 +1785,10 @@ async function finishTasks(run: Run, job: Job, doneMessage: string, how: { retry
   }
   if (!stopped) {
     const f = final?.failed ?? 0;
-    toast(`${doneMessage}: ${(final?.done ?? 0) - f} ok${f ? `, ${f} failed. Retry them in the same run under Runs & agreement` : ''}.`, f ? 'error' : 'success');
+    // Answers cut off at the output limit: a retry uses the run's frozen settings, so it is likely cut off (and paid for) again.
+    const cutOff = f ? state.results.filter((r) => r.runId === run.id && r.status === 'error' && /max_tokens|max_output_tokens/.test(r.stopReason)).length : 0;
+    const cutNote = cutOff ? ` ${cutOff} of them ${cutOff === 1 ? 'was' : 'were'} cut off at the output limit and would likely be cut off again: raise Max output tokens (Setup → Model → Sampling & limits) and send those with Remaining instead.` : '';
+    toast(`${doneMessage}: ${(final?.done ?? 0) - f} ok${f ? `, ${f} failed. Retry them in the same run under Runs & agreement.${cutNote}` : '.'}`, f ? 'error' : 'success');
   } else if (stoppedByErrors) {
     toast(run.error ?? 'Run failed', 'error', true);
   } else {
@@ -1849,8 +1857,8 @@ export async function retryFailed(runId: string) {
       }
       const at = fmtDateTime(unknown.since);
       const n = retryableCount(original, state.results, state.docs);
-      const what = `${n.toLocaleString()} failed (or never sent) request${n === 1 ? '' : 's'} of run ${runLabel(original)}`;
-      const reqs = `${unknown.requests.toLocaleString()} request${unknown.requests === 1 ? '' : 's'}`;
+      const what = `${n.toLocaleString('en-US')} failed (or never sent) request${n === 1 ? '' : 's'} of run ${runLabel(original)}`;
+      const reqs = `${unknown.requests.toLocaleString('en-US')} request${unknown.requests === 1 ? '' : 's'}`;
       if (
         !confirm(
           `${look.sure ? `No batch from the upload of ${at} (${reqs}) was found at ${label}.` : `The batch upload of ${at} (${reqs}) could not be looked up at ${label} (${look.why}).`} If it did arrive, sending again pays twice. Check the provider's batch list if in doubt.\n\nSend the ${what} again as a new batch (half price; results usually within an hour, collected into the same run)?`,
@@ -1976,8 +1984,8 @@ export async function lookUpUnknownUpload(run: Run): Promise<UnknownLook> {
 /** (`earlier`: a batch found for either of two uploads, this one or the run's earlier one begun then: both named.) */
 const uploadName = (run: Run, attempt: UploadAttempt, earlier?: string) =>
   earlier
-    ? `The batch upload of ${fmtSeconds(attempt.since)} (${attempt.requests.toLocaleString()} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}, or its earlier upload of ${fmtSeconds(earlier)},`
-    : `The batch upload of ${fmtDateTime(attempt.since)} (${attempt.requests.toLocaleString()} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}`;
+    ? `The batch upload of ${fmtSeconds(attempt.since)} (${attempt.requests.toLocaleString('en-US')} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}, or its earlier upload of ${fmtSeconds(earlier)},`
+    : `The batch upload of ${fmtDateTime(attempt.since)} (${attempt.requests.toLocaleString('en-US')} request${attempt.requests === 1 ? '' : 's'}) of run ${runLabel(run)}`;
 
 /** Cancel the batch found for a run's upload of unknown outcome. Returns why it could not be ('' if it was, or had
  *  ended meanwhile). */

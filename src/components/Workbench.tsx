@@ -7,7 +7,7 @@ import { batchParts, batchPlan, cancelJob, checkBatch, currentStudy, getState, r
 import type { Doc, PromptSpec, Run, Variable } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
-import { sample } from '../lib/util';
+import { fmtInt, sample } from '../lib/util';
 import { buildDocViews, runName, runTitle, type DocView, type RunFilter } from '../lib/view';
 import { useBuildingFor, waitForDownload } from '../lib/background';
 import { words, isEntries } from '../lib/subject';
@@ -195,7 +195,7 @@ export function remainingNotes(
   w: { one: string; many: string },
   allRuns: Run[] = [],
 ): { waiting: string; unknown: string } {
-  const are = (n: number) => `${n.toLocaleString()} ${n === 1 ? `${w.one} is` : `${w.many} are`}`;
+  const are = (n: number) => `${n.toLocaleString('en-US')} ${n === 1 ? `${w.one} is` : `${w.many} are`}`;
   const names = unknownRunNames(r.unknownRuns, allRuns);
   const runs = `run${names.length === 1 ? '' : 's'} ${names.map((n) => `#${n}`).join(', ')}`;
   return {
@@ -390,16 +390,18 @@ function TextsAndResults() {
     const plan = batch && n > 50 ? batchPlan(study, ds) : null;
     const split =
       plan && plan.batches > 1
-        ? `\n\nThis is ${plan.bySize ? `about ${Math.round(plan.mb)} MB, more than ${plan.provider} accepts in one batch (${plan.limitMb} MB, of which this app uses at most 95%)` : `${plan.requests.toLocaleString()} requests, more than ${plan.provider} accepts in one batch (${plan.limitRequests.toLocaleString()})`}, so it will be sent as ${plan.batches} batches in the same run (all at batch price; the results are collected together).`
+        ? `\n\nThis is ${plan.bySize ? `about ${Math.round(plan.mb)} MB, more than ${plan.provider} accepts in one batch (${plan.limitMb} MB, of which this app uses at most 95%)` : `${plan.requests.toLocaleString('en-US')} requests, more than ${plan.provider} accepts in one batch (${plan.limitRequests.toLocaleString('en-US')})`}, so it will be sent as ${plan.batches} batches in the same run (all at batch price; the results are collected together).`
         : '';
     if (n <= 50 && !long) return true;
     return confirm(
-      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString()} request${n === 1 ? '' : 's'} to ${study.model.model}${reps > 1 ? ` (${ds.length.toLocaleString()} ${w.many} × ${reps} annotations)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
+      `${batch ? 'Submit a batch of' : 'Send'} ${n.toLocaleString('en-US')} request${n === 1 ? '' : 's'} to ${study.model.model}${reps > 1 ? ` (${ds.length.toLocaleString('en-US')} ${w.many} × ${reps} annotations)` : ''}? Provider charges apply: ${describeEstimate(est)}.${long}${split}`,
     );
   };
 
   const runDocs = async (ds: Doc[], scope: string, forceSync: boolean) => {
     if (!ds.length) return;
+    // (Before the cost question: after a reload with keys not remembered there is no key yet.)
+    if (!getState().keys[study.model.provider]) return toast(`Add your ${provider(study.model.provider).label} API key first (API keys, top right).`, 'error');
     if (!confirmLarge(ds, study.options.batch && !forceSync)) return;
     await startRun({ docIds: ds.map((d) => d.id), scope, forceSync });
   };
@@ -455,7 +457,7 @@ function TextsAndResults() {
         <span className="step">02</span>
         <h2>{w.Many} &amp; results</h2>
         <span className="right">
-          {docs.length.toLocaleString()} {docs.length === 1 ? w.one : w.many}
+          {docs.length.toLocaleString('en-US')} {docs.length === 1 ? w.one : w.many}
         </span>
       </div>
       <CorpusImport />
@@ -495,8 +497,8 @@ function TextsAndResults() {
                   Selected ({selected.size})
                 </button>
               )}
-              <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All ${w.many} (${docs.length})`, false)} title={study.options.batch ? `Submit every ${w.one} as a batch` : `Annotate every ${w.one} now`}>
-                All ({docs.length.toLocaleString()})
+              <button className="btn" disabled={busy} onClick={() => runDocs(docs, `All ${w.many} (${fmtInt(docs.length)})`, false)} title={study.options.batch ? `Submit every ${w.one} as a batch` : `Annotate every ${w.one} now`}>
+                All ({docs.length.toLocaleString('en-US')})
               </button>
               <button className="btn" disabled={busy} onClick={remaining} title={`Starts a new run with the ${remainingRule(w)}. To complete a finished run instead, use Retry failed under Runs & agreement.`}>
                 Remaining
@@ -536,7 +538,7 @@ function TextsAndResults() {
                         ? `${running.length ? `The results of ${notSaved === 1 ? 'a batch that ended were' : `${notSaved} batches that ended were`}` : 'Its results were'} saved, but the run’s record of them could not be: free some space, then click Check now.`
                         : `${running.length ? `The results of ${notSaved === 1 ? 'a batch that ended' : `${notSaved} batches that ended`}` : 'Its results'} could not be saved: free some space, then click Check now.`
                       : r.batch && keys[r.batch.provider]
-                        ? `${uploading ? 'Once the provider has accepted it, results' : 'Results'} appear here automatically while this page is open.`
+                        ? `${uploading ? 'Once the provider has accepted it, results' : 'Results'} appear here automatically while this study is open in this page.`
                         : `Not being checked: add your ${r.batch ? provider(r.batch.provider).label : ''} API key to collect the results.`}{' '}
                     {running.length > 0 && 'Unfinished requests expire 24 hours after submission.'}
                     {/* Retry failed, which looks for such an upload at the provider first, is offered only once the run's batches have ended and are saved. */}
@@ -614,7 +616,7 @@ function TextsAndResults() {
               {(close) => (
                 <>
                   <button className="menu-item" onClick={() => (close(), setSelected(new Set(filtered.map((d) => d.id))))}>
-                    Select all {filtered.length.toLocaleString()} shown
+                    Select all {filtered.length.toLocaleString('en-US')} shown
                   </button>
                   <button className="menu-item" onClick={() => (close(), setSelected(new Set()))}>
                     Clear selection
@@ -755,7 +757,7 @@ function TextsAndResults() {
           </div>
           <div className="pager">
             <span>
-              {filtered.length.toLocaleString()} shown{filtered.length !== docs.length && ` of ${docs.length.toLocaleString()}`}
+              {filtered.length.toLocaleString('en-US')} shown{filtered.length !== docs.length && ` of ${docs.length.toLocaleString('en-US')}`}
             </span>
             {pageCount > 1 && (
               <span className="row">

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { calibrate, estimateRun, fmtRange, fmtTokens, fmtUsd, PRICE_SOURCES, usePriceOverrides, type Part } from '../lib/pricing';
+import { calibrate, estimateRun, MIN_MEASURED, fmtRange, fmtTokens, fmtUsd, PRICE_SOURCES, usePriceOverrides, type Part } from '../lib/pricing';
 import { currentStudy, remainingDocs, useStore } from '../lib/store';
 import { words } from '../lib/subject';
 import { Icon } from './ui';
@@ -58,12 +58,12 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
       <div className="estimate-head">
         <div>
           <div className="estimate-total">
-            {e.total ? fmtRange(e.total, fmtUsd) : 'No price known'} <span className="estimate-n">· {e.requests.toLocaleString()} annotation{e.requests === 1 ? '' : 's'}</span>
+            {e.total ? fmtRange(e.total, fmtUsd) : 'No price known'} <span className="estimate-n">· {e.requests.toLocaleString('en-US')} annotation{e.requests === 1 ? '' : 's'}</span>
           </div>
           <div className="hint">
             {study.model.model}
             {e.effort !== 'none' && ` · ${e.effort} effort`} · {e.batch ? 'Batch (½ price)' : 'Now'}
-            {study.options.replicates > 1 && ` · ${e.texts.toLocaleString()} ${w.many} × ${study.options.replicates}`}
+            {study.options.replicates > 1 && ` · ${e.texts.toLocaleString('en-US')} ${w.many} × ${study.options.replicates}`}
           </div>
         </div>
         <button className="btn ghost small" onClick={onClose} aria-label="Close cost estimate">
@@ -73,15 +73,15 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
 
       <span className="seg compact" role="radiogroup" aria-label={`Which ${w.many}`}>
         <button role="radio" aria-checked={effScope === 'all'} className={effScope === 'all' ? 'on' : ''} onClick={() => setScope('all')}>
-          All ({docs.length.toLocaleString()})
+          All ({docs.length.toLocaleString('en-US')})
         </button>
         {selected.size > 0 && (
           <button role="radio" aria-checked={effScope === 'selected'} className={effScope === 'selected' ? 'on' : ''} onClick={() => setScope('selected')}>
-            Selected ({selected.size.toLocaleString()})
+            Selected ({selected.size.toLocaleString('en-US')})
           </button>
         )}
         <button role="radio" aria-checked={effScope === 'remaining'} className={effScope === 'remaining' ? 'on' : ''} onClick={() => setScope('remaining')} title={`What Remaining would send: the ${remainingRule(w)}`}>
-          Remaining ({remainingN.toLocaleString()})
+          Remaining ({remainingN.toLocaleString('en-US')})
         </button>
       </span>
 
@@ -128,13 +128,13 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
             <li>
               <strong>Input:</strong> characters of the prompt, output schema and each {w.one}, divided by{' '}
               {e.input.basis === 'measured'
-                ? `${e.charsPerToken.toFixed(2)} characters per token, measured on ${cal.inputN.toLocaleString()} earlier result${cal.inputN === 1 ? '' : 's'} with this model (±5%).`
+                ? `${e.charsPerToken.toFixed(2)} characters per token, measured on ${cal.inputN.toLocaleString('en-US')} earlier result${cal.inputN === 1 ? '' : 's'} with this model (±5%).`
                 : `about ${e.charsPerToken} characters per token, a rule of thumb for English with this model’s tokenizer (−15% to +20%). It is replaced by a measured figure once this model has results in the study.`}
             </li>
             <li>
               <strong>Answer:</strong>{' '}
               {e.answer.basis === 'measured'
-                ? `average of ${cal.answerN.toLocaleString()} earlier result${cal.answerN === 1 ? '' : 's'} with this model and these fields (−20% to +30%).`
+                ? `average of ${cal.answerN.toLocaleString('en-US')} earlier result${cal.answerN === 1 ? '' : 's'} with this model and these fields (−20% to +30%${cal.answerN < MIN_MEASURED ? `; fewer than ${MIN_MEASURED}, so the range also spans the assumed figure` : ''}).`
                 : `assumed from the ${study.prompt.outputMode === 'structured' ? 'codebook (a few tokens per label or score, a sentence to a paragraph per free-text field)' : 'plain-text output mode'}: ${perText(e.answer)}.`}
             </li>
             <li>
@@ -142,8 +142,8 @@ export function CostEstimate({ selected, onClose }: { selected: Set<string>; onC
               {e.reasoning.basis === 'none'
                 ? 'none: this model runs without reasoning at this setting.'
                 : e.reasoning.basis === 'measured'
-                  ? `average of ${cal.reasoningN.toLocaleString()} earlier result${cal.reasoningN === 1 ? '' : 's'} with this model at ${e.effort} effort (−20% to +30%). Billed as output.`
-                  : `assumed for ${e.effort} effort: ${perText(e.reasoning)}. This is the least certain part; Test on 1 ${w.one} or a small random sample replaces it with a measured figure. Billed as output.`}
+                  ? `average of ${cal.reasoningN.toLocaleString('en-US')} earlier result${cal.reasoningN === 1 ? '' : 's'} with this model at ${e.effort} effort (−20% to +30%${cal.reasoningN < MIN_MEASURED ? `; fewer than ${MIN_MEASURED}, so the range also spans the assumed figure` : ''}). Billed as output.`
+                  : `assumed for ${e.effort} effort: ${perText(e.reasoning)}. This is the least certain part; a random sample of ${MIN_MEASURED} or more ${w.many} replaces it with a measured figure. Billed as output.`}
             </li>
             <li>
               <strong>Cache savings:</strong>{' '}

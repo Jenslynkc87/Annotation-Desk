@@ -276,6 +276,10 @@ export interface EstimateInput {
 // Spread around a measured mean: per-text lengths vary, but over a run they mostly even out.
 const MEASURED_LOW = 0.8;
 const MEASURED_HIGH = 1.3;
+/** Fewer earlier results than this: one long or short answer could set the figure, so the range also spans the assumed one. */
+export const MIN_MEASURED = 20;
+const measuredRange = (mean: number, n: number, assumed: readonly [number, number]): [number, number] =>
+  n >= MIN_MEASURED ? [mean * MEASURED_LOW, mean * MEASURED_HIGH] : [Math.min(mean * MEASURED_LOW, assumed[0]), Math.max(mean * MEASURED_HIGH, assumed[1])];
 // Spread around a characters-per-token figure: measured on this study, or a rule of thumb.
 const CPT_MEASURED: Range = { low: 0.95, high: 1.05 };
 const CPT_ASSUMED: Range = { low: 0.85, high: 1.2 };
@@ -292,14 +296,12 @@ export function estimateRun(inp: EstimateInput): Estimate {
   const reps = inp.replicates;
   const discount = inp.batch ? 0.5 : 1;
 
-  const [ansLow, ansHigh] = cal.answer !== null ? [cal.answer * MEASURED_LOW, cal.answer * MEASURED_HIGH] : assumedAnswerTokens(inp.prompt);
+  const assumedAnswer = assumedAnswerTokens(inp.prompt);
+  const [ansLow, ansHigh] = cal.answer !== null ? measuredRange(cal.answer, cal.answerN, assumedAnswer) : assumedAnswer;
   const assumedReasoning = ASSUMED_REASONING[effort] ?? ASSUMED_REASONING.medium;
   const noReasoning = effort === 'none';
-  const [reaLow, reaHigh] = noReasoning
-    ? [0, 0]
-    : cal.reasoning !== null
-      ? [cal.reasoning * MEASURED_LOW, cal.reasoning * MEASURED_HIGH]
-      : [assumedReasoning[0], Math.min(assumedReasoning[1], Math.max(0, model.maxOutputTokens - ansHigh))];
+  const assumedReasoningRange: [number, number] = [assumedReasoning[0], Math.min(assumedReasoning[1], Math.max(0, model.maxOutputTokens - ansHigh))];
+  const [reaLow, reaHigh] = noReasoning ? [0, 0] : cal.reasoning !== null ? measuredRange(cal.reasoning, cal.reasoningN, assumedReasoningRange) : assumedReasoningRange;
 
   // Prompt caching (Anthropic only): the fixed part is written once, then read at the cache price.
   const ttl: '5m' | '1h' = inp.batch ? '1h' : '5m';
@@ -308,7 +310,7 @@ export function estimateRun(inp: EstimateInput): Estimate {
   if (model.provider !== 'anthropic') cache = { assumed: false, reason: "OpenAI's cache prices are not built in, so no savings are counted" };
   else if (!inp.caching) cache = { assumed: false, reason: 'caching is off (Setup → Model)' };
   else if (cacheTokens < minCacheable(id))
-    cache = { assumed: false, reason: `the fixed part of the prompt (about ${fmtTokens(cacheTokens)} tokens) is shorter than the ${minCacheable(id).toLocaleString()} tokens this model caches` };
+    cache = { assumed: false, reason: `the fixed part of the prompt (about ${fmtTokens(cacheTokens)} tokens) is shorter than the ${minCacheable(id).toLocaleString('en-US')} tokens this model caches` };
   else if (inp.docs.length * reps < 2) cache = { assumed: false, reason: 'a single request cannot reuse the cache' };
   else cache = { assumed: true, tokensPerRequest: cacheTokens, saving: null, ttl };
 
