@@ -1123,7 +1123,7 @@ async function prepareRun(st: Study, req: RunRequest, key: string): Promise<{ ru
   if (batch) {
     const map: Record<string, [string, number]> = {};
     const items = tasks.map((t, i) => {
-      const customId = `r${i}`;
+      const customId = firstRequestName(run, i);
       map[customId] = [t.doc.id, t.replicate];
       return { customId, part: t.part };
     });
@@ -1177,7 +1177,7 @@ export function batchPlan(st: Study, docs: Doc[]): { mb: number; batches: number
   const items: BatchItem[] = [];
   for (const d of docs) {
     const part = adapter.buildRequestPart(renderMessageParts(st.prompt.userTemplate, d, st.prompt.subject), options, st.model.model);
-    for (let r = 1; r <= st.options.replicates; r++) items.push({ customId: `r${items.length}`, part });
+    for (let r = 1; r <= st.options.replicates; r++) items.push({ customId: firstRequestName({ id: '00000000' }, items.length), part });
   }
   const sizes = requestBytes(base, items);
   const limit = BATCH_LIMITS[st.model.provider];
@@ -1252,7 +1252,20 @@ type Lookup = {
 const fromUpload = (p: BatchPart, since: string | undefined) => !!since && (p.submittedAt === since || p.eitherRetry?.since === since);
 
 /** The start of the request names of a retry's batch (begun at `at`): t<time>_0, t<time>_1, … */
-const retryIdPrefix = (at: string) => `t${Date.parse(at).toString(36)}_`;
+/**
+ * Batch request names start with a tag of the run's own (from its id), so that a batch found at the provider only
+ * by its number of requests (after an upload got no answer) can be checked when collected: another run's batch,
+ * e.g. from another browser using the same key, carries other names, and nothing of it is stored here. (Runs from
+ * before November 2026 used r0, r1, … and t<time>_0, … without the tag.)
+ */
+const runIdTag = (run: Pick<Run, 'id'>) => run.id.replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+const firstRequestName = (run: Pick<Run, 'id'>, i: number) => `${runIdTag(run)}_r${i}`;
+const retryIdPrefix = (run: Pick<Run, 'id'>, at: string) => `${runIdTag(run)}_t${Date.parse(at).toString(36)}_`;
+/** Whether a request name is one of the retry made at `at` (also in the untagged form of earlier versions). */
+const isRetryRequest = (name: string, at: string) => {
+  const bare = `t${Date.parse(at).toString(36)}_`;
+  return name.startsWith(bare) || name.slice(name.indexOf('_') + 1).startsWith(bare);
+};
 
 /** A batch found for a retry (begun at `at`, its upload at `since`) that may instead be the earlier upload's. */
 const eitherOf = (at: string, since: string, earlier: NonNullable<UploadAttempt['earlier']>): NonNullable<BatchPart['eitherRetry']> => ({
@@ -1898,7 +1911,7 @@ export async function retryFailed(runId: string) {
     const map = { ...run.batch.map };
     // (Named after the retry's time, so they never repeat an earlier retry's names.)
     const items = tasks.map((t, i) => {
-      const customId = `${retryIdPrefix(retry.at)}${i}`;
+      const customId = `${retryIdPrefix(run, retry.at)}${i}`;
       map[customId] = [t.doc.id, t.replicate];
       return { customId, part: t.part };
     });
@@ -2266,13 +2279,22 @@ export async function checkBatch(runId: string, quiet = false) {
         p.error = `A batch ended with status "${st.status}" and its results could not be collected: ${describeApiError(e)}`;
       }
       if (!(await dbApi.getRun(runId))) break; // deleted meanwhile
+      // Answers whose request names are not this run's are never stored: a batch taken for a lost upload by its
+      // number of requests alone may be another run's (another browser or computer using the same key).
+      const foreign = lines.filter((l) => !run.batch!.map[l.customId]).length;
+      if (foreign && foreign === lines.length) {
+        lines = [];
+        p.error = `Batch ${p.batchId} is not this run’s: its requests have other names (it was found at ${adapter.label} by its number of requests after an upload got no answer, and is probably another browser’s or computer’s with the same key). None of its answers were stored; the ${words(run.snapshot.prompt).many} it was taken for can be sent again with Retry failed.`;
+      } else if (foreign) {
+        p.error = `${foreign} answer${foreign === 1 ? '' : 's'} in batch ${p.batchId} had request names that are not this run’s and ${foreign === 1 ? 'was' : 'were'} not stored.`;
+      }
       // The time the provider finished the batch (not when this page collected it).
       const endedAt = st.endedAt ?? nowIso();
       // A batch found for either of two uploads of the same requests (an earlier one, or a retry's): its answers'
       // request names tell which, so a retry is counted as sent only if its upload went up: this retry, or the one
       // that made the earlier upload (else that was the run's own upload: no retry).
       const either = p.eitherRetry;
-      const by = either && [either.at, either.earlierAt].find((at) => !!at && lines.some((l) => l.customId.startsWith(retryIdPrefix(at))));
+      const by = either && [either.at, either.earlierAt].find((at) => !!at && lines.some((l) => isRetryRequest(l.customId, at)));
       const byRetry = !!by && by === either?.at;
       let c: { ok: number; failed: number };
       try {

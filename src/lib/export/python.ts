@@ -213,7 +213,8 @@ def call_model(client, body):
             "cache_read_tokens": u.cache_read_input_tokens or 0,
             "cache_write_tokens": u.cache_creation_input_tokens or 0,
         }
-        stop = msg.stop_reason or ""
+        # A stream that ended before its last event has no stop reason: counted as cut off (as in Annotation Desk).
+        stop = msg.stop_reason or "incomplete (stream ended early)"
         category = getattr(getattr(msg, "stop_details", None), "category", None)
         if stop == "refusal" and category:
             stop += f" ({category})"
@@ -431,7 +432,8 @@ export function requirementsTxt(run: Run): string {
   return [
     '# Python packages needed by annotate.py. Install with:  pip install -r requirements.txt',
     `# Minimum versions the script was tested with; for exact reproduction, record the versions you used (pip freeze).`,
-    anthropic ? 'anthropic>=1.14.0' : 'openai>=3.31.0',
+    // (Below 2: the 2.x SDK sends a newer API version, on which Anthropic rejects any temperature; the app's requests use the 2023-06-01 version.)
+    anthropic ? 'anthropic>=1.14.0,<2' : 'openai>=3.31.0',
     '',
   ].join('\n');
 }

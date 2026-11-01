@@ -119,7 +119,8 @@ export const openaiAdapter: ProviderAdapter = {
     if (system.trim()) body.instructions = system;
     const reasoning: Record<string, unknown> = {};
     if (model.effort) reasoning.effort = model.effort;
-    if (model.reasoningSummary) reasoning.summary = 'auto';
+    // (Models without reasoning, e.g. gpt-4.1, reject a reasoning summary.)
+    if (model.reasoningSummary && !NO_REASONING.test(model.model)) reasoning.summary = 'auto';
     if (Object.keys(reasoning).length) body.reasoning = reasoning;
     if (outputSchema) {
       body.text = { format: { type: 'json_schema', name: 'annotation', schema: outputSchema, strict: true } };
