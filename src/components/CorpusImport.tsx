@@ -14,7 +14,7 @@ import {
 } from '../lib/import/parse';
 import { clearPlan, guessKeyColumn, matchLabels, ownLikeColumn, resultsTable } from '../lib/import/labels';
 import { templatePlaceholders } from '../lib/prompt';
-import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore } from '../lib/store';
+import { addDocs, addLabels, currentStudy, getState, isBusy, removeMetaColumn, toast, useStore, withRemoved } from '../lib/store';
 import { isEntries, words } from '../lib/subject';
 import { runName } from '../lib/view';
 import type { Doc, PromptSpec, Run } from '../lib/types';
@@ -540,7 +540,10 @@ function SheetNote({ table }: { table: ParsedTable }) {
 }
 
 function LabelsDialog({ entries, table, onDone }: { entries: boolean; table: ParsedTable; onDone: () => void }) {
-  const docs = useStore((s) => s.docs);
+  // (With removed texts kept for their runs: their labels still count in those runs' agreement.)
+  const activeDocs = useStore((s) => s.docs);
+  const removedDocs = useStore((s) => s.removedDocs);
+  const docs = useMemo(() => withRemoved(activeDocs, removedDocs), [activeDocs, removedDocs]);
   const runs = useStore((s) => s.runs);
   const prompt = useStore((s) => currentStudy(s)!.prompt);
   const saved = useStore((s) => currentStudy(s)!.savedPrompts);

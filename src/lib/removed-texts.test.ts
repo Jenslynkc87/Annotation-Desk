@@ -84,7 +84,7 @@ describe('deleting texts that a run used', () => {
     const unused = S().docs.find((d) => d.docId === 'a9')!.id;
     await store.removeDocs([unused]);
     expect(S().removedDocs).toEqual([]);
-    expect((await dbApi.getDocsForStudy(S().currentId!)).map((d) => d.docId)).toEqual(['a0', 'a1']);
+    expect((await dbApi.getDocsForStudy(S().currentId!)).map((d) => d.docId).sort()).toEqual(['a0', 'a1']);
   });
 
   it('gives a text added again (same name, identical text) its record back, so two runs compare on it', async () => {
@@ -100,13 +100,53 @@ describe('deleting texts that a run used', () => {
     expect(S().toasts.map((t) => t.text).some((t) => t.includes('had been deleted before'))).toBe(true);
   });
 
-  it('adds a changed text as a new one, keeping the removed one for its run', async () => {
+  it('adds a changed text as a new one under a suffixed name (names stay unique), keeping the removed one for its run', async () => {
     const run = await studyWithRun(1);
     await store.removeDocs(S().docs.map((d) => d.id));
     await store.addDocs([file(0, 'text 0, revised')]);
-    expect(S().docs.map((d) => [d.docId, d.text])).toEqual([['a0', 'text 0, revised']]);
+    expect(S().docs.map((d) => [d.docId, d.text])).toEqual([['a0_2', 'text 0, revised']]);
     expect(S().removedDocs.map((d) => d.text)).toEqual(['text 0']);
     expect(shownIn(run.id)).toEqual(['a0']);
+    // The original added again still comes back under its own name.
+    await store.addDocs([file(0)]);
+    expect(S().docs.map((d) => d.docId).sort()).toEqual(['a0', 'a0_2']);
+    expect(S().removedDocs).toEqual([]);
+  });
+
+  it('applies a removed column, a label sheet and a redrawn sample to removed texts too', async () => {
+    await studyWithRun(4);
+    const id = (name: string) => [...S().docs, ...S().removedDocs].find((d) => d.docId === name)!.id;
+    await store.addLabels(new Map(['a0', 'a1', 'a2', 'a3'].map((n) => [id(n), { gold: '1' }])));
+    await store.markSample('sample', 'validation', [id('a0'), id('a1')], 'Sample: validation (test)', 1);
+    await store.removeDocs([id('a0')]);
+    // A corrected sheet reaches the removed text; the column is then removed everywhere.
+    await store.addLabels(new Map([[id('a0'), { gold: '2' }]]));
+    expect(S().removedDocs[0].meta.gold).toBe('2');
+    await store.removeMetaColumn('gold');
+    expect(S().removedDocs[0].meta.gold).toBeUndefined();
+    // Redrawn without it: the removed text loses the mark, and doesn't bring it back when added again.
+    await store.markSample('sample', 'validation', [id('a2'), id('a3')], 'Sample: validation (test, redrawn)', 2);
+    expect(S().removedDocs[0].meta.sample).toBeUndefined();
+    await store.addDocs([file(0)]);
+    expect(S().docs.filter((d) => d.meta.sample === 'validation').map((d) => d.docId)).toEqual(['a2', 'a3']);
+    expect(S().docs.find((d) => d.docId === 'a0')!.meta.gold).toBeUndefined();
+  });
+
+  it('doesn’t reconnect while a run is being sent, and leaves the app free afterwards', async () => {
+    await studyWithRun(2);
+    const oldIds = S().docs.map((d) => d.id);
+    await dbApi.deleteDocs(oldIds);
+    await store.selectStudy(S().currentId!);
+    const reassign = vi.spyOn(dbApi, 'reassignDocs');
+    // Texts added again while a job holds the app: nothing is rewritten.
+    store.getState().submitting = 'busy';
+    await store.addDocs([file(0), file(1)]);
+    store.getState().submitting = '';
+    expect(reassign).not.toHaveBeenCalled();
+    // Once free (next time the study is opened), it is done, and the app is free again after it.
+    await store.selectStudy(S().currentId!);
+    await vi.waitFor(() => expect(S().runs[0].docIds).toEqual(S().docs.map((d) => d.id)));
+    expect(store.isBusy()).toBe(false);
   });
 
   it('keeps removed texts removed in a study backup and its copy', async () => {

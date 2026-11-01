@@ -571,7 +571,10 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
     toast(`Skipped ${twice.length.toLocaleString()} ${twice.length === 1 ? w.one : w.many} included twice in this addition (same name, identical ${what} and columns): ${names.slice(0, 3).join(', ')}${names.length > 3 ? ', …' : ''}.`);
   }
   if (!items.length) return true;
-  const taken = new Set(state.docs.map((d) => d.docId));
+  // Names in use: the study's, and those of removed texts kept for their runs (a changed text under such a name gets
+  // a suffix, so names stay unique in the exports). A removed text comes back only under a name no text here has.
+  const active = new Set(state.docs.map((d) => d.docId));
+  const taken = new Set([...state.docs, ...state.removedDocs].map((d) => d.docId));
   let order = state.docs.reduce((m, d) => Math.max(m, d.order), [...state.docs, ...state.removedDocs].reduce((m, d) => Math.max(m, d.order), 0));
   const t = nowIso();
   const renamed: string[] = [];
@@ -583,10 +586,10 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
   const restoredIds = new Set<string>();
   const restored: Doc[] = [];
   const docs: Doc[] = items.map((it) => {
-    const back = removed.find((d) => !restoredIds.has(d.id) && d.docId === it.docId.trim() && !taken.has(d.docId) && sameText(d.text, it.text));
+    const back = removed.find((d) => !restoredIds.has(d.id) && d.docId === it.docId.trim() && !active.has(d.docId) && sameText(d.text, it.text));
     if (back) {
       restoredIds.add(back.id);
-      taken.add(back.docId);
+      active.add(back.docId);
       order++;
       const { removedAt: _r, ...doc } = back;
       const again: Doc = { ...doc, meta: { ...back.meta, ...it.meta }, source: it.source, order, addedAt: t };
@@ -601,6 +604,7 @@ async function addDocsNow(items: NewItem[], studyId?: string): Promise<boolean> 
       docId = `${docId}_${k}`;
     }
     taken.add(docId);
+    active.add(docId);
     order++;
     return { id: uid(), studyId: cur.id, docId, text: it.text, meta: it.meta, source: it.source, order, addedAt: t };
   });
@@ -649,7 +653,8 @@ function rewriteFailed(what: string, docs: Doc[], e: unknown): string {
  * in it). Returns false if nothing could be saved.
  */
 export async function addLabels(updates: Map<string, Record<string, string>>, clear: Map<string, string[]> = new Map()): Promise<boolean> {
-  const changed = state.docs
+  // (Removed texts kept for their runs too: their labels still count in those runs' agreement.)
+  const changed = [...state.docs, ...state.removedDocs]
     .filter((d) => updates.has(d.id) || clear.has(d.id))
     .map((d) => {
       const meta = { ...d.meta, ...updates.get(d.id) };
@@ -664,7 +669,7 @@ export async function addLabels(updates: Map<string, Record<string, string>>, cl
     return false;
   }
   const byId = new Map(changed.map((d) => [d.id, d]));
-  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
+  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d), removedDocs: s.removedDocs.map((d) => byId.get(d.id) ?? d) }));
   const w = words(currentStudy()!.prompt);
   toast(`Updated the columns of ${changed.length} ${changed.length === 1 ? w.one : w.many}.`, 'success');
   return true;
@@ -672,7 +677,8 @@ export async function addLabels(updates: Map<string, Record<string, string>>, cl
 
 /** Remove a metadata column (e.g. labels added by mistake) from every text of the open study. Texts are untouched. */
 export async function removeMetaColumn(column: string): Promise<boolean> {
-  const changed = state.docs
+  // (Also from removed texts kept for their runs: gone from the study, gone from its runs' figures and exports.)
+  const changed = [...state.docs, ...state.removedDocs]
     .filter((d) => column in d.meta)
     .map((d) => {
       const { [column]: _gone, ...meta } = d.meta;
@@ -686,7 +692,7 @@ export async function removeMetaColumn(column: string): Promise<boolean> {
     return false;
   }
   const byId = new Map(changed.map((d) => [d.id, d]));
-  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d) }));
+  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d), removedDocs: s.removedDocs.map((d) => byId.get(d.id) ?? d) }));
   toast(`Removed the column "${column}" from ${changed.length} ${changed.length === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many}.`, 'success');
   return true;
 }
@@ -703,10 +709,11 @@ export async function markSample(column: string, value: string, ids: string[], n
   if (!cur) return false;
   const chosen = new Set(ids);
   const changed: Doc[] = [];
-  for (const d of state.docs) {
+  // (A removed text is never drawn: an earlier draw's mark on it is removed too, so it doesn't come back with it.)
+  for (const d of [...state.docs, ...state.removedDocs]) {
     const marked = d.meta[column] === value;
-    if (chosen.has(d.id) && !marked) changed.push({ ...d, meta: { ...d.meta, [column]: value } });
-    else if (!chosen.has(d.id) && marked) {
+    if (chosen.has(d.id) && !marked && !d.removedAt) changed.push({ ...d, meta: { ...d.meta, [column]: value } });
+    else if ((!chosen.has(d.id) || d.removedAt) && marked) {
       const { [column]: _old, ...rest } = d.meta;
       changed.push({ ...d, meta: rest });
     }
@@ -720,7 +727,7 @@ export async function markSample(column: string, value: string, ids: string[], n
     return false;
   }
   const byId = new Map(changed.map((d) => [d.id, d]));
-  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d), studies: s.studies.map((x) => (x.id === next.id ? next : x)) }));
+  set((s) => ({ docs: s.docs.map((d) => byId.get(d.id) ?? d), removedDocs: s.removedDocs.map((d) => byId.get(d.id) ?? d), studies: s.studies.map((x) => (x.id === next.id ? next : x)) }));
   const w = words(next.prompt);
   toast(`Marked ${ids.length} ${ids.length === 1 ? w.one : w.many} as ${column} = ${value} (seed ${seed}). The rule and seed are in the Excel Settings sheet and the supplementary metadata.`, 'success');
   return true;
@@ -803,20 +810,31 @@ export async function reconnectLostTexts(): Promise<void> {
       }
     }
   } catch {
+    lookedFor.delete(studyId);
     return;
   }
   const found = matchLostTexts(lost, [...state.docs, ...state.removedDocs]);
-  if (!found.size || state.currentId !== studyId || isBusy() || buildingFor(studyId)) return;
+  // (Checked and claimed at once, with nothing in between: no run, Retry failed, delete or batch check can start while
+  // the results and runs are rewritten and read again, which would save a run's old record over the new one.)
+  if (!found.size) return;
+  if (state.currentId !== studyId || isBusy() || buildingFor(studyId) || checking.size) {
+    // (Tried again the next time the study is opened or texts are added.)
+    lookedFor.delete(studyId);
+    return;
+  }
+  set({ submitting: 'Reconnecting earlier results…' });
   let moved = 0;
   try {
     moved = await dbApi.reassignDocs(studyId, [...found]);
+    // (Read again as when the study is opened, also if only a run's list of texts changed.)
+    if (state.currentId === studyId) await selectStudy(studyId, true);
   } catch (e) {
     toast(`Earlier results of deleted texts could not be reconnected: ${storageError(e)}.`, 'error', true);
     return;
+  } finally {
+    set({ submitting: '' });
   }
   if (!moved || state.currentId !== studyId) return;
-  // (Read again as when the study is opened.)
-  await selectStudy(studyId);
   const n = new Set([...found.values()]).size;
   toast(`Reconnected ${moved.toLocaleString()} earlier result${moved === 1 ? '' : 's'} to ${n.toLocaleString()} ${n === 1 ? words(currentStudy()!.prompt).one : words(currentStudy()!.prompt).many} of this study: the ${words(currentStudy()!.prompt).many} had been deleted and added again, which an earlier version of this site didn’t connect.`, 'success', true);
 }
