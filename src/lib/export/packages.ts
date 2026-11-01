@@ -9,7 +9,7 @@ import { buildDocViews, replacedAttempts, retriedRequests, retryInProgress, retr
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
-import { dateStamp, nowIso, slug } from '../util';
+import { dateStamp, nowIso, sleep, slug } from '../util';
 import { buildBackup } from './backup';
 import { fillScript, requirementsTxt, SCRIPT_TEMPLATE, scriptValues } from './python';
 import {
@@ -28,7 +28,7 @@ import {
   runSummaryRows,
   runTag,
   sharesNumber,
-  toCsvBlob,
+  toCsvBlobPaced,
   type AgreementRow,
   type Row,
 } from './tables';
@@ -452,7 +452,7 @@ async function addRunLogs(zip: ZipFolder, run: Run, docs: Doc[], results: Result
     return { l, id, doc: id.slice(run.id.length + 1, cut), replicate: Number(id.slice(cut + 1)), attempt: n ? Number(n) : 0 };
   };
   let pending: ReturnType<typeof parse>[] = [];
-  const flush = () => {
+  const flush = async () => {
     if (!pending.length) return;
     // The current attempt's log has no number: it is the result's attempt, i.e. after the replaced ones.
     for (const x of pending)
@@ -462,8 +462,8 @@ async function addRunLogs(zip: ZipFolder, run: Run, docs: Doc[], results: Result
     const head = (x: (typeof pending)[number]) => ({ doc_id: docById.get(x.doc) ?? `(deleted ${x.doc})`, replicate: x.replicate, attempt: x.attempt });
     parts.push({
       doc: pending[0].doc,
-      requests: jsonlBlob(pending.map((x) => ({ ...head(x), request: requestAsSent(run, x.l, x.attempt) }))),
-      responses: jsonlBlob(
+      requests: await jsonlBlob(pending.map((x) => ({ ...head(x), request: requestAsSent(run, x.l, x.attempt) }))),
+      responses: await jsonlBlob(
         // (A replaced attempt's outcome, with the reason an answer could not be read, as in the CSVs' parse_error.)
         pending.map((x) => ({
           ...head(x),
@@ -479,11 +479,11 @@ async function addRunLogs(zip: ZipFolder, run: Run, docs: Doc[], results: Result
     for await (const page of logPagesForRun(run.id)) {
       for (const l of page) {
         const x = parse(l);
-        if (pending.length && pending[0].doc !== x.doc) flush();
+        if (pending.length && pending[0].doc !== x.doc) await flush();
         pending.push(x);
       }
     }
-    flush();
+    await flush();
     // Texts deleted from the study since: last.
     const at = (doc: string) => position.get(doc) ?? docs.length;
     parts.sort((p, q) => at(p.doc) - at(q.doc));
@@ -496,11 +496,14 @@ async function addRunLogs(zip: ZipFolder, run: Run, docs: Doc[], results: Result
  * JSON Lines as a Blob, one line per item, folded into a Blob every few MB: the whole file never has to fit in one
  * string, nor all its lines be in memory at once (a full run's logs, or the corpus, hold every text).
  */
-function jsonlBlob(items: unknown[]): Blob {
+async function jsonlBlob(items: unknown[]): Promise<Blob> {
   const parts: Blob[] = [];
   let lines: string[] = [];
   let length = 0;
+  let n = 0;
   for (const x of items) {
+    // (A pause every 200 lines, so the page stays responsive: each line may hold a whole text.)
+    if (++n % 200 === 0) await sleep(0);
     const line = JSON.stringify(x) + '\n';
     lines.push(line);
     length += line.length;
@@ -558,12 +561,12 @@ export async function buildResearchRepo(data: ExportData, opts: ResearchOptions)
   // Study backup has them.) The results as stored, read from the database.
   await root.file('study-backup.json', () => buildBackup(d.study, d.docs, d.runs, false));
   const corpus = root.folder('corpus');
-  await corpus.file('corpus.csv', () => toCsvBlob(corpusRows(d.docs, true)));
+  await corpus.file('corpus.csv', () => toCsvBlobPaced(corpusRows(d.docs, true)));
   await corpus.file('corpus.jsonl', () => jsonlBlob(d.docs.map((x) => ({ doc_id: x.docId, text: x.text, source: x.source, meta: x.meta }))));
 
   const results = root.folder('results');
-  await results.file('runs.csv', () => toCsvBlob(runSummaryRows(d.runs, d.results)));
-  await results.file('results_all_runs_long.csv', () => toCsvBlob(resultsLong(d.study, d.runs, d.docs, d.results, { rationale: true, reasoning: true })));
+  await results.file('runs.csv', () => toCsvBlobPaced(runSummaryRows(d.runs, d.results)));
+  await results.file('results_all_runs_long.csv', () => toCsvBlobPaced(resultsLong(d.study, d.runs, d.docs, d.results, { rationale: true, reasoning: true })));
 
   // One folder per prompt version.
   const prompts = root.folder('prompts');
@@ -580,15 +583,19 @@ export async function buildResearchRepo(data: ExportData, opts: ResearchOptions)
     const f = runsDir.folder(folders.get(run.id)!);
     await f.file('run.json', JSON.stringify(run, null, 2));
     const rs = d.results.filter((r) => r.runId === run.id);
-    await f.file('results_long.csv', () => toCsvBlob(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
-    await f.file('results_wide.csv', () => toCsvBlob(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
+    await f.file('results_long.csv', () => toCsvBlobPaced(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
+    await f.file('results_wide.csv', () => toCsvBlobPaced(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
     if (opts.includeLogs) await addRunLogs(f, run, d.docs, d.results);
   }
   const perRun = await agreement();
   const agr = d.runs.flatMap((run, i) => agreementRows(perRun[i], runName(run, d.runs)));
-  if (agr.length) await results.file('agreement.csv', () => toCsvBlob(agr));
+  if (agr.length) await results.file('agreement.csv', () => toCsvBlobPaced(agr));
 
-  const latest = finished[finished.length - 1];
+  // The workbook and script are for the main run: the one over the most texts, the latest of those (not a "Test on
+  // 1" or sample run made after it).
+  const textsOf = (r: Run) => new Set(d.results.filter((x) => x.runId === r.id).map((x) => x.docId)).size;
+  const most = Math.max(0, ...finished.map(textsOf));
+  const latest = [...finished].reverse().find((r) => textsOf(r) === most);
   if (latest) {
     // (The latest run's agreement as computed above, not again.)
     const own = perRun[d.runs.indexOf(latest)];
@@ -623,12 +630,12 @@ export async function buildSupplementary(data: ExportData, run: Run, opts: Suppl
   await root.file('metadata.json', JSON.stringify(meta, null, 2));
   await promptFiles(root.folder('prompt'), run);
   const res = root.folder('results');
-  await res.file('results.csv', () => toCsvBlob(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
-  await res.file('results_by_replicate.csv', () => toCsvBlob(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
+  await res.file('results.csv', () => toCsvBlobPaced(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
+  await res.file('results_by_replicate.csv', () => toCsvBlobPaced(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
   const [agr] = await agreement();
-  if (agr.length) await res.file('agreement.csv', () => toCsvBlob(agreementRows(agr, runName(run, d.runs))));
-  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlob(corpusRows(runDocs, true)));
+  if (agr.length) await res.file('agreement.csv', () => toCsvBlobPaced(agreementRows(agr, runName(run, d.runs))));
+  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(corpusRows(runDocs, true)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
   await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
   await root.file('README.md', () => supplementaryReadme(d, run, meta, agr, opts));
@@ -1083,7 +1090,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     ['`results/agreement.csv`', 'Agreement between model fields and matching metadata columns (only if such columns exist)'],
   );
   if (latest) {
-    rows.push([`\`results/results_${folders.get(latest.id)}.xlsx\``, 'Excel workbook for the latest run']);
+    rows.push([`\`results/results_${folders.get(latest.id)}.xlsx\``, `Excel workbook for run #${runName(latest, d.runs)}, the run over the most ${w.many} (the latest of those)`]);
     rows.push([
       '`scripts/`',
       `Python script reproducing run #${runName(latest, d.runs)} (\`annotate.py\`) and its template with placeholders. \`corpus/corpus.csv\` holds every ${w.one} in the study: to reproduce that run, use its ${w.many} (the doc_ids in \`runs/${folders.get(latest.id)}/results_long.csv\`)`,

@@ -167,3 +167,26 @@ describe('second audit (Oct 2026)', () => {
     expect(pyStr('"""\n"""')).toBe('"""\\"""\n\\"\\"\\""""');
   });
 });
+
+describe('per-request tables (Nov 2026 audit)', () => {
+  it('leave the values of a failed request blank (a refused or cut-off answer is no label)', () => {
+    const refused = { ...mkResult(1, { response: '{"race": 2, "race_explanation": "x"}' }), status: 'error' as const, stopReason: 'refusal', error: 'Incomplete answer (stop reason: refusal)' };
+    const row = resultsLong({ name: 'S' } as never, [mkRun({ ...DEFAULT_PROMPT, outputMode: 'text' })], [doc()], [refused], { rationale: true, reasoning: false })[0];
+    expect([row.status, row.race, row.race_explanation]).toEqual(['error', '', '']);
+    // The raw answer stays, to look at.
+    expect(row.response).toBe('{"race": 2, "race_explanation": "x"}');
+    const p = { ...DEFAULT_PROMPT, variables: [{ name: 'race', type: 'ordinal' as const, values: ['-3', '-2', '-1', '0', '1', '2', '3'], description: '' }] };
+    const cut = { ...mkResult(1, { race: '2' }), status: 'error' as const, stopReason: 'max_tokens', rationale: 'because' };
+    const s = resultsLong({ name: 'S' } as never, [mkRun(p)], [doc()], [cut], { rationale: true, reasoning: false })[0];
+    expect([s.race, s.rationale]).toEqual(['', '']);
+  });
+});
+
+describe('paced CSV writing (Nov 2026 audit)', () => {
+  it('gives exactly the same file as writing it at once', async () => {
+    const { toCsvBlob, toCsvBlobPaced } = await import('./export/tables');
+    const rows = Array.from({ length: 1234 }, (_, i) => ({ doc_id: `d${i}`, text: i % 7 ? `line\r\n"quoted", ${i}` : '', score: i % 5 - 2 }));
+    expect(await (await toCsvBlobPaced(rows)).text()).toBe(await toCsvBlob(rows).text());
+    expect(await (await toCsvBlobPaced([])).text()).toBe(await toCsvBlob([]).text());
+  });
+});

@@ -7,6 +7,7 @@ import { thinkingLabel } from '../providers/anthropic';
 import { supportsExplicitCaching } from '../providers/openai';
 import type { Doc, Result, Run, Study } from '../types';
 import { buildDocViews, replacedAttempts, retriedRequests, runInProgress, runName, runTag, sharesNumber, type DocView, type RetriedRequests } from '../view';
+import { sleep } from '../util';
 
 export type Row = Record<string, string | number | null>;
 
@@ -23,23 +24,46 @@ export function toCsv(rows: Row[], columns?: string[]): string {
 export function toCsvBlob(rows: Row[], columns?: string[]): Blob {
   const cols = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
   if (!rows.length || !cols.length) return new Blob([toCsv(rows, columns)]);
+  const out = csvPieces(cols);
+  rows.forEach((r, i) => out.add(r, i));
+  return out.done();
+}
+
+/** The same as `toCsvBlob`, with a pause every 500 rows so the page stays responsive while a full corpus is written. */
+export async function toCsvBlobPaced(rows: Row[], columns?: string[]): Promise<Blob> {
+  const cols = columns ?? [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  if (!rows.length || !cols.length) return new Blob([toCsv(rows, columns)]);
+  const out = csvPieces(cols);
+  for (let i = 0; i < rows.length; i++) {
+    out.add(rows[i], i);
+    if (i % 500 === 499) await sleep(0);
+  }
+  return out.done();
+}
+
+/** CSV lines folded into a Blob every few MB (a whole corpus never has to fit in one string). */
+function csvPieces(cols: string[]) {
   const parts: Blob[] = [];
   let lines: string[] = [];
   let length = 0;
-  rows.forEach((r, i) => {
-    const data = [cols.map((c) => r[c] ?? '')];
-    // The header with the first row; then each row after a line break, as Papa joins them.
-    const line = i ? '\r\n' + Papa.unparse({ fields: cols, data }, { header: false }) : '﻿' + Papa.unparse({ fields: cols, data });
-    lines.push(line);
-    length += line.length;
-    if (length >= 4_000_000) {
+  return {
+    add(r: Row, i: number) {
+      const data = [cols.map((c) => r[c] ?? '')];
+      // The header with the first row; then each row after a line break, as Papa joins them.
+      const line = i ? '\r\n' + Papa.unparse({ fields: cols, data }, { header: false }) : '﻿' + Papa.unparse({ fields: cols, data });
+      lines.push(line);
+      length += line.length;
+      if (length >= 4_000_000) {
+        parts.push(new Blob(lines));
+        lines = [];
+        length = 0;
+      }
+    },
+    done() {
       parts.push(new Blob(lines));
-      lines = [];
-      length = 0;
-    }
-  });
-  parts.push(new Blob(lines));
-  return new Blob(parts);
+      return new Blob(parts);
+    },
+  };
 }
 
 export function metaColumns(docs: Doc[]): string[] {
@@ -178,9 +202,15 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       replicate: r.replicate,
       status: r.status,
     };
-    for (const f of outputFields(run.snapshot.prompt)) row[fieldColumn(run, f)] = isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
-    if (isText(r)) Object.assign(row, jsonColumns(jsonKeys, r.values[TEXT_RESPONSE_KEY]));
-    if (opts.rationale) row.rationale = r.rationale;
+    // A failed request (refused, cut off, unreadable) has no labels: its value columns stay blank, so a table of
+    // requests can't be averaged with them by mistake. A plain-text run keeps its raw answer (response) to look at.
+    const usable = r.status === 'ok';
+    for (const f of outputFields(run.snapshot.prompt)) {
+      const keep = usable || (isText(r) && f === TEXT_RESPONSE_KEY);
+      row[fieldColumn(run, f)] = !keep ? '' : isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
+    }
+    if (isText(r)) Object.assign(row, jsonColumns(jsonKeys, usable ? r.values[TEXT_RESPONSE_KEY] : undefined));
+    if (opts.rationale) row.rationale = usable ? r.rationale : '';
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
     Object.assign(row, {
       parse_error: r.parseError ?? '',

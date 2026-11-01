@@ -1,7 +1,7 @@
 // Full-fidelity study backup (re-importable into Annotation Desk).
 import * as dbApi from '../db';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
-import { nowIso, uid } from '../util';
+import { nowIso, sleep, uid } from '../util';
 
 export const BACKUP_FORMAT = 'annotation-desk-study';
 
@@ -63,11 +63,13 @@ export async function buildBackup(study: Study, docs: Doc[], runs: Run[], includ
   // (The texts too, a few hundred at a time: a full corpus's are about 500 million characters.)
   await section(
     'docs',
-    (add) => {
+    async (add) => {
       for (let i = 0; i < docs.length; i += 200) {
         const start = parts.length;
         docs.slice(i, i + 200).forEach(add);
         parts.splice(start, parts.length - start, new Blob(parts.slice(start)));
+        // (A pause between pieces, so the page stays responsive while a large corpus is written.)
+        await sleep(0);
       }
     },
     false,
