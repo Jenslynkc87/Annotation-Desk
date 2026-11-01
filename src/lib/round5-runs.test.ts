@@ -573,6 +573,9 @@ describe('review: lost uploads, retries and save marks, in combination', () => {
     const { p, runId } = await lostUpload();
     const originalStudy = store.currentStudy()!;
     const backup = await backupNow();
+    // (An upload is known by its start time: on a fast machine the retry's upload could otherwise start in the same
+    // millisecond as the first, which in real use, seconds apart at least, can't happen.)
+    await new Promise((r) => setTimeout(r, 5));
     // In the original, a retry whose lookup fails and whose upload never arrives.
     p.list.mockRejectedValueOnce(connectionError()).mockRejectedValueOnce(connectionError());
     p.uploads(() => connectionError());
