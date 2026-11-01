@@ -3,7 +3,7 @@ import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceho
 import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
-import { buildSnapshot, currentStudy, getState, loadModels, updateStudy, useStore } from '../lib/store';
+import { buildSnapshot, currentStudy, getState, loadModels, setScoreScale, updateStudy, useStore } from '../lib/store';
 import { samePromptAnyKind, sharedPrompts, upsertSavedPrompt, type SharedPrompt } from '../lib/savedPrompts';
 import type { ProviderId, SavedPrompt, Variable, VariableType } from '../lib/types';
 import { builtInPrice, PRICES_AS_OF, setPriceOverride, usePriceOverrides } from '../lib/pricing';
@@ -138,7 +138,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
     .filter(Boolean)
     .join(' · ');
   const outputSummary =
-    p.outputMode === 'text' ? 'Plain text' : `${p.variables.length} field${p.variables.length === 1 ? '' : 's'}: ${p.variables.map((v) => v.name).join(', ')}`;
+    p.outputMode === 'text' ? `Plain text${study.scoreScale ? ` · scores ${study.scoreScale.min} to ${study.scoreScale.max}` : ''}` : `${p.variables.length} field${p.variables.length === 1 ? '' : 's'}: ${p.variables.map((v) => v.name).join(', ')}`;
   const runSummary = [`${o.replicates}× per ${w.one}`, o.caching ? 'caching on' : 'caching off'].join(' · ');
 
   return (
@@ -388,7 +388,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
               : 'The whole reply is stored as one column.'}
           </div>
         </div>
-        {p.outputMode === 'structured' && <VariableEditor />}
+        {p.outputMode === 'structured' ? <VariableEditor /> : <ScoreScaleField />}
       </Section>
 
       <Section id="run" title="Run options" summary={runSummary}>
@@ -522,6 +522,57 @@ function SavedPrompts() {
           </>
         )}
       </Menu>
+    </div>
+  );
+}
+
+/**
+ * Plain-text output: the scale of the scores in JSON answers (e.g. −3 to 3), for the statistics only. Without it, the
+ * scale is the range of scores the model gave, which leaves out ends nobody used (and lowers Gwet's AC1/AC2).
+ */
+function ScoreScaleField() {
+  const cur = useStore((s) => currentStudy(s)!.scoreScale);
+  const [draft, setDraft] = useState<{ min: string; max: string } | null>(null);
+  const shown = draft ?? { min: cur ? String(cur.min) : '', max: cur ? String(cur.max) : '' };
+  const lo = toNumber(shown.min);
+  const hi = toNumber(shown.max);
+  const empty = !shown.min.trim() && !shown.max.trim();
+  const valid = Number.isInteger(lo) && Number.isInteger(hi) && lo < hi && hi - lo <= 100;
+  // Saved once both ends are given (or both cleared), when leaving the boxes; a half-typed scale stays as typed.
+  const commit = () => {
+    if (empty) {
+      if (cur) void setScoreScale(null);
+      setDraft(null);
+    } else if (valid) {
+      if (!cur || cur.min !== lo || cur.max !== hi) void setScoreScale({ min: lo, max: hi });
+      setDraft(null);
+    }
+  };
+  const box = (which: 'min' | 'max') => (
+    <input
+      className="input small"
+      style={{ width: 64 }}
+      inputMode="numeric"
+      aria-label={which === 'min' ? 'Lowest score' : 'Highest score'}
+      placeholder={which === 'min' ? '−3' : '3'}
+      value={shown[which]}
+      onChange={(e) => setDraft({ ...shown, [which]: e.target.value })}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+    />
+  );
+  return (
+    <div className="field" style={{ marginTop: 12 }}>
+      <span className="label">Scale of the scores (for the statistics)</span>
+      <div className="row" style={{ gap: 8 }}>
+        from {box('min')} to {box('max')}
+      </div>
+      {!empty && !valid && <div className="hint err">Give two whole numbers, the lowest first (e.g. −3 to 3).</div>}
+      <div className="hint">
+        If the answers are JSON with scores (e.g. "race": −2), give their scale. Agreement then uses all of it, as for an ordinal field: Gwet’s AC1/AC2
+        count every point, and a number off the scale (e.g. 7) is left out and reported. Empty: the range of scores the model gave. Not sent to the
+        model; applies to every plain-text run of this study, also earlier ones.
+      </div>
     </div>
   );
 }

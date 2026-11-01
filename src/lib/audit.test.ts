@@ -190,3 +190,42 @@ describe('paced CSV writing (Nov 2026 audit)', () => {
     expect(await (await toCsvBlobPaced([])).text()).toBe(await toCsvBlob([]).text());
   });
 });
+
+describe('the scale of plain-text scores (Nov 2026 audit)', () => {
+  const text = { ...DEFAULT_PROMPT, outputMode: 'text' as const };
+  // The statistics auditor's example: no text got ±3 (or −2), so the range seen is −1…2.
+  const a = [...Array(12).fill('0'), '1', '1', '-1', '1', '2', '0', '0', '-1'];
+  const b = [...Array(12).fill('0'), '1', '0', '-1', '2', '2', '1', '-1', '0'];
+  const viewsOf = (run: Run) =>
+    a.map((x, i) => {
+      const r = { ...mkResult(1, { response: `{"race": ${x}}` }), id: `r:d${i}:1`, docId: `d${i}` };
+      return { run, results: [r], values: r.values, consistency: {}, rationale: '', status: 'ok' as const };
+    });
+  const scale = ['-3', '-2', '-1', '0', '1', '2', '3'];
+  const stats = (run: Run) => {
+    const f = comparableFields(run, viewsOf(run))[0];
+    return { f, s: agreement(a, b, f.level, f.allowed, 1, { scaleSeen: f.scaleSeen, range: f.range }) };
+  };
+  it('set: compared on the whole scale, exactly as an ordinal codebook field', () => {
+    const { f, s } = stats({ ...mkRun(text), scoreScale: { min: -3, max: 3 } });
+    expect([f.allowed, f.scaleSeen, f.range]).toEqual([scale, undefined, [-3, 3]]);
+    const codebook = agreement(a, b, 'ordinal', scale);
+    expect(s.gwetAC2Linear).toBeCloseTo(codebook.gwetAC2Linear!, 12);
+    expect(s.gwetAC1).toBeCloseTo(codebook.gwetAC1!, 12);
+    expect(s.gwetAC2Linear).toBeCloseTo(0.936, 3);
+    expect(s.midpoint).toBe(0);
+  });
+  it('not set: the range seen (lower AC1/AC2 here), as before', () => {
+    const { f, s } = stats(mkRun(text));
+    expect(f.scaleSeen).toBe(true);
+    expect(s.gwetAC2Linear).toBeCloseTo(0.867, 3);
+  });
+  it('a field whose answers are mostly off the scale (e.g. a 0–100 confidence) keeps its own range', () => {
+    const run = { ...mkRun(text), scoreScale: { min: -3, max: 3 } };
+    const views = a.map((_, i) => {
+      const r = { ...mkResult(1, { response: `{"confidence": ${50 + i}}` }), id: `r:d${i}:1`, docId: `d${i}` };
+      return { run, results: [r], values: r.values, consistency: {}, rationale: '', status: 'ok' as const };
+    });
+    expect(comparableFields(run, views)[0].scaleSeen).toBe(true);
+  });
+});

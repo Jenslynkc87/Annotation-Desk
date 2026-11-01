@@ -65,6 +65,12 @@ export interface SavedPrompt {
   prompt: PromptSpec;
 }
 
+/** The scale of the scores in plain-text JSON answers, e.g. −3 to 3: for the statistics only (never sent). */
+export interface ScoreScale {
+  min: number;
+  max: number;
+}
+
 export interface Study {
   id: string;
   name: string;
@@ -75,6 +81,9 @@ export interface Study {
   options: RunOptions;
   prompt: PromptSpec;
   savedPrompts?: SavedPrompt[];
+  /** Plain-text runs: the scale their scores are compared on (as a codebook's would be); absent: the range seen.
+   *  Copied onto each plain-text run of the study (`Run.scoreScale`), also those made before it was set. */
+  scoreScale?: ScoreScale;
   /** Set while a backup is being imported into this study; a study still marked is a partial import. */
   importIncomplete?: boolean;
 }
@@ -116,6 +125,8 @@ export interface Run {
   studyId: string;
   number: number; // 1, 2, 3 … within the study
   label: string;
+  /** Plain-text runs: the study's scale for the statistics (`Study.scoreScale`), kept in step with it. */
+  scoreScale?: ScoreScale;
   createdAt: string;
   finishedAt: string | null;
   mode: 'sync' | 'batch';

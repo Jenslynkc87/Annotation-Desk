@@ -20,6 +20,7 @@ import {
   type Run,
   type RunOptions,
   type RunSnapshot,
+  type ScoreScale,
   type Study,
   type UploadAttempt,
   type Usage,
@@ -395,6 +396,36 @@ export async function selectStudy(id: string, afterDelete = false) {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 const dirty = new Set<string>();
 /** Change the open study, or with `id` another one (e.g. deleting a saved prompt kept there). */
+/**
+ * The scale of the scores in plain-text answers, for the statistics (null: the range seen). Set on the study and on
+ * every plain-text run of it, also those made before: it is how they are compared, not what was sent.
+ */
+export async function setScoreScale(scale: ScoreScale | null) {
+  const st = currentStudy();
+  if (!st) return;
+  updateStudy((s) => {
+    if (scale) s.scoreScale = scale;
+    else delete s.scoreScale;
+  });
+  const runs = state.runs.filter((r) => r.studyId === st.id && r.snapshot.prompt.outputMode === 'text');
+  const changed: Run[] = [];
+  for (const r of runs) {
+    const stored = await dbApi.getRun(r.id);
+    if (!stored) continue;
+    const next: Run = { ...stored };
+    if (scale) next.scoreScale = scale;
+    else delete next.scoreScale;
+    try {
+      await dbApi.putRun(next);
+      changed.push(next);
+    } catch (e) {
+      toast(`The scale could not be saved on run ${runLabel(r)}: ${storageError(e)}`, 'error', true);
+    }
+  }
+  const byId = new Map(changed.map((r) => [r.id, r]));
+  set((s) => ({ runs: s.runs.map((r) => (byId.has(r.id) ? { ...r, scoreScale: byId.get(r.id)!.scoreScale } : r)) }));
+}
+
 export function updateStudy(mutate: (s: Study) => void, id?: string) {
   const cur = id ? state.studies.find((x) => x.id === id) : currentStudy();
   if (!cur) return;
@@ -1040,8 +1071,13 @@ function incompleteMessage(rawText: string, stopReason: string): string {
 /** Store a run. Its name is kept as stored (it may have been renamed while the run was going), unless renaming. */
 async function saveRun(run: Run, rename = false) {
   if (!rename) {
+    // Kept as stored: the name (renamed while the run was going) and the study's scale for scores (set meanwhile).
     const stored = await dbApi.getRun(run.id);
-    if (stored) run.label = stored.label;
+    if (stored) {
+      run.label = stored.label;
+      if (stored.scoreScale) run.scoreScale = stored.scoreScale;
+      else delete run.scoreScale;
+    }
   }
   await dbApi.putRun(run);
   // The study may have been switched while a batch was being collected: only the open study's runs are in view.
@@ -1117,6 +1153,7 @@ async function prepareRun(st: Study, req: RunRequest, key: string): Promise<{ ru
     snapshot,
     batch: null,
     error: null,
+    ...(st.prompt.outputMode === 'text' && st.scoreScale ? { scoreScale: st.scoreScale } : {}),
   };
   const tasks = buildTasks(run, () => true);
 

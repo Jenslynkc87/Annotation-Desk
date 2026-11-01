@@ -106,3 +106,27 @@ describe('batch request names (Nov 2026 audit)', () => {
     expect(store.retryableCount(run, store.getState().results, store.getState().docs)).toBe(3);
   });
 });
+
+describe('the scale of plain-text scores reaches every plain-text run of the study (Nov 2026 audit)', () => {
+  it('is set on earlier runs and new ones, kept when a run is saved, and cleared again', async () => {
+    const ids = await freshBatchStudy(2);
+    store.updateStudy((s) => void (s.options.batch = false));
+    vi.spyOn(anthropicAdapter, 'send').mockResolvedValue(outcome('{"race": 1}'));
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const first = store.getState().runs.at(-1)!.id;
+    expect(store.getState().runs.at(-1)!.scoreScale).toBeUndefined();
+    await store.setScoreScale({ min: -3, max: 3 });
+    expect(store.currentStudy()!.scoreScale).toEqual({ min: -3, max: 3 });
+    expect((await dbApi.getRun(first))!.scoreScale).toEqual({ min: -3, max: 3 });
+    expect(store.getState().runs.find((r) => r.id === first)!.scoreScale).toEqual({ min: -3, max: 3 });
+    // A new run starts with it; renaming (a save) keeps it.
+    await store.startRun({ docIds: ids, scope: 'all' });
+    const second = store.getState().runs.at(-1)!.id;
+    expect((await dbApi.getRun(second))!.scoreScale).toEqual({ min: -3, max: 3 });
+    await store.renameRun(second, 'pilot');
+    expect((await dbApi.getRun(second))!.scoreScale).toEqual({ min: -3, max: 3 });
+    await store.setScoreScale(null);
+    expect((await dbApi.getRun(first))!.scoreScale).toBeUndefined();
+    expect(store.getState().runs.every((r) => r.scoreScale === undefined)).toBe(true);
+  });
+});

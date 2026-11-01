@@ -68,11 +68,18 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       });
     }
   }
+  // The study's scale for scores (e.g. −3 to 3), set by the owner: a field whose answers mostly lie on it is compared
+  // on it, as on a codebook's ordinal scale (other numbers, e.g. a 0–100 confidence, keep the range seen).
+  const declared = run.scoreScale;
   // A field of scores, even if a few answers are not numbers (e.g. "NA", left out and reported by `agreement`).
   return [...values.entries()]
     .map(([key, xs]) => [key, xs.filter(Number.isFinite)] as const)
     .filter(([key, nums]) => nums.length > 0 && nums.length >= (values.get(key)?.length ?? 0) / 2)
-    .map(([key, nums]) => {
+    .map(([key, nums]): ComparableField => {
+      if (declared && nums.filter((x) => x >= declared.min && x <= declared.max).length * 2 >= nums.length) {
+        const allowed = Array.from({ length: declared.max - declared.min + 1 }, (_, i) => String(declared.min + i));
+        return { key, label: key, level: 'ordinal', allowed, range: [declared.min, declared.max], yesNo: false };
+      }
       const ordinal = nums.every(Number.isInteger);
       // A yes/no in numbers (`zeroOneScores`): every answer from 0 to 1, or most answers 0 or 1 with at most one in a
       // hundred (at least one) near them, e.g. a stray 2 or −1, besides codes far off them (a 9 for "can't tell", far
