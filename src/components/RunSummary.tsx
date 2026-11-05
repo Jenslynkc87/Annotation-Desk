@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import type { ComparableField } from '../lib/compare';
 import { fixed } from '../lib/metrics';
 import { words } from '../lib/subject';
@@ -28,11 +28,13 @@ export function RunSummary({
 }) {
   const w = words({ subject: study.prompt.subject });
   const latest = runs[runs.length - 1];
-  const [runPick, setRunPick] = useState(latest.id);
+  // The latest run (also a new one, once started) unless another was picked.
+  const [runPick, setRunPick] = useState('');
   const run = runs.find((r) => r.id === runPick) ?? latest;
-  const { views, fields } = load(run);
+  const { views, fields } = useMemo(() => load(run), [load, run]);
   const items = useMemo(() => runItems(run, docs, views), [run, docs, views]);
-  const counts = useMemo(() => runCounts(items), [items]);
+  const replicates = run.snapshot.options.replicates;
+  const counts = useMemo(() => runCounts(items, replicates), [items, replicates]);
   const summaries = useMemo(() => fields.map((f) => summarizeField(run, f, items)), [run, fields, items]);
   const [fieldPick, setFieldPick] = useState('');
   const chosen = summaries.find((s) => s.key === fieldPick) ?? summaries[0];
@@ -42,6 +44,7 @@ export function RunSummary({
   const field = fields.find((f) => f.key === chosen?.key);
   const groups = useMemo(() => (split && field ? summarizeByGroup(run, field, items, split) : []), [split, field, run, items]);
   const tip = useTip();
+  const running = run.status === 'running' || run.status === 'submitted';
 
   return (
     <div className="card card-pad sum" onMouseMove={tip.move} onMouseLeave={tip.hide}>
@@ -52,7 +55,7 @@ export function RunSummary({
       <div className="sum-controls">
         <div className="field">
           <label htmlFor="sum-run">Run</label>
-          <select id="sum-run" className="select" value={run.id} onChange={(e) => (tip.hide(), setRunPick(e.target.value))}>
+          <select id="sum-run" className="select" value={run.id} onChange={(e) => (tip.hide(), setRunPick(e.target.value === latest.id ? '' : e.target.value))}>
             {[...runs].reverse().map((r) => (
               <option key={r.id} value={r.id}>
                 Run {runTitle(r, runs)} · v{r.snapshot.promptVersion} · {r.snapshot.model.model}
@@ -75,17 +78,23 @@ export function RunSummary({
         )}
       </div>
 
-      <Counts counts={counts} w={w} running={run.status === 'running' || run.status === 'submitted'} />
+      <Counts counts={counts} w={w} replicates={replicates} running={running} />
 
-      {!summaries.length ? (
+      {!counts.annotated ? (
+        <div className="empty">
+          <strong>{running ? 'No answers yet' : 'Nothing to show'}</strong>
+          {running
+            ? 'The figures appear here as answers come in.'
+            : !counts.total
+              ? `None of this run’s ${w.many} are in the study any more.`
+              : counts.failed === counts.total
+                ? `Every request in this run failed. “Retry failed” in the table above sends them again.`
+                : 'This run stopped before an answer came back.'}
+        </div>
+      ) : !summaries.length ? (
         <div className="notice warn" style={{ marginTop: 12 }}>
           This run has no fields to chart: only free text. Fields of type Category, Ordinal scale, Number or Yes / no (or scores returned as JSON in plain-text
           answers) can be summarized.
-        </div>
-      ) : !counts.annotated ? (
-        <div className="empty">
-          <strong>No answers yet</strong>
-          The figures appear here as answers come in.
         </div>
       ) : (
         <>
@@ -103,7 +112,7 @@ export function RunSummary({
               />
             </>
           )}
-          {chosen && <Detail s={chosen} w={w} replicates={run.snapshot.options.replicates} />}
+          {chosen && <Detail s={chosen} w={w} replicates={replicates} />}
           {chosen && split && groups.length > 0 && (
             <>
               <p className="section-title" style={{ marginTop: 22 }}>
@@ -116,8 +125,8 @@ export function RunSummary({
             </>
           )}
           <p className="hint" style={{ marginTop: 14 }}>
-            Each {w.one} counts once{run.snapshot.options.replicates > 1 ? ', with its combined value (the median on a scale, the majority for categories), as in the Results table' : ''}. Failed{' '}
-            {w.many} and {w.many} still waiting are not counted. Intervals are 95% (t for means, Wilson for shares), from 10 {w.many}.
+            Each {w.one} counts once{replicates > 1 ? ', with its combined value (the median on a scale, the mean for numbers, the majority for categories), as in the Results table' : ''}. Failed{' '}
+            {w.many} and {w.many} without an answer are not counted. Intervals are 95% (t for means, Wilson for shares), from 10 {w.many}.
           </p>
         </>
       )}
@@ -128,7 +137,7 @@ export function RunSummary({
 
 /* ---------------------------------------------------------------- counts */
 
-function Counts({ counts: c, w, running }: { counts: ReturnType<typeof runCounts>; w: Words; running: boolean }) {
+function Counts({ counts: c, w, replicates, running }: { counts: ReturnType<typeof runCounts>; w: Words; replicates: number; running: boolean }) {
   return (
     <p className="sum-counts">
       <strong>{fmtInt(c.annotated)}</strong> of {fmtInt(c.total)} {c.total === 1 ? w.one : w.many} annotated
@@ -138,11 +147,13 @@ function Counts({ counts: c, w, running }: { counts: ReturnType<typeof runCounts
           <span className="sum-err">{fmtInt(c.failed)} failed</span>
         </>
       )}
-      {c.waiting > 0 && <> · {fmtInt(c.waiting)} without an answer yet</>}
-      {c.partial > 0 && (
+      {c.waiting > 0 && <> · {fmtInt(c.waiting)} without an answer{running ? ' yet' : ''}</>}
+      {replicates > 1 && c.fewer > 0 && (
         <>
           {' · '}
-          <span title={`Some of their annotations failed: their values combine the others`}>{fmtInt(c.partial)} only partly annotated</span>
+          <span title="Some of their annotations failed or never came back: their values combine the others">
+            {fmtInt(c.fewer)} with fewer than {replicates} annotations
+          </span>
         </>
       )}
       {running && <span className="sum-live"> · updating as answers come in</span>}
@@ -226,7 +237,7 @@ function Rows({
   const div = rows.filter((r) => r.s.diverging && r.s.sides && r.s.n);
   const leftMax = Math.max(0, ...div.map((r) => (r.s.sides!.below + r.s.sides!.middle / 2) / r.s.n));
   const rightMax = Math.max(0, ...div.map((r) => (r.s.sides!.above + r.s.sides!.middle / 2) / r.s.n));
-  const axis = meanAxis(rows);
+  const axis = meanAxis(rows, !!oneField);
   return (
     <div className={`sum-rows${axis ? '' : ' no-strip'}`} role={onSelect ? 'listbox' : 'table'} aria-label={ariaLabel}>
       <div className="sum-row sum-head" aria-hidden="true">
@@ -293,11 +304,12 @@ function Rows({
 /** The heading of the rows' mean column: what the rows hold (means, shares of yes, the most common category). */
 function meanHeader(rows: RowData[]): string {
   const means = rows.some((r) => r.s.mean !== null);
-  const yes = rows.some((r) => r.s.yes);
+  const words = new Set(rows.flatMap((r) => (r.s.yes ? [r.s.yes.word] : [])));
+  const yes = words.size === 0 ? '' : words.size > 1 ? 'share' : words.has('1') ? 'share of 1s' : 'yes';
   const cats = rows.some((r) => r.s.kind === 'categories' && !r.s.yes);
   if (!means && !yes) return 'Most common';
-  if (!means) return cats ? 'Yes, or most common' : 'Yes (95% CI)';
-  return yes ? 'Mean or yes (95% CI)' : 'Mean (95% CI)';
+  if (!means) return `${yes[0].toUpperCase()}${yes.slice(1)}${cats ? ', or most common' : ' (95% CI)'}`;
+  return yes ? `Mean or ${yes} (95% CI)` : 'Mean (95% CI)';
 }
 
 function MeanText({ s }: { s: FieldSummary }) {
@@ -313,8 +325,8 @@ function MeanText({ s }: { s: FieldSummary }) {
         <strong>{num(s.mean)}</strong> <span className="sum-ci">{ciText(s.ci, (x) => num(x))}</span>
       </>
     );
-  // Categories: the most common one.
-  const top = [...s.bins].sort((a, b) => b.n - a.n)[0];
+  // Categories: the most common of the codebook's (not "No majority" or a value outside it).
+  const top = s.bins.filter((b) => !b.extra).sort((a, b) => b.n - a.n)[0];
   return top && top.n ? (
     <span className="sum-ci">
       Most: <strong className="sum-ink">{top.label}</strong> ({pct(top.n, s.n)})
@@ -425,15 +437,17 @@ interface Axis {
  * One axis for the rows' means with their intervals (or, when no row has a mean, their shares of yes): from the lowest
  * to the highest bound, a little wider, and taking in 0 on a scale around 0 (so which side of 0 a mean lies on is
  * seen). Rows in another unit (a share of yes beside means) get no mark on it. None when the means are on different
- * scales.
+ * scales, or have none (Number fields), except for the groups of one field.
  */
-function meanAxis(rows: RowData[]): Axis | null {
+function meanAxis(rows: RowData[], oneField: boolean): Axis | null {
   const means = rows.filter((r) => r.s.mean !== null);
   const share = !means.length;
   const use = share ? rows.filter((r) => r.s.yes) : means;
   if (!use.length) return null;
+  // (Fields without a scale, e.g. two Number fields such as a year and a confidence, are not put on one axis; groups of
+  // one field are.)
   const ranges = new Set(use.map((r) => JSON.stringify(r.s.range)));
-  if (!share && ranges.size > 1) return null;
+  if (!share && !oneField && (ranges.size > 1 || use.some((r) => !r.s.range))) return null;
   const xs = use.flatMap((r) => (share ? [r.s.yes!.share, ...(r.s.yes!.ci ?? [])] : [r.s.mean!, ...(r.s.ci ?? [])]));
   if (use.some((r) => r.s.diverging)) xs.push(0);
   let lo = Math.min(...xs);
@@ -467,7 +481,7 @@ function Strip({ s, axis }: { s: FieldSummary; axis: Axis }) {
   if (m === undefined || m === null) return null;
   const ci = axis.share ? s.yes?.ci : s.ci;
   const zero = !axis.share && s.diverging ? axis.at(0) : null;
-  const tip = `${s.label}\n${axis.share ? `Yes: ${pct1(m)}` : `Mean: ${num(m)}`}${ci ? `\n95% CI ${ciText(ci, axis.share ? pct1 : (x) => num(x))}` : '\nNo interval below 10'}`;
+  const tip = `${s.label}\n${axis.share ? `${s.yes?.word === '1' ? 'Share of 1s' : 'Yes'}: ${pct1(m)}` : `Mean: ${num(m)}`}${ci ? `\n95% CI ${ciText(ci, axis.share ? pct1 : (x) => num(x))}` : '\nNo interval below 10'}`;
   return (
     <span className="sum-strip" data-tip={tip}>
       <span className="sum-strip-base" />
@@ -489,8 +503,7 @@ function Detail({ s, w, replicates }: { s: FieldSummary; w: Words; replicates: n
       </div>
       {s.leftOut.n > 0 && (
         <div className="notice warn" style={{ marginBottom: 10 }}>
-          {fmtInt(s.leftOut.n)} {s.leftOut.n === 1 ? `${w.one} has` : `${w.many} have`} an answer that isn’t a number ({s.leftOut.values.map((v) => `“${v}”`).join(', ')}
-          {s.leftOut.n > s.leftOut.values.length && s.leftOut.values.length === 5 ? ', …' : ''}): left out of the chart and the figures.
+          {leftOutNote(s, w)}
         </div>
       )}
       {!s.n ? (
@@ -502,9 +515,9 @@ function Detail({ s, w, replicates }: { s: FieldSummary; w: Words; replicates: n
             <Tile k={`${w.Many} with a value`} v={fmtInt(s.n)} sub={s.missing ? `${fmtInt(s.missing)} annotated without one` : undefined} />
             {s.yes ? (
               <Tile
-                k="Yes"
+                k={s.yes.word === '1' ? 'Share of 1s' : 'Yes'}
                 v={pct1(s.yes.share)}
-                sub={[s.yes.ci ? `95% CI ${ciText(s.yes.ci, pct1)}` : '', s.yes.n < s.n ? `of the ${fmtInt(s.yes.n)} with yes or no` : ''].filter(Boolean).join('; ') || undefined}
+                sub={[s.yes.ci ? `95% CI ${ciText(s.yes.ci, pct1)}` : '', s.yes.n < s.n ? `of the ${fmtInt(s.yes.n)} with ${s.yes.word === '1' ? '0 or 1' : 'yes or no'}` : ''].filter(Boolean).join('; ') || undefined}
               />
             ) : s.mean !== null ? (
               <>
@@ -533,8 +546,21 @@ function Detail({ s, w, replicates }: { s: FieldSummary; w: Words; replicates: n
   );
 }
 
+/** Answers left out of the chart and the figures, and why: "3 texts have answers left out …: “NA”, “9”." */
+function leftOutNote(s: FieldSummary, w: Words): string {
+  const { n, values, offScale, scale } = s.leftOut;
+  const notNumber = n - offScale;
+  const why = [
+    notNumber ? `${fmtInt(notNumber)} not a number` : '',
+    offScale && scale ? `${fmtInt(offScale)} outside the scale (${scaleLabel(scale[0])} to ${scaleLabel(scale[1])})` : '',
+  ].filter(Boolean);
+  const shown = values.map((v) => `“${v}”`).join(', ') + (values.length === 5 && n > 5 ? ', …' : '');
+  return `${fmtInt(n)} ${n === 1 ? `${w.one} has an answer` : `${w.many} have answers`} left out of the chart and the figures (${why.join(', ')}): ${shown}.`;
+}
+
 function kindText(s: FieldSummary): string {
   if (s.kind === 'categories') return s.yes ? 'yes / no' : 'categories';
+  if (s.yes) return '0 or 1';
   if (s.kind === 'number') return 'numbers';
   return s.range ? `scale ${scaleLabel(s.range[0])} to ${scaleLabel(s.range[1])}` : 'scale';
 }
@@ -567,15 +593,14 @@ function Columns({ s, w }: { s: FieldSummary; w: Words }) {
   const at = (x: number) => ((x - lo) / (hi - lo)) * 100;
   const slot = (gap / (hi - lo)) * 100;
   const max = Math.max(1, ...s.bins.map((b) => b.n));
-  const histogram = s.kind === 'number' && s.bins.length === 10 && s.bins[0].key.includes('|');
+  const histogram = s.bins[0]?.from !== undefined;
   const labelsFit = s.bins.length <= 13;
   // Tick labels: a scale's own points (not the half points between them); a histogram's two ends and middle.
+  // (A histogram's bin edges, every other one when there are more than 6 bins.)
   const ticks: { x: number; label: string }[] = histogram
-    ? [
-        { x: lo0 - gap / 2, label: num(s.min) },
-        { x: (lo0 + hi0) / 2, label: num(((s.min ?? 0) + (s.max ?? 0)) / 2) },
-        { x: hi0 + gap / 2, label: num(s.max) },
-      ].map((t) => ({ ...t, label: t.label.replace(/\.00$/, '') }))
+    ? [...s.bins.map((b) => ({ x: b.from!, label: b.fromLabel! })), { x: s.bins[s.bins.length - 1].to!, label: s.bins[s.bins.length - 1].toLabel! }].filter(
+        (_, i, all) => all.length <= 7 || i % 2 === 0 || i === all.length - 1,
+      )
     : s.bins.filter((b) => !(b.extra && b.value !== undefined && !Number.isInteger(b.value) && s.kind === 'scale')).map((b) => ({ x: b.value ?? 0, label: b.label }));
   const color = (b: Bin) => (s.kind === 'scale' ? scaleColor(s, b.value ?? 0) : 'var(--sum-seq-2)');
   return (
@@ -637,25 +662,40 @@ function CategoryBars({ s, w }: { s: FieldSummary; w: Words }) {
 
 /* ---------------------------------------------------------------- tooltip */
 
-/** One tooltip for the whole card: any element with a `data-tip` shows it (lines split at "\n") near the pointer. */
+/**
+ * One tooltip for the whole card: any element with a `data-tip` shows it (lines split at "\n") near the pointer.
+ * Moved and filled directly, so moving the pointer doesn't draw the card again.
+ */
 function useTip() {
-  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
-  const move = (e: MouseEvent) => {
-    const el = (e.target as HTMLElement).closest('[data-tip]') as HTMLElement | null;
-    const text = el?.dataset.tip;
-    if (!text) return setTip((t) => (t ? null : t));
-    setTip({ x: e.clientX, y: e.clientY, text });
+  const ref = useRef<HTMLDivElement>(null);
+  const shown = useRef('');
+  const hide = () => {
+    if (ref.current) ref.current.style.display = 'none';
+    shown.current = '';
   };
-  const hide = () => setTip(null);
-  const node = tip ? (
-    <div
-      className="sum-tip"
-      role="tooltip"
-      style={{ left: Math.min(tip.x + 14, window.innerWidth - 260), top: tip.y + 16 > window.innerHeight - 80 ? tip.y - 70 : tip.y + 16 }}
-    >
-      {tip.text.split('\n').map((line, i) => (i === 0 ? <strong key={i}>{line}</strong> : <div key={i}>{line}</div>))}
-    </div>
-  ) : null;
+  const move = (e: MouseEvent) => {
+    const el = ref.current;
+    if (!el) return;
+    const text = ((e.target as HTMLElement).closest('[data-tip]') as HTMLElement | null)?.dataset.tip;
+    if (!text) return hide();
+    if (text !== shown.current) {
+      const [first, ...rest] = text.split('\n');
+      const head = document.createElement('strong');
+      head.textContent = first;
+      el.replaceChildren(
+        head,
+        ...rest.map((line) => {
+          const d = document.createElement('div');
+          d.textContent = line;
+          return d;
+        }),
+      );
+      shown.current = text;
+    }
+    el.style.display = 'block';
+    el.style.left = `${Math.min(e.clientX + 14, window.innerWidth - 260)}px`;
+    el.style.top = `${e.clientY + 16 > window.innerHeight - 80 ? e.clientY - 70 : e.clientY + 16}px`;
+  };
+  const node = <div ref={ref} className="sum-tip" role="tooltip" style={{ display: 'none' }} />;
   return { move, hide, node };
 }
-

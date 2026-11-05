@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { agreement, fixed, fmtPct, fmtStat, isMissingLabel, scaleStep, type Agreement, type Level } from '../lib/metrics';
 import { codebookField, combineFields, comparableFields, fieldValue, labelScale, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
@@ -57,6 +57,12 @@ export function RunsView() {
   const sorted = [...runs].reverse();
   // Each run's own results, sorted out once per change (during a run, results come in every quarter of a second).
   const byRun = useMemo(() => resultsByRun(results), [results]);
+  // The panels below: the study's texts with those removed from it but kept for the runs that used them (a run is
+  // summarized and compared on all its texts), and the results at most once a second during a run. The same arrays
+  // for both, so they share each run's cached views (`runData`).
+  const removedDocs = useStore((s) => s.removedDocs);
+  const allDocs = studyDocs(docs, removedDocs);
+  const shownResults = useThrottled(results, 1000);
 
   return (
     <div className="stack">
@@ -229,9 +235,9 @@ export function RunsView() {
         )}
       </div>
 
-      {runs.length > 0 && <ResultsPanel />}
+      {runs.length > 0 && <ResultsPanel docs={allDocs} results={shownResults} />}
 
-      {runs.length > 0 && <AgreementPanel />}
+      {runs.length > 0 && <AgreementPanel docs={allDocs} results={shownResults} />}
 
       {inspect && (
         <Modal title={`Run #${runName(inspect, runs)} settings`} onClose={() => setInspect(null)}>
@@ -522,31 +528,28 @@ function useThrottled<T>(value: T, ms: number): T {
 }
 
 /**
- * Results: one run's answers at a glance (`RunSummary`), from the same cached per-run data as the Agreement panel and
- * on the same texts (also those removed from the study but kept for the runs that used them), at most once a second
- * during a run.
+ * The study's texts and those removed from it but kept for the runs that used them (`withRemoved`), as one array while
+ * neither list changes: `runData` keeps a run's views only for the same array.
  */
-function ResultsPanel() {
+let docsMemo: { active: Doc[]; removed: Doc[]; all: Doc[] } | null = null;
+function studyDocs(active: Doc[], removed: Doc[]): Doc[] {
+  if (docsMemo?.active !== active || docsMemo.removed !== removed) docsMemo = { active, removed, all: withRemoved(active, removed) };
+  return docsMemo.all;
+}
+
+/** Results: one run's answers at a glance (`RunSummary`), from the same cached per-run data as the Agreement panel. */
+function ResultsPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
   const study = useStore((s) => currentStudy(s))!;
   const runs = useStore((s) => s.runs);
-  const activeDocs = useStore((s) => s.docs);
-  const removedDocs = useStore((s) => s.removedDocs);
-  const docs = useMemo(() => withRemoved(activeDocs, removedDocs), [activeDocs, removedDocs]);
-  const results = useThrottled(useStore((s) => s.results), 1000);
-  const load = (run: Run) => ({ views: runData(run, docs, results).views, fields: runFields(run, docs, results) });
+  const load = useCallback((run: Run) => ({ views: runData(run, docs, results).views, fields: runFields(run, docs, results) }), [docs, results]);
   return <RunSummary study={study} runs={runs} docs={docs} load={load} />;
 }
 
-function AgreementPanel() {
+/** `docs`: the study's texts with those removed but kept for runs (a run is compared on all its texts); `results`: at most once a second during a run. */
+function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
   const study = useStore((s) => currentStudy(s))!;
   const w = words({ subject: study.prompt.subject });
   const runs = useStore((s) => s.runs);
-  // The study's texts and those removed from it but kept for the runs that used them: a run is compared on all its texts.
-  const activeDocs = useStore((s) => s.docs);
-  const removedDocs = useStore((s) => s.removedDocs);
-  const docs = useMemo(() => withRemoved(activeDocs, removedDocs), [activeDocs, removedDocs]);
-  const liveResults = useStore((s) => s.results);
-  const results = useThrottled(liveResults, 1000);
   const metaCols = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   // Every field name the study and its runs use (to tell race from race_negative), once per update.
   const known = useMemo(() => studyFieldNames(study, runs, results), [study, runs, results]);

@@ -91,7 +91,7 @@ describe('summarizing a structured run', () => {
 
   it('counts texts and leaves out free-text fields', () => {
     const { items, fields } = setup(rows);
-    expect(runCounts(items)).toEqual({ total: 6, annotated: 6, partial: 0, failed: 0, waiting: 0 });
+    expect(runCounts(items)).toEqual({ total: 6, annotated: 6, fewer: 0, failed: 0, waiting: 0 });
     expect(fields.map((f) => f.key)).toEqual(['orientation', 'tone', 'mentions_trump']);
   });
 
@@ -166,7 +166,7 @@ describe('summarizing a structured run', () => {
     ];
     const views = buildDocViews(docs, [run], results, run.id);
     const items = runItems(run, docs, views);
-    expect(runCounts(items)).toEqual({ total: 4, annotated: 2, partial: 1, failed: 1, waiting: 1 });
+    expect(runCounts(items, 2)).toEqual({ total: 4, annotated: 2, fewer: 1, failed: 1, waiting: 1 });
     const fields = comparableFields(run, views.values());
     const o = summarizeField(run, fields[0], items);
     // d0: median of 1 and 2 = 1.5, a half point between the scale's points; d1: −1.
@@ -212,7 +212,7 @@ describe('summarizing a plain-text run with JSON scores', () => {
     const s = summarizeField(run, f, items);
     expect(s.kind).toBe('scale');
     expect(s.n).toBe(3);
-    expect(s.leftOut).toEqual({ n: 1, values: ['na'] });
+    expect(s.leftOut).toEqual({ n: 1, values: ['NA'], offScale: 0, scale: null });
     expect(s.missing).toBe(1);
     // Scale: the whole numbers seen, −1 to 2.
     expect(s.bins.map((b) => b.label)).toEqual(['−1', '0', '1', '2']);
@@ -226,7 +226,7 @@ describe('summarizing a plain-text run with JSON scores', () => {
     expect(s.range).toEqual([-3, 3]);
   });
 
-  it('draws 0/1 flags as a scale of two points, not around 0', () => {
+  it('draws 0/1 flags as a scale of two points, not around 0, with the share of 1s', () => {
     const { run, items, fields } = textSetup(['{"flag": 1}', '{"flag": 0}', '{"flag": 1}']);
     const s = summarizeField(run, fields[0], items);
     expect(s.kind).toBe('scale');
@@ -235,7 +235,49 @@ describe('summarizing a plain-text run with JSON scores', () => {
       ['0', 1],
       ['1', 2],
     ]);
-    expect(s.mean).toBeCloseTo(2 / 3, 10);
+    expect(s.yes).toMatchObject({ share: 2 / 3, n: 3, word: '1' });
+    expect(s.mean).toBeNull();
+  });
+
+  it('leaves a flag’s far codes (9 for can’t tell) out of the share and reports them', () => {
+    const answers = [...Array(12).fill('{"flag": 1}'), ...Array(8).fill('{"flag": 0}'), '{"flag": 9}'];
+    const { run, items, fields } = textSetup(answers);
+    const s = summarizeField(run, fields[0], items);
+    expect(s.yes?.share).toBeCloseTo(0.6, 10);
+    expect(s.n).toBe(20);
+    expect(s.leftOut).toEqual({ n: 1, values: ['9'], offScale: 1, scale: [0, 1] });
+    // Wilson, not t: inside 0…1.
+    const [lo, hi] = s.yes!.ci!;
+    expect(lo).toBeGreaterThan(0);
+    expect(hi).toBeLessThan(1);
+  });
+
+  it('leaves numbers off the study’s declared scale out of the figures', () => {
+    const answers = ['{"score": 2}', '{"score": 0}', '{"score": 1}', '{"score": -1}', '{"score": 9}'];
+    const { run, items, fields } = textSetup(answers, { min: -3, max: 3 });
+    const s = summarizeField(run, fields[0], items);
+    expect(s.n).toBe(4);
+    expect(s.mean).toBeCloseTo(0.5, 10);
+    expect(s.leftOut).toMatchObject({ n: 1, offScale: 1, scale: [-3, 3] });
+    expect(s.bins.map((b) => b.label)).toEqual(['−3', '−2', '−1', '0', '1', '2', '3']);
+  });
+
+  it('draws probabilities between 0 and 1 as numbers, not as a flag', () => {
+    const answers = Array.from({ length: 22 }, (_, i) => `{"p": ${(0.5 + i * 0.0225).toFixed(4)}}`);
+    const { run, items, fields } = textSetup(answers);
+    const s = summarizeField(run, fields[0], items);
+    expect(s.kind).toBe('number');
+    expect(s.yes).toBeNull();
+    expect(s.mean).not.toBeNull();
+  });
+
+  it('draws a wide whole-number scale (0–100) as a histogram', () => {
+    const answers = Array.from({ length: 101 }, (_, i) => `{"confidence": ${i}}`);
+    const { run, items, fields } = textSetup(answers);
+    const s = summarizeField(run, fields[0], items);
+    expect(s.kind).toBe('number');
+    expect(s.bins.length).toBeLessThanOrEqual(11);
+    expect(s.bins.reduce((t, b) => t + b.n, 0)).toBe(101);
   });
 
   it('draws other numbers as a histogram', () => {
@@ -249,7 +291,50 @@ describe('summarizing a plain-text run with JSON scores', () => {
   });
 });
 
+describe('structured fields without a scale', () => {
+  it('treats the values of a category field that lists none as its categories, most frequent first', () => {
+    const prompt: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'structured', variables: [{ name: 'topic', type: 'category', values: [], description: '' }] };
+    const docs = [0, 1, 2].map((i) => doc(i));
+    const run = makeRun(prompt, docs.map((d) => d.id));
+    const results = ['war', 'film', 'war'].map((t, i) => result(run.id, `d${i}`, 1, { topic: t }));
+    const views = buildDocViews(docs, [run], results, run.id);
+    const s = summarizeField(run, comparableFields(run, views.values())[0], runItems(run, docs, views));
+    expect(s.bins.map((b) => [b.label, b.n, !!b.extra])).toEqual([
+      ['war', 2, false],
+      ['film', 1, false],
+    ]);
+  });
+
+  it('gives a 0/1 ordinal codebook the share of 1s with a Wilson interval', () => {
+    const prompt: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'structured', variables: [{ name: 'present', type: 'ordinal', values: ['0', '1'], description: '' }] };
+    const docs = Array.from({ length: 30 }, (_, i) => doc(i));
+    const run = makeRun(prompt, docs.map((d) => d.id));
+    const results = docs.map((d, i) => result(run.id, d.id, 1, { present: i === 0 ? '1' : '0' }));
+    const views = buildDocViews(docs, [run], results, run.id);
+    const s = summarizeField(run, comparableFields(run, views.values())[0], runItems(run, docs, views));
+    expect(s.yes?.share).toBeCloseTo(1 / 30, 10);
+    // Wilson 95%: 0.0059 to 0.1667
+    expect(s.yes!.ci![0]).toBeCloseTo(0.0059, 3);
+    expect(s.yes!.ci![1]).toBeCloseTo(0.1667, 3);
+  });
+});
+
 describe('histogram and labels', () => {
+  it('labels bins of years with whole years at round edges', () => {
+    const years = Array.from({ length: 50 }, (_, i) => 1965 + i);
+    const bins = histogram(years);
+    expect(bins[0].label).toBe('1965–1970');
+    expect(bins[bins.length - 1].label).toBe('2010–2015');
+    expect(bins.reduce((t, b) => t + b.n, 0)).toBe(50);
+    expect(new Set(bins.map((b) => b.label)).size).toBe(bins.length);
+  });
+  it('labels small widths with the decimals they need', () => {
+    const xs = Array.from({ length: 30 }, (_, i) => i * 0.08);
+    const bins = histogram(xs);
+    expect(bins[0].label).toBe('0.00–0.25');
+    expect(bins.every((b) => /^−?\d+(\.\d+)?–−?\d+(\.\d+)?$/.test(b.label))).toBe(true);
+    expect(new Set(bins.map((b) => b.label)).size).toBe(bins.length);
+  });
   it('puts the highest value in the last bin', () => {
     const xs = Array.from({ length: 21 }, (_, i) => i * 5);
     const bins = histogram(xs);

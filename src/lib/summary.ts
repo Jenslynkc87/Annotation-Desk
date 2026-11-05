@@ -29,6 +29,11 @@ export interface Bin {
   value?: number;
   /** Not a point of the scale or a value of the codebook: a combined half point (0.5), a tie, an off-scale number. */
   extra?: boolean;
+  /** Histogram bins: their edges, and the edges as shown. */
+  from?: number;
+  to?: number;
+  fromLabel?: string;
+  toLabel?: string;
 }
 
 export interface FieldSummary {
@@ -44,8 +49,12 @@ export interface FieldSummary {
   n: number;
   /** Annotated texts with no value for this field (e.g. a plain-text answer without the key, or written as prose). */
   missing: number;
-  /** Numeric fields: values that aren't numbers (e.g. "NA"), left out of the figures, with up to 5 of them. */
-  leftOut: { n: number; values: string[] };
+  /**
+   * Numeric fields: answers left out of the chart and the figures, with up to 5 of them as written: values that aren't
+   * numbers (e.g. "NA"), and on a fixed scale (a codebook's, the study's declared one, or 0…1 for flags) numbers off
+   * it (e.g. 9 for "can't tell"), as the Agreement panel and the exports leave them out. `scale`: that scale's ends.
+   */
+  leftOut: { n: number; values: string[]; offScale: number; scale: [number, number] | null };
   mean: number | null;
   sd: number | null;
   median: number | null;
@@ -55,17 +64,23 @@ export interface FieldSummary {
   max: number | null;
   /** Diverging scales: texts below 0, at 0, above 0. */
   sides: { below: number; middle: number; above: number } | null;
-  /** Yes/no fields: share of yes among the texts with yes or no (a tie is neither), with its 95% Wilson interval. */
-  yes: { share: number; n: number; ci: [number, number] | null } | null;
+  /**
+   * Yes/no fields, and 0/1 scales (flags): the share of yes (of 1) among the texts with yes or no (0 or 1; a tie, or a
+   * combined 0.5, is neither), with its 95% Wilson interval. `word`: "Yes", or "1" for a 0/1 scale.
+   */
+  yes: { share: number; n: number; ci: [number, number] | null; word: 'Yes' | '1' } | null;
 }
 
 export interface RunCounts {
   /** Texts the run was for. */
   total: number;
-  /** With an answer (every annotation, or some: `partial`). */
+  /** With an answer (at least one annotation that didn't fail). */
   annotated: number;
-  /** Annotated, but some of their annotations failed: their values combine the others. */
-  partial: number;
+  /**
+   * With several annotations per text: annotated texts with fewer usable annotations than planned (some failed or
+   * were never answered): their values combine the others.
+   */
+  fewer: number;
   /** Every annotation failed. */
   failed: number;
   /** No answer yet (a batch still at the provider, or a run that was stopped). */
@@ -87,11 +102,13 @@ export function runItems(run: Run, docs: Doc[], views: Map<string, DocView>): Ru
   return out;
 }
 
-export function runCounts(items: RunItem[]): RunCounts {
-  const c: RunCounts = { total: items.length, annotated: 0, partial: 0, failed: 0, waiting: 0 };
+export function runCounts(items: RunItem[], replicates = 1): RunCounts {
+  const c: RunCounts = { total: items.length, annotated: 0, fewer: 0, failed: 0, waiting: 0 };
   for (const { view: v } of items) {
-    if (v.status === 'ok' || v.status === 'partial') c.annotated++;
-    if (v.status === 'partial') c.partial++;
+    if (v.status === 'ok' || v.status === 'partial') {
+      c.annotated++;
+      if (v.results.filter((r) => r.status === 'ok').length < replicates) c.fewer++;
+    }
     if (v.status === 'error') c.failed++;
     if (v.status === 'none') c.waiting++;
   }
@@ -140,20 +157,34 @@ export function describe(xs: number[]): Pick<FieldSummary, 'mean' | 'sd' | 'medi
 const isNumberText = (s: string) => s.trim() !== '' && Number.isFinite(toNumber(s));
 const sortNumeric = (a: number, b: number) => a - b;
 
-/** How a field is drawn, and the points of its scale (numbers) where it has one. */
-function shapeOf(field: ComparableField): { kind: SummaryKind; points: number[]; range: [number, number] | null } {
-  if (field.yesNo) return { kind: 'categories', points: [], range: null };
-  // Plain-text scores of 0 and 1 (a flag): bars at 0 and 1, the mean is the share of 1s.
-  if (zeroOneScores(field)) return { kind: 'scale', points: [0, 1], range: [0, 1] };
-  if (field.level === 'nominal') return { kind: 'categories', points: [], range: null };
-  const points = field.allowed.filter(isNumberText).map((x) => toNumber(x));
+/** A scale is drawn with a bar per point up to this many points; a longer one (0–100) as a histogram. */
+export const MAX_SCALE_POINTS = 21;
+
+/**
+ * How a field is drawn, and the points of its scale (numbers) where it has one. `fixed`: the scale numbers off which
+ * are left out (a codebook's or the study's declared scale; plain-text scores seen have none, as in `agreement`).
+ * Plain-text 0/1 flags are decided from the values (`flagShape`).
+ */
+function shapeOf(field: ComparableField): { kind: SummaryKind; points: number[]; range: [number, number] | null; fixed: [number, number] | null } {
+  if (field.yesNo || field.level === 'nominal') return { kind: 'categories', points: [], range: null, fixed: null };
+  // (A codebook may list a non-number beside its points: its points still make the scale.)
+  const points = field.allowed.filter(isNumberText).map((x) => toNumber(x)).sort(sortNumeric);
+  const ends: [number, number] | null = points.length ? [points[0], points[points.length - 1]] : null;
+  // A codebook's or declared scale: its own ends (`range`, which `combineFields` keeps when it widens `allowed`).
+  const fixed = !field.scaleSeen ? (field.range ?? ends) : null;
   // An ordinal scale with its points (a codebook, the study's declared scale, or the whole numbers of the answers seen).
-  if (field.level === 'ordinal' && points.length >= 2 && points.length === field.allowed.length) {
-    points.sort(sortNumeric);
-    const range: [number, number] = field.range ?? [points[0], points[points.length - 1]];
-    return { kind: 'scale', points, range };
-  }
-  return { kind: 'number', points: [], range: field.range ?? null };
+  if (field.level === 'ordinal' && points.length >= 2 && points.length <= MAX_SCALE_POINTS) return { kind: 'scale', points, range: field.range ?? ends, fixed };
+  return { kind: 'number', points: [], range: field.range ?? ends, fixed };
+}
+
+/**
+ * Plain-text scores answered mostly 0 or 1 (`zeroOneScores`): a flag, drawn as a 0/1 scale with the share of 1s, when
+ * nine in ten numbers are exactly 0 or 1 (or 0.5, two annotations that disagreed). Probabilities between 0 and 1 are
+ * not a flag: drawn as numbers.
+ */
+function isFlag(field: ComparableField, xs: number[]): boolean {
+  if (!zeroOneScores(field) || !xs.length) return false;
+  return xs.filter((x) => x === 0 || x === 1 || x === 0.5).length >= xs.length * 0.9;
 }
 
 /** Display names of a structured field's categories, from the run's codebook ("Very positive" for "very positive"). */
@@ -176,51 +207,64 @@ export const TIE_KEY = '\u0000tie';
  * answer (failed, waiting) are not counted at all; annotated texts without a value for the field are `missing`.
  */
 export function summarizeField(run: Run, field: ComparableField, items: RunItem[]): FieldSummary {
-  const { kind, points, range } = shapeOf(field);
+  const shape = shapeOf(field);
   const values: string[] = [];
+  // (Each value as written, for the note on values left out: "NA", not "na".)
+  const written: string[] = [];
   let missing = 0;
   for (const { view: v } of items) {
     if (v.status !== 'ok' && v.status !== 'partial') continue;
-    const raw = normalizeLabel(fieldValue(run, v.values, field.key), field.yesNo);
+    const asIs = fieldValue(run, v.values, field.key).trim();
+    const raw = normalizeLabel(asIs, field.yesNo);
     // (A missing-value marker such as "NA" on a categories field is a value if the codebook has it, else a blank.)
-    if (raw === '' || (kind === 'categories' && isMissingLabel(raw) && !field.allowed.includes(raw))) missing++;
-    else values.push(raw);
+    if (raw === '' || (shape.kind === 'categories' && isMissingLabel(raw) && !field.allowed.includes(raw))) missing++;
+    else {
+      values.push(raw);
+      written.push(asIs);
+    }
   }
 
-  const base = { key: field.key, label: field.label, kind, range, missing };
-  if (kind === 'categories') {
+  const base = { key: field.key, label: field.label, missing };
+  if (shape.kind === 'categories') {
     const counts = new Map<string, number>();
     for (const x of values) counts.set(x, (counts.get(x) ?? 0) + 1);
     const names = categoryNames(run, field.key);
     const label = (k: string) => (field.yesNo ? (YES_NO[k] ?? k) : (names.get(k) ?? k));
-    // The codebook's values in its order (also those no text got), then any others (values from older codebooks),
-    // most frequent first, then the texts whose annotations had no majority (ties such as "critical | neutral"), as
-    // one bar: with several annotations per text there can be many different ties.
-    const allowed = field.yesNo ? ['true', 'false'] : field.allowed;
-    const bins: Bin[] = allowed.map((k) => ({ key: k, label: label(k), n: counts.get(k) ?? 0 }));
-    const isTie = (k: string) => k.includes(' | ') && !allowed.includes(k);
-    const others = [...counts.entries()].filter(([k]) => !allowed.includes(k) && !isTie(k)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    for (const [k, n] of others) bins.push({ key: k, label: label(k), n, extra: true });
+    const isTie = (k: string) => k.includes(' | ') && !field.allowed.includes(k);
+    // The codebook's values in its order (also those no text got); a field whose codebook lists none: the values
+    // given, most frequent first. Then any others (values from older codebooks), most frequent first, then the texts
+    // whose annotations had no majority (ties such as "critical | neutral"), as one bar: with several annotations per
+    // text there can be many different ties.
+    const byCount = (keys: string[]) => keys.sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b));
+    const own = field.yesNo ? ['true', 'false'] : field.allowed.length ? field.allowed : byCount([...counts.keys()].filter((k) => !isTie(k)));
+    const bins: Bin[] = own.map((k) => ({ key: k, label: label(k), n: counts.get(k) ?? 0 }));
+    for (const k of byCount([...counts.keys()].filter((k) => !own.includes(k) && !isTie(k)))) bins.push({ key: k, label: label(k), n: counts.get(k)!, extra: true });
     const ties = [...counts.entries()].filter(([k]) => isTie(k)).reduce((t, [, n]) => t + n, 0);
     if (ties) bins.push({ key: TIE_KEY, label: 'No majority (tie)', n: ties, extra: true });
-    const yesN = counts.get('true') ?? 0;
-    const noN = counts.get('false') ?? 0;
-    const yes = field.yesNo && yesN + noN > 0 ? { share: yesN / (yesN + noN), n: yesN + noN, ci: wilsonCI(yesN / (yesN + noN), yesN + noN) } : null;
-    return { ...base, diverging: false, bins, n: values.length, leftOut: { n: 0, values: [] }, ...describe([]), sides: null, yes };
+    const yes = field.yesNo ? share(counts.get('true') ?? 0, counts.get('false') ?? 0, 'Yes') : null;
+    const none = { n: 0, values: [], offScale: 0, scale: null };
+    return { ...base, kind: 'categories', range: null, diverging: false, bins, n: values.length, leftOut: none, ...describe([]), sides: null, yes };
   }
 
-  // Numbers: values that aren't (e.g. "NA" in a plain-text answer) are left out and reported.
+  // Numbers: values that aren't (e.g. "NA" in a plain-text answer) are left out and reported; so are numbers off a
+  // fixed scale (a 9 for "can't tell" on −3…3, or beside a flag's 0 and 1), as in the Agreement panel and the exports.
+  const nums = values.map((x) => toNumber(x));
+  const flag = isFlag(field, nums.filter(Number.isFinite));
+  const kind: SummaryKind = flag ? 'scale' : shape.kind;
+  const points = flag ? [0, 1] : shape.points;
+  const range: [number, number] | null = flag ? [0, 1] : shape.range;
+  const fixed: [number, number] | null = flag ? [0, 1] : shape.fixed;
   const xs: number[] = [];
   const left: string[] = [];
   let leftN = 0;
-  for (const x of values) {
-    const num = toNumber(x);
-    if (Number.isFinite(num)) xs.push(num);
-    else {
-      leftN++;
-      if (left.length < 5 && !left.includes(x)) left.push(x);
-    }
-  }
+  let offScale = 0;
+  nums.forEach((num, i) => {
+    const off = Number.isFinite(num) && !!fixed && (num < fixed[0] - 1e-9 || num > fixed[1] + 1e-9);
+    if (Number.isFinite(num) && !off) return void xs.push(num);
+    leftN++;
+    if (off) offScale++;
+    if (left.length < 5 && !left.includes(written[i])) left.push(written[i]);
+  });
   const stats = describe(xs);
   const diverging = kind === 'scale' && !!range && range[0] < 0 && range[1] > 0;
   const sides = diverging ? { below: xs.filter((x) => x < 0).length, middle: xs.filter((x) => x === 0).length, above: xs.filter((x) => x > 0).length } : null;
@@ -228,15 +272,40 @@ export function summarizeField(run: Run, field: ComparableField, items: RunItem[
   if (kind === 'scale') {
     const counts = new Map<number, number>();
     for (const x of xs) counts.set(x, (counts.get(x) ?? 0) + 1);
-    // Every point of the scale (also those no text got), and values between or beyond them (combined half points,
-    // off-scale answers in plain text) in their place.
+    // Every point of the scale (also those no text got), and values between them (combined half points) or beyond
+    // them (plain-text answers on a scale of the answers seen) in their place.
     const all = [...new Set([...points, ...counts.keys()])].sort(sortNumeric);
     bins = all.map((x) => ({ key: String(x), label: scaleLabel(x), n: counts.get(x) ?? 0, value: x, ...(points.includes(x) ? {} : { extra: true }) }));
   } else bins = histogram(xs);
-  return { ...base, diverging, bins, n: xs.length, leftOut: { n: leftN, values: left }, ...stats, sides, yes: null };
+  // A 0/1 scale (a flag, or a codebook of 0 and 1): its mean is a share, so the share of 1s with a Wilson interval.
+  const zeroOne = kind === 'scale' && points.length === 2 && points[0] === 0 && points[1] === 1;
+  const yes = zeroOne ? share(xs.filter((x) => x === 1).length, xs.filter((x) => x === 0).length, '1') : null;
+  return {
+    ...base,
+    kind,
+    range,
+    diverging,
+    bins,
+    n: xs.length,
+    leftOut: { n: leftN, values: left, offScale, scale: fixed },
+    ...stats,
+    ...(zeroOne ? { mean: null, sd: null, ci: null } : {}),
+    sides,
+    yes,
+  };
 }
 
-/** Numbers: a bar per value when there are at most 15 distinct ones, else 10 bins of equal width. */
+/** A share of yes (or of 1) among yes and no (1 and 0), with its 95% Wilson interval; null when there are none. */
+function share(yes: number, no: number, word: 'Yes' | '1'): FieldSummary['yes'] {
+  const n = yes + no;
+  return n ? { share: yes / n, n, ci: wilsonCI(yes / n, n), word } : null;
+}
+
+/**
+ * Numbers: a bar per value when there are at most 15 distinct ones, else bins of a round width (1, 2, 2.5 or 5 times a
+ * power of ten) starting at a multiple of it, about 10 of them: years 1965–2014 in bins of 5 from 1965. The highest
+ * value goes into the last bin.
+ */
 export function histogram(xs: number[]): Bin[] {
   if (!xs.length) return [];
   const counts = new Map<number, number>();
@@ -246,16 +315,24 @@ export function histogram(xs: number[]): Bin[] {
   let lo = Infinity;
   let hi = -Infinity;
   for (const x of xs) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
-  const k = 10;
-  const width = (hi - lo) / k;
+  const raw = (hi - lo) / 10;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const width = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((w) => w >= raw - 1e-12)!;
+  const start = Math.floor(lo / width + 1e-9) * width;
+  const k = Math.max(1, Math.ceil((hi - start) / width - 1e-9));
   const n = Array.from({ length: k }, () => 0);
-  // (The highest value goes into the last bin.)
-  for (const x of xs) n[Math.min(k - 1, Math.floor((x - lo) / width))]++;
-  const edge = (x: number) => scaleLabel(Number(x.toPrecision(3)));
+  for (const x of xs) n[Math.min(k - 1, Math.floor((x - start) / width + 1e-9))]++;
+  // As many decimals as the width needs (2.5 → 1, 0.25 → 2, 5 → 0).
+  const m = width / 10 ** Math.floor(Math.log10(width));
+  const decimals = Math.max(0, -Math.floor(Math.log10(width)) + (Math.abs(m - Math.round(m)) > 1e-9 ? 1 : 0));
+  const edge = (x: number) => {
+    const t = (Math.abs(x) < width * 1e-9 ? 0 : x).toFixed(decimals);
+    return t.startsWith('-') ? `−${t.slice(1)}` : t;
+  };
   return n.map((c, i) => {
-    const a = lo + i * width;
-    const b = i === k - 1 ? hi : lo + (i + 1) * width;
-    return { key: `${a}|${b}`, label: `${edge(a)}–${edge(b)}`, n: c, value: (a + b) / 2 };
+    const a = start + i * width;
+    const b = a + width;
+    return { key: `${a}|${b}`, label: `${edge(a)}–${edge(b)}`, n: c, value: (a + b) / 2, from: a, to: b, fromLabel: edge(a), toLabel: edge(b) };
   });
 }
 
