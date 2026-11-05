@@ -21,6 +21,7 @@ import {
   type FieldSummary,
   type Group,
   type Subset,
+  TIE_KEY,
 } from '../lib/summary';
 import type { Doc, Run, Study } from '../lib/types';
 import { fmtInt } from '../lib/util';
@@ -487,11 +488,14 @@ function MeanText({ s }: { s: FieldSummary }) {
         <strong>{num(s.mean)}</strong> <span className="sum-ci">{ciText(s.ci, (x) => num(x))}</span>
       </>
     );
-  // Categories: the most common of the codebook's (not "No majority" or a value outside it).
+  // Categories: the most common of the codebook's (not "No majority" or a value outside it), as a share of the texts
+  // with a majority: ties left out of the denominator, as in the share of yes.
   const top = s.bins.filter((b) => !b.extra).sort((a, b) => b.n - a.n)[0];
+  const ties = s.bins.find((b) => b.key === TIE_KEY)?.n ?? 0;
   return top && top.n ? (
-    <span className="sum-ci">
-      Most: <strong className="sum-ink">{top.label}</strong> ({pct(top.n, s.n)})
+    <span className="sum-ci" title={ties ? `Share of the ${fmtInt(s.n - ties)} with a majority (${fmtInt(ties)} ties left out, as for yes / no)` : undefined}>
+      Most: <strong className="sum-ink">{top.label}</strong> ({pct(top.n, s.n - ties)}
+      {ties ? ' with a majority' : ''})
     </span>
   ) : (
     <span className="sum-ci">—</span>
