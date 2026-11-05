@@ -238,7 +238,7 @@ export const TIE_KEY = '\u0000tie';
  * One field of one run, over `items` (the run's texts, or a group of them): its bars and figures. Texts without an
  * answer (failed, waiting) are not counted at all; annotated texts without a value for the field are `missing`.
  */
-export function summarizeField(run: Run, field: ComparableField, items: RunItem[]): FieldSummary {
+export function summarizeField(run: Run, field: ComparableField, items: RunItem[], categoryOrder?: string[]): FieldSummary {
   const shape = shapeOf(field);
   const values: string[] = [];
   // (Each value as written, for the note on values left out: "NA", not "na".)
@@ -268,7 +268,8 @@ export function summarizeField(run: Run, field: ComparableField, items: RunItem[
     // whose annotations had no majority (ties such as "critical | neutral"), as one bar: with several annotations per
     // text there can be many different ties.
     const byCount = (keys: string[]) => keys.sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b));
-    const own = field.yesNo ? ['true', 'false'] : field.allowed.length ? field.allowed : byCount([...counts.keys()].filter((k) => !isTie(k)));
+    const given = categoryOrder ? [...categoryOrder, ...byCount([...counts.keys()].filter((k) => !isTie(k) && !categoryOrder.includes(k)))] : null;
+    const own = field.yesNo ? ['true', 'false'] : field.allowed.length ? field.allowed : (given ?? byCount([...counts.keys()].filter((k) => !isTie(k))));
     const bins: Bin[] = own.map((k) => ({ key: k, label: label(k), n: counts.get(k) ?? 0 }));
     for (const k of byCount([...counts.keys()].filter((k) => !own.includes(k) && !isTie(k)))) bins.push({ key: k, label: label(k), n: counts.get(k)!, extra: true });
     const ties = [...counts.entries()].filter(([k]) => isTie(k)).reduce((t, [, n]) => t + n, 0);
@@ -382,13 +383,17 @@ export interface ColumnInfo {
   min: number;
   max: number;
   whole: boolean;
-  /** Texts with a value. */
+  /** Texts with a value, and without one. */
   filled: number;
+  blank: number;
 }
 
 const collator = new Intl.Collator('en-US', { numeric: true, sensitivity: 'base' });
 
-/** The metadata columns of the run's texts with at least two different values, in the order they first appear. */
+/**
+ * The metadata columns of the run's texts, in the order they first appear, that tell texts apart: two or more
+ * different values, or one value that only some texts have (a sample marked “validation”, the rest blank).
+ */
 export function columnInfo(items: RunItem[]): ColumnInfo[] {
   const seen = new Map<string, { values: Set<string>; filled: number; nums: number; min: number; max: number; whole: boolean }>();
   for (const { doc } of items)
@@ -408,11 +413,11 @@ export function columnInfo(items: RunItem[]): ColumnInfo[] {
       }
     }
   return [...seen.entries()]
-    .filter(([, c]) => c.values.size >= 2)
+    .filter(([, c]) => c.values.size >= 2 || c.filled < items.length)
     .map(([name, c]) => {
       const numeric = c.nums >= c.filled * 0.9 && c.max > c.min;
       const values = [...c.values].slice(0, 200).sort((a, b) => (numeric ? toNumber(a) - toNumber(b) || collator.compare(a, b) : collator.compare(a, b)));
-      return { name, numeric, values, more: c.values.size > 200, min: c.min, max: c.max, whole: c.whole, filled: c.filled };
+      return { name, numeric, values, more: c.values.size > 200, min: c.min, max: c.max, whole: c.whole, filled: c.filled, blank: items.length - c.filled };
     });
 }
 
@@ -423,12 +428,17 @@ export function columnInfo(items: RunItem[]): ColumnInfo[] {
  * still counts (the rest form "(no value)").
  */
 export function splitColumns(columns: ColumnInfo[]): ColumnInfo[] {
-  return columns.filter((c) => c.numeric || (!c.more && c.values.length <= 30 && c.values.length <= c.filled * 0.7));
+  // (Groups: its values, and "(no value)" when some texts have none. A column of numbers too wide for round steps,
+  // e.g. 7-digit catalog numbers, isn't offered.)
+  const groups = (c: ColumnInfo) => c.values.length + (c.blank ? 1 : 0);
+  return columns.filter((c) =>
+    c.numeric ? periodSteps(c).steps.length > 0 : !c.more && groups(c) >= 2 && c.values.length <= 30 && (c.values.length === 1 || c.values.length <= c.filled * 0.7),
+  );
 }
 
 /** Columns texts can be shown by: numbers (a range), or values that repeat (not an identifier such as a file name). */
 export function filterColumns(columns: ColumnInfo[]): ColumnInfo[] {
-  return columns.filter((c) => c.numeric || (!c.more && c.values.length <= c.filled * 0.7));
+  return columns.filter((c) => c.numeric || (!c.more && (c.values.length === 1 || c.values.length <= c.filled * 0.7)));
 }
 
 /**
@@ -442,7 +452,8 @@ export function periodSteps(c: ColumnInfo): { steps: number[]; preferred: number
   for (const mag of [0.01, 0.1, 1, 10, 100, 1000, 10000])
     for (const m of [1, 2, 2.5, 5]) {
       const w = Math.round(m * mag * 1000) / 1000;
-      if (w < 1 && c.whole) continue;
+      // (Whole numbers: whole steps only, so every period holds the same number of values: no 2.5-year periods.)
+      if (c.whole && !Number.isInteger(w)) continue;
       const g = groups(w);
       if (g >= 3 && g <= 40 && !(w === 1 && c.whole && steps.includes(0) && g === c.values.length)) steps.push(w);
     }
@@ -466,35 +477,52 @@ export interface Group {
  * that width starting at multiples of it: 1950–1954, 1955–1959 for whole numbers (a period's last year is in it), or
  * 0.5–1 for others; texts whose value isn't a number count as having none.
  */
-export function summarizeByGroup(run: Run, field: ComparableField, items: RunItem[], column: string, step = 0, whole = true): Group[] {
+export function summarizeByGroup(run: Run, field: ComparableField, items: RunItem[], column: string, step = 0, whole = true, numeric = step > 0): Group[] {
   const groups = new Map<string, { items: RunItem[]; from?: number; to?: number }>();
-  const add = (key: string, item: RunItem, from?: number, to?: number) => {
+  const add = (key: string, item: RunItem | null, from?: number, to?: number) => {
     const g = groups.get(key);
-    if (g) g.items.push(item);
-    else groups.set(key, { items: [item], from, to });
+    if (!g) groups.set(key, { items: item ? [item] : [], from, to });
+    else if (item) g.items.push(item);
   };
+  const round = (x: number) => Math.round(x * 1e6) / 1e6;
   for (const item of items) {
     const raw = (item.doc.meta[column] ?? '').trim();
-    if (step > 0) {
-      const n = toNumber(raw);
-      if (!Number.isFinite(n)) add('', item);
-      else {
-        const from = Math.round(Math.floor(n / step + 1e-9) * step * 1e6) / 1e6;
-        add(String(from), item, from, Math.round((from + step) * 1e6) / 1e6);
-      }
-    } else add(raw, item);
+    if (!numeric) {
+      add(raw, item);
+      continue;
+    }
+    // A column of numbers: by the number (2001 and 2001.0 are one group; text such as "n.d." has none).
+    const n = toNumber(raw);
+    if (!Number.isFinite(n)) add('', item);
+    else if (step > 0) {
+      const from = round(Math.floor(n / step + 1e-9) * step);
+      add(String(from), item, from, round(from + step));
+    } else add(String(n), item, n, n);
+  }
+  // Periods: every one from the first to the last, also those no text falls in, so the axis is even.
+  if (step > 0) {
+    const starts = [...groups.values()].flatMap((g) => (g.from !== undefined ? [g.from] : []));
+    if (starts.length) {
+      const [first, last] = [Math.min(...starts), Math.max(...starts)];
+      for (let k = 0, from = first; from <= last + 1e-9 && k < 1000; k++, from = round(first + k * step)) add(String(from), null, from, round(from + step));
+    }
   }
   const label = (from: number, to: number) => {
-    const end = whole ? to - 1 : to;
-    return end === from ? scaleLabel(from) : `${scaleLabel(from)}–${scaleLabel(end)}`;
+    if (step === 0) return scaleLabel(from);
+    // (Whole numbers: the last value in the period, 1950–1954. Others: up to but not including the next, 0.2–<0.3.)
+    if (whole) return to - 1 === from ? scaleLabel(from) : `${scaleLabel(from)}–${scaleLabel(to - 1)}`;
+    return `${scaleLabel(from)}–<${scaleLabel(to)}`;
   };
+  // Categories without a codebook: one order (most frequent first) over all the texts, so a category keeps its color
+  // in every group.
+  const order = field.level === 'nominal' && !field.yesNo && !field.allowed.length ? summarizeField(run, field, items).bins.filter((b) => !b.extra).map((b) => b.key) : undefined;
   return [...groups.entries()]
     .sort(([a, x], [b, y]) => (a === '' ? 1 : b === '' ? -1 : x.from !== undefined && y.from !== undefined ? x.from - y.from : collator.compare(a, b)))
     .map(([g, x]) => ({
       group: g === '' ? '(no value)' : x.from !== undefined ? label(x.from, x.to!) : g,
       none: g === '',
-      ...(x.from !== undefined ? { from: x.from, to: x.to } : {}),
-      summary: summarizeField(run, field, x.items),
+      ...(x.from !== undefined ? { from: x.from, to: step > 0 ? x.to : undefined } : {}),
+      summary: summarizeField(run, field, x.items, order),
     }));
 }
 
@@ -520,8 +548,10 @@ export function filterItems(items: RunItem[], subset: Subset | null): RunItem[] 
 /** The subset in words: "journal = American Quarterly", "year 1990 to 2026". */
 export function subsetLabel(subset: Subset): string {
   if (subset.value !== undefined) return `${subset.column} = ${subset.value}`;
-  const f = subset.from !== undefined ? scaleLabel(subset.from) : '';
-  const t = subset.to !== undefined ? scaleLabel(subset.to) : '';
+  // (As typed, not rounded: 0.125 stays 0.125.)
+  const exact = (x: number) => String(x).replace(/^-/, '−');
+  const f = subset.from !== undefined ? exact(subset.from) : '';
+  const t = subset.to !== undefined ? exact(subset.to) : '';
   return f && t ? (f === t ? `${subset.column} = ${f}` : `${subset.column} ${f} to ${t}`) : f ? `${subset.column} from ${f}` : t ? `${subset.column} up to ${t}` : subset.column;
 }
 

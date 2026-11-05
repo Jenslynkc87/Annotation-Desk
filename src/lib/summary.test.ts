@@ -399,3 +399,95 @@ describe('filter and periods', () => {
     expect(filterItems(items, null)).toBe(items);
   });
 });
+
+describe('review of the filter and periods (Nov 6)', () => {
+  const prompt: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'structured', variables: [{ name: 'o', type: 'ordinal', values: ['-3', '-2', '-1', '0', '1', '2', '3'], description: '' }] };
+  const mk = (metas: Record<string, string>[], scores?: string[]) => {
+    const docs = metas.map((m, i) => doc(i, m));
+    const run = makeRun(prompt, docs.map((d) => d.id));
+    const results = docs.map((d, i) => result(run.id, d.id, 1, { o: scores?.[i] ?? '0' }));
+    const views = buildDocViews(docs, [run], results, run.id);
+    return { run, items: runItems(run, docs, views), field: comparableFields(run, views.values())[0] };
+  };
+
+  it('offers whole steps only for whole numbers (no 2.5-year periods)', async () => {
+    const { columnInfo, periodSteps } = await import('./summary');
+    const { items } = mk(Array.from({ length: 78 }, (_, i) => ({ year: String(1949 + i) })));
+    const { steps } = periodSteps(columnInfo(items).find((c) => c.name === 'year')!);
+    expect(steps.every(Number.isInteger)).toBe(true);
+    expect(steps).toEqual(expect.arrayContaining([2, 5, 10, 20, 25]));
+  });
+
+  it('groups a column of numbers by each number, in numeric order, text values without a number', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    const labels = ['-1', '-2', '0', '2', '-3', '2.0', 'n.d.', '−3'];
+    const { run, items, field } = mk(labels.map((v) => ({ gold: v })));
+    const g = summarizeByGroup(run, field, items, 'gold', 0, true, true);
+    expect(g.map((x) => [x.group, x.summary.n])).toEqual([
+      ['−3', 2],
+      ['−2', 1],
+      ['−1', 1],
+      ['0', 1],
+      ['2', 2],
+      ['(no value)', 1],
+    ]);
+  });
+
+  it('keeps every period between the first and the last, empty ones too', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    const years = [1950, 1951, 1972, 1973];
+    const { run, items, field } = mk(years.map((y) => ({ year: String(y) })));
+    const g = summarizeByGroup(run, field, items, 'year', 5, true, true);
+    expect(g.map((x) => [x.group, x.summary.n])).toEqual([
+      ['1950–1954', 2],
+      ['1955–1959', 0],
+      ['1960–1964', 0],
+      ['1965–1969', 0],
+      ['1970–1974', 2],
+    ]);
+  });
+
+  it('labels periods of fractions as half-open', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    const { run, items, field } = mk([{ p: '0.2' }, { p: '0.25' }, { p: '0.31' }]);
+    const g = summarizeByGroup(run, field, items, 'p', 0.1, false, true);
+    expect(g.map((x) => x.group)).toEqual(['0.2–<0.3', '0.3–<0.4']);
+  });
+
+  it('can show and split by a column only some texts have (a sample marked validation)', async () => {
+    const { columnInfo, filterColumns, splitColumns, filterItems } = await import('./summary');
+    const { items } = mk([{ sample: 'validation' }, {}, {}, { sample: 'validation' }, {}]);
+    const cols = columnInfo(items);
+    expect(filterColumns(cols).map((c) => c.name)).toEqual(['sample']);
+    expect(splitColumns(cols).map((c) => c.name)).toEqual(['sample']);
+    expect(filterItems(items, { column: 'sample', value: 'validation' }).length).toBe(2);
+  });
+
+  it('leaves out columns of numbers too wide for round steps (catalog numbers)', async () => {
+    const { columnInfo, splitColumns } = await import('./summary');
+    const { items } = mk(Array.from({ length: 60 }, (_, i) => ({ jstor: String(1000000 + i * 137713) })));
+    expect(splitColumns(columnInfo(items)).map((c) => c.name)).toEqual([]);
+  });
+
+  it('gives categories without a codebook the same order (and colors) in every group', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    const p2: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'structured', variables: [{ name: 't', type: 'category', values: [], description: '' }] };
+    const docs = ['1950', '1950', '1950', '1951', '1951', '1951', '1951'].map((y, i) => doc(i, { year: y }));
+    const run = makeRun(p2, docs.map((d) => d.id));
+    const vals = ['x', 'x', 'y', 'y', 'y', 'y', 'x'];
+    const results = docs.map((d, i) => result(run.id, d.id, 1, { t: vals[i] }));
+    const views = buildDocViews(docs, [run], results, run.id);
+    const items = runItems(run, docs, views);
+    const g = summarizeByGroup(run, comparableFields(run, views.values())[0], items, 'year', 0, true, true);
+    expect(g.map((x) => x.summary.bins.map((b) => b.key))).toEqual([
+      ['y', 'x'],
+      ['y', 'x'],
+    ]);
+  });
+
+  it('names a typed range exactly', async () => {
+    const { subsetLabel } = await import('./summary');
+    expect(subsetLabel({ column: 'p', from: 0.125, to: 0.5 })).toBe('p 0.125 to 0.5');
+    expect(subsetLabel({ column: 'x', from: -2 })).toBe('x from −2');
+  });
+});

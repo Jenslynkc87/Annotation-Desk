@@ -91,7 +91,7 @@ export function RunSummary({
   const field = fields.find((f) => f.key === chosen?.key);
   const groups = useMemo(() => {
     if (!split || !field) return [];
-    const g = summarizeByGroup(run, field, items, split, step, scol?.whole ?? true);
+    const g = summarizeByGroup(run, field, items, split, step, scol?.whole ?? true, !!scol?.numeric);
     if (!byMean || scol?.numeric) return g;
     // Lowest mean (or share of yes) first; groups without one, and "(no value)", last.
     const key = (x: Group) => (x.none ? Infinity : (x.summary.mean ?? x.summary.yes?.share ?? Infinity));
@@ -109,7 +109,9 @@ export function RunSummary({
   const file = (part: string) => `${slug(study.name || 'study')}_${name}_${part}${shownLabel ? `_${slug(shownLabel)}` : ''}`;
   const splitName = `${split}${steps && step > 0 ? ` (steps of ${step})` : ''}`;
   const timeGroups: TimeGroup[] = overTime ? groups.filter((g) => !g.none).map((g) => ({ tick: g.from !== undefined ? scaleLabel(g.from) : g.group, name: g.group, s: g.summary })) : [];
+  // Annotated texts without a number in the split column (left out of the over-time chart).
   const noneGroup = groups.find((g) => g.none);
+  const noneCount = noneGroup ? noneGroup.summary.n + noneGroup.summary.missing + noneGroup.summary.leftOut.n : 0;
 
   return (
     <div className="card card-pad sum" onMouseMove={tip.move} onMouseLeave={tip.hide}>
@@ -208,14 +210,16 @@ export function RunSummary({
 
       {!counts.annotated ? (
         <div className="empty">
-          <strong>{running ? 'No answers yet' : 'Nothing to show'}</strong>
-          {running
-            ? 'The figures appear here as answers come in.'
-            : !counts.total
-              ? `None of this run’s ${w.many} are in the study any more.`
-              : counts.failed === counts.total
-                ? `Every request in this run failed. “Retry failed” in the table above sends them again.`
-                : 'This run stopped before an answer came back.'}
+          <strong>{shownLabel && !counts.total ? `No ${w.many} with ${shownLabel}` : running ? 'No answers yet' : 'Nothing to show'}</strong>
+          {shownLabel && !counts.total
+            ? `None of this run’s ${w.many} has ${shownLabel}. Change or clear “Show” above.`
+            : running
+              ? `The figures appear here as answers come in${shownLabel ? ` for the ${w.many} with ${shownLabel}` : ''}.`
+              : !counts.total
+                ? `None of this run’s ${w.many} are in the study any more.`
+                : counts.failed === counts.total
+                  ? `Every request${shownLabel ? ` for the ${w.many} with ${shownLabel}` : ' in this run'} failed. “Retry failed” in the table above sends them again.`
+                  : `This run stopped before an answer came back${shownLabel ? ` for the ${w.many} with ${shownLabel}` : ''}.`}
         </div>
       ) : !summaries.length ? (
         <div className="notice warn" style={{ marginTop: 12 }}>
@@ -299,7 +303,7 @@ export function RunSummary({
                 Descriptive: groups are not tested against each other. No interval below 10 {w.many}.
                 {overTime && steps && step > 0 && ' Periods start at multiples of the step, so the first and last may be only partly covered.'}
                 {overTime && timeGroups.some((g) => g.s.n > 0 && g.s.n < FEW) && ` Paler columns have fewer than ${FEW} ${w.many}.`}
-                {overTime && noneGroup && ` ${fmtInt(noneGroup.summary.n)} ${noneGroup.summary.n === 1 ? w.one : w.many} without a number in “${split}” are left out of the chart.`}
+                {overTime && noneCount > 0 && ` ${fmtInt(noneCount)} annotated ${noneCount === 1 ? w.one : w.many} without a number in “${split}” ${noneCount === 1 ? 'is' : 'are'} left out of the chart.`}
               </p>
             </>
           )}

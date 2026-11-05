@@ -148,6 +148,9 @@ class Svg {
   parts: string[] = [];
   rect(x: number, y: number, w: number, h: number, fill: string, extra = '') {
     if (w <= 0 || h <= 0) return;
+    // (A part thinner than the white gap between parts keeps a hairline, so one text in 300 doesn't vanish.)
+    w = Math.max(w, 0.35);
+    h = Math.max(h, 0.35);
     this.parts.push(`<rect x="${r2(x)}" y="${r2(y)}" width="${r2(w)}" height="${r2(h)}" fill="${fill}"${extra}/>`);
   }
   line(x1: number, y1: number, x2: number, y2: number, stroke: string, width = 0.5) {
@@ -257,6 +260,8 @@ export function rowsFigure(rows: FigureRow[], opts: { widthMm: number; oneField:
     ys.push(mid);
     svg.text(0, mid + 2.8, fit(r.name, nameW), { fill: INK });
     const s = r.s;
+    // A part of the bar with a white gap on each side, or, if thinner than the gap, a hairline without one.
+    const part = (x0: number, w: number, fill: string) => svg.rect(w > GAP * 2 ? x0 + GAP / 2 : x0, mid - barH / 2, w > GAP * 2 ? w - GAP : w, barH, fill);
     if (s.n && s.diverging && s.sides) {
       svg.text(barX - 3, mid + 2.5, pct(s.sides.below, s.n), { size: SMALL, fill: MUTED, anchor: 'end' });
       svg.text(barX + barW + 3, mid + 2.5, pct(s.sides.above, s.n), { size: SMALL, fill: MUTED });
@@ -265,24 +270,24 @@ export function rowsFigure(rows: FigureRow[], opts: { widthMm: number; oneField:
       const at = (share: number) => (share / span) * barW;
       // The shared center (0) of the bars, through this row.
       svg.line(center, mid - barH / 2 - 2.5, center, mid + barH / 2 + 2.5, AXIS, 0.6);
-      if (midBin && midBin.n) svg.rect(center - at(half) + GAP / 2, mid - barH / 2, at(half * 2) - GAP, barH, PALETTE.mid);
+      if (midBin && midBin.n) part(center - at(half), at(half * 2), PALETTE.mid);
       let left = center - at(half);
       for (const b of s.bins.filter((x) => (x.value ?? 0) < 0).reverse()) {
         const w = at(b.n / s.n);
-        if (b.n) svg.rect(left - w + GAP / 2, mid - barH / 2, w - GAP, barH, binHex(s, b));
+        if (b.n) part(left - w, w, binHex(s, b));
         left -= w;
       }
       let right = center + at(half);
       for (const b of s.bins.filter((x) => (x.value ?? 0) > 0)) {
         const w = at(b.n / s.n);
-        if (b.n) svg.rect(right + GAP / 2, mid - barH / 2, w - GAP, barH, binHex(s, b));
+        if (b.n) part(right, w, binHex(s, b));
         right += w;
       }
     } else if (s.n && s.kind !== 'number') {
       let x = barX;
       for (const b of s.bins.filter((x) => x.n)) {
         const w = (b.n / s.n) * barW;
-        svg.rect(x + GAP / 2, mid - barH / 2, w - GAP, barH, binHex(s, b));
+        part(x, w, binHex(s, b));
         x += w;
       }
     } else if (!s.n) svg.text(barX, mid + 2.5, 'no values', { size: SMALL, fill: MUTED });
@@ -468,7 +473,8 @@ export function timeFigure(groups: TimeGroup[], opts: { widthMm: number; descrip
       for (const p of parts) {
         const y1 = yy(p.to);
         const y2 = yy(p.from);
-        svg.rect(cx(i) - colW / 2, y1 + GAP / 2, colW, y2 - y1 - GAP, binHex(groups[i].s, p.b), pale);
+        const h = y2 - y1;
+        if (h > 0) svg.rect(cx(i) - colW / 2, y1 + (h > GAP * 2 ? GAP / 2 : 0), colW, h > GAP * 2 ? h - GAP : h, binHex(groups[i].s, p.b), pale);
       }
     });
     y = top + H + 4;
@@ -495,7 +501,8 @@ export function timeFigure(groups: TimeGroup[], opts: { widthMm: number; descrip
     means.points.forEach((p, i) => {
       if (!p) return;
       if (p.ci) svg.line(cx(i), yy(p.ci[1]), cx(i), yy(p.ci[0]), INK, 0.9);
-      svg.circle(cx(i), yy(p.m), 2.2, INK);
+      // (Periods with fewer than 10 texts paler, as their columns.)
+      svg.circle(cx(i), yy(p.m), 2.2, groups[i].s.n < 10 ? mixHex(INK, '#ffffff', 0.55) : INK);
     });
     y = top + H + 4;
   }
