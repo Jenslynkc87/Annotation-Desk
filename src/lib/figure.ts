@@ -28,12 +28,12 @@ const GAP = 0.6; // pt of white between touching parts of a bar
 /** The panel's light-mode colors (src/styles.css, --sum-*), as hex: the figures don't depend on the screen's theme. */
 const PALETTE: Record<string, string> = {
   mid: '#d5d4d1',
-  'neg-1': '#eca071',
-  'neg-2': '#dc702f',
-  'neg-3': '#a64a18',
-  'pos-1': '#86b6ef',
-  'pos-2': '#3987e5',
-  'pos-3': '#1c5cab',
+  'neg-1': '#86b6ef',
+  'neg-2': '#3987e5',
+  'neg-3': '#1c5cab',
+  'pos-1': '#eca071',
+  'pos-2': '#dc702f',
+  'pos-3': '#a64a18',
   'seq-1': '#86b6ef',
   'seq-2': '#3987e5',
   'seq-3': '#1c5cab',
@@ -91,6 +91,27 @@ function scaleHex(s: FieldSummary, v: number): string {
 }
 const categoryHex = (s: FieldSummary, b: Bin) => PALETTE[categoryKey(s.bins.indexOf(b), !!b.extra, s.bins.filter((x) => !x.extra).length)];
 const binHex = (s: FieldSummary, b: Bin) => (s.kind === 'categories' ? categoryHex(s, b) : s.kind === 'scale' ? scaleHex(s, b.value ?? 0) : PALETTE['seq-2']);
+
+/* ------------------------------------------------------------------ axes */
+
+/**
+ * Round ticks (1, 2, 2.5 or 5 times a power of ten) between `lo` and `hi`: the finest such step that gives at most
+ * `max` of them, so there are always at least two (−1, 0, 1 on −1.6…1.3, not 0 alone).
+ */
+export function niceTicks(lo: number, hi: number, max = 5): number[] {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+  const mag0 = 10 ** Math.floor(Math.log10(span / max));
+  for (const mag of [mag0, mag0 * 10, mag0 * 100])
+    for (const m of [1, 2, 2.5, 5]) {
+      const step = m * mag;
+      const first = Math.ceil(lo / step - 1e-9);
+      const last = Math.floor(hi / step + 1e-9);
+      const n = last - first + 1;
+      if (n <= max) return Array.from({ length: n }, (_, i) => Math.round((first + i) * step * 1e6) / 1e6);
+    }
+  return [lo, hi];
+}
 
 /* ------------------------------------------------------------------ text */
 
@@ -187,6 +208,9 @@ function scaleItems(s: FieldSummary): { color: string; label: string }[] {
 export interface FigureRow {
   name: string;
   s: FieldSummary;
+  /** A period of a column of numbers (1950–1954: from 1950 to 1955), for the CSV. */
+  from?: number;
+  to?: number;
 }
 
 /**
@@ -326,12 +350,173 @@ function figureAxis(rows: FigureRow[], oneField: boolean): FigureAxis | null {
   lo -= pad;
   hi += pad;
   if (share) (lo = Math.max(0, lo)), (hi = Math.min(1, hi));
-  const raw = (hi - lo) / 3;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((x) => x >= raw) ?? raw;
-  const ticks: number[] = [];
-  for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) ticks.push(Math.round(t / step) * step);
+  const ticks = niceTicks(lo, hi, 4);
   return { ticks, at: (x) => (x - lo) / (hi - lo), label: share ? (x) => `${Math.round(x * 100)}%` : (x) => scaleLabel(x), share };
+}
+
+/* ------------------------------------------------------------------ over time */
+
+/** One period (or value) of a split by a column of numbers, in order. */
+export interface TimeGroup {
+  /** The axis label (a period's first value, e.g. 1950) and the full name (1950–1954). */
+  tick: string;
+  name: string;
+  s: FieldSummary;
+}
+
+/**
+ * The shares in each period as stacked columns: on a scale around 0, values below 0 stack down from the baseline and
+ * values above 0 up, with 0 straddling it; otherwise columns of 100% (the scale's low values or the first category at
+ * the bottom). Their geometry, in shares: shared by the screen and the downloaded figure.
+ */
+export function timeStacks(groups: TimeGroup[]): { diverging: boolean; lo: number; hi: number; ticks: number[]; parts: { b: Bin; from: number; to: number }[][] } {
+  const diverging = groups.some((g) => g.s.diverging && g.s.n);
+  const parts = groups.map(({ s }) => {
+    const out: { b: Bin; from: number; to: number }[] = [];
+    if (!s.n || s.kind === 'number') return out;
+    if (diverging && s.diverging) {
+      const mid = s.bins.find((b) => b.value === 0);
+      const half = mid ? mid.n / s.n / 2 : 0;
+      if (mid && mid.n) out.push({ b: mid, from: -half, to: half });
+      let down = -half;
+      for (const b of s.bins.filter((x) => (x.value ?? 0) < 0).reverse()) {
+        const h = b.n / s.n;
+        if (b.n) out.push({ b, from: down - h, to: down });
+        down -= h;
+      }
+      let up = half;
+      for (const b of s.bins.filter((x) => (x.value ?? 0) > 0)) {
+        const h = b.n / s.n;
+        if (b.n) out.push({ b, from: up, to: up + h });
+        up += h;
+      }
+    } else {
+      let at = 0;
+      for (const b of s.bins.filter((x) => x.n)) {
+        const h = b.n / s.n;
+        out.push({ b, from: at, to: at + h });
+        at += h;
+      }
+    }
+    return out;
+  });
+  if (!diverging) return { diverging, lo: 0, hi: 1, ticks: [0, 0.25, 0.5, 0.75, 1], parts };
+  const down = Math.max(0.05, ...parts.flat().map((p) => -p.from));
+  const up = Math.max(0.05, ...parts.flat().map((p) => p.to));
+  const step = Math.max(down, up) > 0.5 ? 0.2 : 0.1;
+  const lo = -Math.ceil(down / step - 1e-9) * step;
+  const hi = Math.ceil(up / step - 1e-9) * step;
+  const ticks: number[] = [];
+  for (let t = lo; t <= hi + 1e-9; t += step) ticks.push(Math.round(t * 100) / 100);
+  return { diverging, lo, hi, ticks, parts };
+}
+
+/**
+ * The means (or shares of yes, of 1s) of the periods with their 95% intervals: the axis from the lowest to the highest
+ * bound, a little wider, taking in 0 on a scale around 0, with round ticks. Null when no period has one.
+ */
+export function timeMeans(groups: TimeGroup[]): { share: boolean; lo: number; hi: number; ticks: number[]; points: ({ m: number; ci: [number, number] | null } | null)[] } | null {
+  const share = !groups.some((g) => g.s.mean !== null) && groups.some((g) => g.s.yes);
+  const points = groups.map(({ s }) => {
+    const m = share ? s.yes?.share : s.mean;
+    return m === undefined || m === null ? null : { m, ci: (share ? s.yes?.ci : s.ci) ?? null };
+  });
+  const xs = points.flatMap((p) => (p ? [p.m, ...(p.ci ?? [])] : []));
+  if (!xs.length) return null;
+  if (!share && groups.some((g) => g.s.diverging)) xs.push(0);
+  let lo = Math.min(...xs);
+  let hi = Math.max(...xs);
+  if (hi - lo < 1e-9) (lo -= share ? 0.05 : 0.5), (hi += share ? 0.05 : 0.5);
+  const pad = (hi - lo) * 0.08;
+  lo -= pad;
+  hi += pad;
+  if (share) (lo = Math.max(0, lo)), (hi = Math.min(1, hi));
+  return { share, lo, hi, ticks: niceTicks(lo, hi, 5), points };
+}
+
+/**
+ * A split by a column of numbers (years) as a figure: stacked columns of the shares per period (`timeStacks`) above,
+ * the means with their intervals below on their own axis (`timeMeans`; two panels, never two scales on one axis),
+ * the periods along the bottom, and a key.
+ */
+export function timeFigure(groups: TimeGroup[], opts: { widthMm: number; description: string; column: string; manyWord?: string }): string {
+  const W = opts.widthMm * PT_PER_MM;
+  const svg = new Svg();
+  const many = opts.manyWord ?? 'texts';
+  const stacks = timeStacks(groups);
+  const means = timeMeans(groups);
+  const hasStacks = stacks.parts.some((p) => p.length);
+  const yAxisW = 26;
+  const plotX = yAxisW;
+  const plotW = W - plotX - 4;
+  const N = groups.length;
+  const cx = (i: number) => plotX + ((i + 0.5) / N) * plotW;
+  const colW = Math.min(16, (plotW / N) * 0.68);
+  let y = 4;
+  if (hasStacks) {
+    const top = y + 10;
+    const H = Math.max(110, Math.min(190, W * 0.36));
+    const yy = (v: number) => top + ((stacks.hi - v) / (stacks.hi - stacks.lo)) * H;
+    svg.text(plotX, y + 5, stacks.diverging ? `Share of ${many}: below 0 down, above 0 up` : `Share of ${many}`, { size: SMALL, fill: MUTED });
+    for (const t of stacks.ticks) {
+      svg.line(plotX, yy(t), plotX + plotW, yy(t), t === 0 && stacks.diverging ? AXIS : GRID, t === 0 && stacks.diverging ? 0.6 : 0.4);
+      svg.text(plotX - 3, yy(t) + 2.5, `${Math.round(Math.abs(t) * 100)}%`, { size: SMALL, fill: MUTED, anchor: 'end' });
+    }
+    stacks.parts.forEach((parts, i) => {
+      // (Periods with fewer than 10 texts paler: one text moves their shares by 10 points or more.)
+      const pale = groups[i].s.n < 10 ? ' fill-opacity="0.45"' : '';
+      for (const p of parts) {
+        const y1 = yy(p.to);
+        const y2 = yy(p.from);
+        svg.rect(cx(i) - colW / 2, y1 + GAP / 2, colW, y2 - y1 - GAP, binHex(groups[i].s, p.b), pale);
+      }
+    });
+    y = top + H + 4;
+  }
+  if (means) {
+    const top = y + 12;
+    const H = Math.max(50, Math.min(80, W * 0.15));
+    const yy = (v: number) => top + ((means.hi - v) / (means.hi - means.lo)) * H;
+    svg.text(plotX, y + 7, means.share ? (groups.some((g) => g.s.yes?.word === '1') ? 'Share of 1s (95% CI)' : 'Share of yes (95% CI)') : 'Mean (95% CI)', { size: SMALL, fill: MUTED });
+    for (const t of means.ticks) {
+      const zero = t === 0 && !means.share;
+      svg.line(plotX, yy(t), plotX + plotW, yy(t), zero ? AXIS : GRID, zero ? 0.6 : 0.4);
+      svg.text(plotX - 3, yy(t) + 2.5, means.share ? `${Math.round(t * 100)}%` : scaleLabel(t), { size: SMALL, fill: MUTED, anchor: 'end' });
+    }
+    // A thin line through the means, in order (periods without one break it), then the intervals and the dots.
+    let d = '';
+    let open = false;
+    means.points.forEach((p, i) => {
+      if (!p) return void (open = false);
+      d += `${open ? ' L' : ' M'}${r2(cx(i))} ${r2(yy(p.m))}`;
+      open = true;
+    });
+    if (d) svg.parts.push(`<path d="${d.trim()}" fill="none" stroke="${MUTED}" stroke-width="0.6"/>`);
+    means.points.forEach((p, i) => {
+      if (!p) return;
+      if (p.ci) svg.line(cx(i), yy(p.ci[1]), cx(i), yy(p.ci[0]), INK, 0.9);
+      svg.circle(cx(i), yy(p.m), 2.2, INK);
+    });
+    y = top + H + 4;
+  }
+  // The periods: every k-th label so they don't run into each other.
+  const widest = Math.max(...groups.map((g) => textWidth(g.tick, SMALL))) + 4;
+  const every = Math.max(1, Math.ceil(widest / (plotW / N)));
+  svg.line(plotX, y, plotX + plotW, y, AXIS, 0.5);
+  groups.forEach((g, i) => {
+    if (i % every) return;
+    svg.line(cx(i), y, cx(i), y + 2, AXIS, 0.5);
+    svg.text(cx(i), y + 9, g.tick, { size: SMALL, fill: MUTED, anchor: 'middle' });
+  });
+  svg.text(plotX + plotW / 2, y + 19, opts.column, { size: SIZE, fill: INK, anchor: 'middle' });
+  y += 24;
+  // Key: the scale's points, or the categories.
+  const keyFrom = groups.filter((g) => g.s.n && g.s.kind !== 'number').reduce<FieldSummary | null>((a, g) => (!a || g.s.bins.filter((b) => b.n).length > a.bins.filter((b) => b.n).length ? g.s : a), null);
+  if (hasStacks && keyFrom) {
+    const widestScale = groups.filter((g) => g.s.kind === 'scale' && g.s.n).reduce<FieldSummary | null>((a, g) => (!a || scaleItems(g.s).length > scaleItems(a).length ? g.s : a), null);
+    y += legend(svg, plotX, y + 6, plotW, keyFrom.kind === 'categories' ? categoryItems(keyFrom) : scaleItems(widestScale ?? keyFrom));
+  }
+  return svg.done(W, y + 2, opts.widthMm, opts.description);
 }
 
 /* ------------------------------------------------------------------ one field */
@@ -509,13 +694,20 @@ function binColumn(s: FieldSummary, b: Bin): string {
  * The numbers behind a rows figure (every field, or one field by group): one row per row, with n, mean, 95% CI, SD,
  * median, range, the shares below/at/above 0, the share of yes (or 1s) with its interval, and the texts at each value.
  */
-export function summaryCsvRows(rows: FigureRow[], meta: { run: string; model: string; appVersion: string; field?: string; groupColumn?: string }): Row[] {
+export function summaryCsvRows(
+  rows: FigureRow[],
+  meta: { run: string; model: string; appVersion: string; field?: string; groupColumn?: string; subset?: string },
+): Row[] {
   // Groups of one field: a value no text of a group got is 0 there (with every field, another field's values are blank).
   const zeros: Row = meta.groupColumn ? Object.fromEntries(rows.flatMap(({ s }) => s.bins.map((b) => [binColumn(s, b), 0]))) : {};
-  return rows.map(({ name, s }) => {
+  return rows.map(({ name, s, from, to }) => {
     const out: Row = { run: meta.run, model: meta.model };
-    if (meta.groupColumn) Object.assign(out, { field: meta.field ?? s.label, [meta.groupColumn]: name });
-    else out.field = s.label;
+    if (meta.subset) out.subset = meta.subset;
+    if (meta.groupColumn) {
+      Object.assign(out, { field: meta.field ?? s.label, [meta.groupColumn]: name });
+      // (A period: its first value and the first value of the next, e.g. 1950 and 1955 for 1950–1954.)
+      if (from !== undefined) Object.assign(out, { period_from: from, period_to_before: to ?? null });
+    } else out.field = s.label;
     Object.assign(out, {
       n: s.n,
       n_without_value: s.missing,
@@ -542,10 +734,11 @@ export function summaryCsvRows(rows: FigureRow[], meta: { run: string; model: st
 }
 
 /** The numbers behind one field's figure: one row per bar (value, texts, share of the texts with a value). */
-export function binCsvRows(s: FieldSummary, meta: { run: string; model: string; appVersion: string }): Row[] {
+export function binCsvRows(s: FieldSummary, meta: { run: string; model: string; appVersion: string; subset?: string }): Row[] {
   return s.bins.map((b) => ({
     run: meta.run,
     model: meta.model,
+    ...(meta.subset ? { subset: meta.subset } : {}),
     field: s.label,
     value: b.from !== undefined ? `${b.from}-${b.to}` : s.kind === 'categories' ? (b.key.startsWith('\u0000') ? 'no majority (tie)' : b.label) : (b.value ?? null),
     n: b.n,

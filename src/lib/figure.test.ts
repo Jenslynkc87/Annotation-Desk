@@ -141,3 +141,48 @@ describe('figure numbers in a split', () => {
     expect(cols).not.toContain('share_yes');
   });
 });
+
+describe('axis ticks', () => {
+  it('always gives at least two round ticks', async () => {
+    const { niceTicks } = await import('./figure');
+    expect(niceTicks(-1.6, 1.3, 6)).toEqual([-1.5, -1, -0.5, 0, 0.5, 1]);
+    expect(niceTicks(-1.6, 1.3, 4)).toEqual([-1, 0, 1]);
+    expect(niceTicks(-1.8, 1.6, 4)).toEqual([-1, 0, 1]);
+    expect(niceTicks(0.1, 0.62, 4)).toEqual([0.2, 0.4, 0.6]);
+    expect(niceTicks(1949, 2026, 5)).toEqual([1960, 1980, 2000, 2020]);
+  });
+});
+
+describe('over time', () => {
+  it('stacks each period to its whole share, 0 straddling the baseline', async () => {
+    const { timeStacks, timeFigure } = await import('./figure');
+    const a = scale([2, 5, 9, 12, 8, 4, 1]);
+    const b = scale([0, 1, 3, 10, 12, 9, 6]);
+    const groups = [
+      { tick: '1950', name: '1950–1954', s: a },
+      { tick: '1955', name: '1955–1959', s: b },
+    ];
+    const st = timeStacks(groups);
+    expect(st.diverging).toBe(true);
+    for (const [i, parts] of st.parts.entries()) {
+      const total = parts.reduce((t, p) => t + (p.to - p.from), 0);
+      expect(total).toBeCloseTo(1, 10);
+      const zero = parts.find((p) => p.b.value === 0)!;
+      expect(zero.from).toBeCloseTo(-zero.to, 10);
+      const below = parts.filter((p) => (p.b.value ?? 0) < 0).reduce((t, p) => t + (p.to - p.from), 0);
+      expect(below).toBeCloseTo(groups[i].s.sides!.below / groups[i].s.n, 10);
+      expect(Math.min(...parts.map((p) => p.from))).toBeGreaterThanOrEqual(st.lo - 1e-9);
+      expect(Math.max(...parts.map((p) => p.to))).toBeLessThanOrEqual(st.hi + 1e-9);
+    }
+    const svg = timeFigure(groups, { widthMm: 85, description: 'd', column: 'year (steps of 5)' });
+    expect(svg).not.toMatch(/NaN|undefined|Infinity/);
+    expect(svg).toContain('Mean (95% CI)');
+    expect(svg).toContain('year (steps of 5)');
+  });
+
+  it('gives the CSV the period bounds and the subset', () => {
+    const s = scale([1, 1, 1, 1, 1, 1, 1]);
+    const [row] = summaryCsvRows([{ name: '1950–1954', s, from: 1950, to: 1955 }], { run: '#1', model: 'm', appVersion: 'v', field: 'F', groupColumn: 'year', subset: 'journal = AQ' });
+    expect(row).toMatchObject({ subset: 'journal = AQ', year: '1950–1954', period_from: 1950, period_to_before: 1955 });
+  });
+});

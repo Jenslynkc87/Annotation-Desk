@@ -2,11 +2,30 @@ import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type Re
 import type { ComparableField } from '../lib/compare';
 import { fixed } from '../lib/metrics';
 import { words } from '../lib/subject';
-import { CATEGORY_SLOTS, categoryKey, groupColumns, runCounts, runItems, scaleLabel, scaleStops, summarizeByGroup, summarizeField, type Bin, type FieldSummary } from '../lib/summary';
+import {
+  CATEGORY_SLOTS,
+  categoryKey,
+  columnInfo,
+  filterColumns,
+  filterItems,
+  periodSteps,
+  runCounts,
+  runItems,
+  scaleLabel,
+  scaleStops,
+  splitColumns,
+  subsetLabel,
+  summarizeByGroup,
+  summarizeField,
+  type Bin,
+  type FieldSummary,
+  type Group,
+  type Subset,
+} from '../lib/summary';
 import type { Doc, Run, Study } from '../lib/types';
 import { fmtInt } from '../lib/util';
 import { runName, runTitle, type DocView } from '../lib/view';
-import { binCsvRows, csvColumns, fieldFigure, FIGURE_WIDTHS, PNG_DPI, rowsFigure, summaryCsvRows, svgToPng, type FigureRow } from '../lib/figure';
+import { binCsvRows, csvColumns, fieldFigure, FIGURE_WIDTHS, niceTicks, PNG_DPI, rowsFigure, summaryCsvRows, svgToPng, timeFigure, timeMeans, timeStacks, type FigureRow, type TimeGroup } from '../lib/figure';
 import { toCsv, type Row } from '../lib/export/tables';
 import { toast } from '../lib/store';
 import { dateStamp, download, errorMessage, slug } from '../lib/util';
@@ -37,25 +56,59 @@ export function RunSummary({
   const [runPick, setRunPick] = useState('');
   const run = runs.find((r) => r.id === runPick) ?? latest;
   const { views, fields } = useMemo(() => load(run), [load, run]);
-  const items = useMemo(() => runItems(run, docs, views), [run, docs, views]);
+  const allItems = useMemo(() => runItems(run, docs, views), [run, docs, views]);
+  // The run's metadata columns: what its texts can be shown by (a subset) and split by.
+  const columns = useMemo(() => columnInfo(allItems), [allItems]);
+  const filterable = useMemo(() => filterColumns(columns), [columns]);
+  const splittable = useMemo(() => splitColumns(columns), [columns]);
+  // Show only: one value of a column, or a range of a column of numbers (blank ends are open).
+  const [filterPick, setFilterPick] = useState<{ column: string; value: string; from: string; to: string }>({ column: '', value: '', from: '', to: '' });
+  const fcol = filterable.find((c) => c.name === filterPick.column);
+  const number = (t: string) => (t.trim() === '' || !Number.isFinite(Number(t)) ? undefined : Number(t));
+  const subset: Subset | null = !fcol
+    ? null
+    : fcol.numeric
+      ? { column: fcol.name, from: number(filterPick.from), to: number(filterPick.to) }
+      : { column: fcol.name, value: fcol.values.includes(filterPick.value) ? filterPick.value : fcol.values[0] };
+  const subsetKey = subset ? JSON.stringify(subset) : '';
+  const shownSubset = subset && (subset.value !== undefined || subset.from !== undefined || subset.to !== undefined) ? subset : null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const items = useMemo(() => filterItems(allItems, shownSubset), [allItems, subsetKey]);
   const replicates = run.snapshot.options.replicates;
   const counts = useMemo(() => runCounts(items, replicates), [items, replicates]);
   const summaries = useMemo(() => fields.map((f) => summarizeField(run, f, items)), [run, fields, items]);
   const [fieldPick, setFieldPick] = useState('');
   const chosen = summaries.find((s) => s.key === fieldPick) ?? summaries[0];
-  const columns = useMemo(() => groupColumns(items), [items]);
   const [splitPick, setSplitPick] = useState('');
-  const split = columns.includes(splitPick) ? splitPick : '';
+  const scol = splittable.find((c) => c.name === splitPick);
+  const split = scol?.name ?? '';
+  // A column of numbers is split in steps (each value, or periods such as five years) and drawn over its values.
+  const steps = useMemo(() => (scol?.numeric ? periodSteps(scol) : null), [scol]);
+  const [stepPick, setStepPick] = useState<number | null>(null);
+  const step = steps ? (stepPick !== null && steps.steps.includes(stepPick) ? stepPick : steps.preferred) : 0;
+  const [byMean, setByMean] = useState(false);
   const field = fields.find((f) => f.key === chosen?.key);
-  const groups = useMemo(() => (split && field ? summarizeByGroup(run, field, items, split) : []), [split, field, run, items]);
+  const groups = useMemo(() => {
+    if (!split || !field) return [];
+    const g = summarizeByGroup(run, field, items, split, step, scol?.whole ?? true);
+    if (!byMean || scol?.numeric) return g;
+    // Lowest mean (or share of yes) first; groups without one, and "(no value)", last.
+    const key = (x: Group) => (x.none ? Infinity : (x.summary.mean ?? x.summary.yes?.share ?? Infinity));
+    return [...g].sort((a, b) => key(a) - key(b));
+  }, [split, field, run, items, step, scol, byMean]);
+  const overTime = !!scol?.numeric;
   const tip = useTip();
   const running = run.status === 'running' || run.status === 'submitted';
   // What the downloads are named after and carry (in the SVG's description and the CSV's columns).
   const name = `run${runName(run, runs)}`;
+  const shownLabel = shownSubset ? subsetLabel(shownSubset) : '';
   const about = (what: string) =>
-    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}. Annotation Desk ${__APP_VERSION__}, ${new Date().toISOString().slice(0, 10)}.`;
-  const csvMeta = { run: `#${runName(run, runs)}`, model: run.snapshot.model.model, appVersion: __APP_VERSION__ };
-  const file = (part: string) => `${slug(study.name || 'study')}_${name}_${part}`;
+    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}${shownLabel ? `, ${w.many} with ${shownLabel}` : ''}. Annotation Desk ${__APP_VERSION__}, ${new Date().toISOString().slice(0, 10)}.`;
+  const csvMeta = { run: `#${runName(run, runs)}`, model: run.snapshot.model.model, appVersion: __APP_VERSION__, ...(shownLabel ? { subset: shownLabel } : {}) };
+  const file = (part: string) => `${slug(study.name || 'study')}_${name}_${part}${shownLabel ? `_${slug(shownLabel)}` : ''}`;
+  const splitName = `${split}${steps && step > 0 ? ` (steps of ${step})` : ''}`;
+  const timeGroups: TimeGroup[] = overTime ? groups.filter((g) => !g.none).map((g) => ({ tick: g.from !== undefined ? scaleLabel(g.from) : g.group, name: g.group, s: g.summary })) : [];
+  const noneGroup = groups.find((g) => g.none);
 
   return (
     <div className="card card-pad sum" onMouseMove={tip.move} onMouseLeave={tip.hide}>
@@ -74,22 +127,83 @@ export function RunSummary({
             ))}
           </select>
         </div>
-        {columns.length > 0 && summaries.length > 0 && (
+        {filterable.length > 0 && summaries.length > 0 && (
+          <div className="field">
+            <label htmlFor="sum-filter">Show</label>
+            <div className="sum-pair">
+              <select
+                id="sum-filter"
+                className="select"
+                value={fcol?.name ?? ''}
+                onChange={(e) => (tip.hide(), setFilterPick({ column: e.target.value, value: '', from: '', to: '' }))}
+              >
+                <option value="">All {w.many}</option>
+                {filterable.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.numeric ? `${c.name}, a range…` : `One ${c.name}…`}
+                  </option>
+                ))}
+              </select>
+              {fcol && !fcol.numeric && (
+                <select className="select" aria-label={`Value of ${fcol.name}`} value={subset?.value ?? ''} onChange={(e) => (tip.hide(), setFilterPick({ ...filterPick, value: e.target.value }))}>
+                  {fcol.values.map((v) => (
+                    <option key={v} value={v}>
+                      {v}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {fcol?.numeric && (
+                <span className="sum-range">
+                  <input
+                    className="input"
+                    type="number"
+                    aria-label={`${fcol.name} from`}
+                    placeholder={scaleLabel(fcol.min).replace('−', '-')}
+                    value={filterPick.from}
+                    onChange={(e) => setFilterPick({ ...filterPick, from: e.target.value })}
+                  />
+                  <span>to</span>
+                  <input
+                    className="input"
+                    type="number"
+                    aria-label={`${fcol.name} to`}
+                    placeholder={scaleLabel(fcol.max).replace('−', '-')}
+                    value={filterPick.to}
+                    onChange={(e) => setFilterPick({ ...filterPick, to: e.target.value })}
+                  />
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {splittable.length > 0 && summaries.length > 0 && (
           <div className="field">
             <label htmlFor="sum-split">Split by</label>
-            <select id="sum-split" className="select" value={split} onChange={(e) => (tip.hide(), setSplitPick(e.target.value))}>
-              <option value="">No split</option>
-              {columns.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+            <div className="sum-pair">
+              <select id="sum-split" className="select" value={split} onChange={(e) => (tip.hide(), setSplitPick(e.target.value), setStepPick(null))}>
+                <option value="">No split</option>
+                {splittable.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              {steps && steps.steps.length > 1 && (
+                <select className="select" aria-label="Group the values" value={step} onChange={(e) => (tip.hide(), setStepPick(Number(e.target.value)))}>
+                  {steps.steps.map((x) => (
+                    <option key={x} value={x}>
+                      {x === 0 ? 'each value' : `steps of ${x}`}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      <Counts counts={counts} w={w} replicates={replicates} running={running} />
+      <Counts counts={counts} w={w} replicates={replicates} running={running} subset={shownLabel} />
 
       {!counts.annotated ? (
         <div className="empty">
@@ -148,22 +262,43 @@ export function RunSummary({
             <>
               <div className="sum-section-head" style={{ marginTop: 22 }}>
                 <p className="section-title">
-                  {chosen.label} by {split}
+                  {chosen.label} by {splitName}
                 </p>
-                <Downloads
-                  name={file(`${slug(chosen.label)}-by-${slug(split)}`)}
-                  svg={(widthMm) =>
-                    rowsFigure(
-                      groups.map((g) => ({ name: g.group, s: g.summary })),
-                      { widthMm, oneField: true, description: about(`the field “${chosen.label}” by ${split}`), manyWord: w.many },
-                    )
-                  }
-                  csv={() => summaryCsvRows(groups.map((g) => ({ name: g.group, s: g.summary })), { ...csvMeta, field: chosen.label, groupColumn: split })}
-                />
+                <span className="sum-head-tools">
+                  {!overTime && groups.some((g) => g.summary.mean !== null || g.summary.yes) && (
+                    <label className="check sum-sort">
+                      <input type="checkbox" checked={byMean} onChange={(e) => setByMean(e.target.checked)} /> Sort by {groups.some((g) => g.summary.mean !== null) ? 'mean' : 'share'}
+                    </label>
+                  )}
+                  <Downloads
+                    name={file(`${slug(chosen.label)}-by-${slug(split)}${steps && step > 0 ? `-${step}` : ''}`)}
+                    svg={(widthMm) =>
+                      overTime
+                        ? timeFigure(timeGroups, { widthMm, column: splitName, description: about(`the field “${chosen.label}” by ${splitName}`), manyWord: w.many })
+                        : rowsFigure(
+                            groups.map((g) => ({ name: g.group, s: g.summary })),
+                            { widthMm, oneField: true, description: about(`the field “${chosen.label}” by ${split}`), manyWord: w.many },
+                          )
+                    }
+                    csv={() =>
+                      summaryCsvRows(
+                        groups.map((g) => ({ name: g.group, s: g.summary, from: g.from, to: g.to })),
+                        { ...csvMeta, field: chosen.label, groupColumn: split },
+                      )
+                    }
+                  />
+                </span>
               </div>
-              <Rows rows={groups.map((g) => ({ id: g.group, name: g.group, s: g.summary, muted: g.none }))} w={w} ariaLabel={`${chosen.label} by ${split}`} oneField />
+              {overTime ? (
+                <TimeChart groups={timeGroups} w={w} column={splitName} />
+              ) : (
+                <Rows rows={groups.map((g) => ({ id: g.group, name: g.group, s: g.summary, muted: g.none }))} w={w} ariaLabel={`${chosen.label} by ${split}`} oneField />
+              )}
               <p className="hint" style={{ marginTop: 8 }}>
                 Descriptive: groups are not tested against each other. No interval below 10 {w.many}.
+                {overTime && steps && step > 0 && ' Periods start at multiples of the step, so the first and last may be only partly covered.'}
+                {overTime && timeGroups.some((g) => g.s.n > 0 && g.s.n < FEW) && ` Paler columns have fewer than ${FEW} ${w.many}.`}
+                {overTime && noneGroup && ` ${fmtInt(noneGroup.summary.n)} ${noneGroup.summary.n === 1 ? w.one : w.many} without a number in “${split}” are left out of the chart.`}
               </p>
             </>
           )}
@@ -180,9 +315,10 @@ export function RunSummary({
 
 /* ---------------------------------------------------------------- counts */
 
-function Counts({ counts: c, w, replicates, running }: { counts: ReturnType<typeof runCounts>; w: Words; replicates: number; running: boolean }) {
+function Counts({ counts: c, w, replicates, running, subset }: { counts: ReturnType<typeof runCounts>; w: Words; replicates: number; running: boolean; subset: string }) {
   return (
     <p className="sum-counts">
+      {subset && <span className="sum-subset">{subset}: </span>}
       <strong>{fmtInt(c.annotated)}</strong> of {fmtInt(c.total)} {c.total === 1 ? w.one : w.many} annotated
       {c.failed > 0 && (
         <>
@@ -450,6 +586,141 @@ function Legend({ s }: { s: FieldSummary }) {
   );
 }
 
+/* ---------------------------------------------------------------- over time */
+
+/** Periods with fewer texts than this are drawn paler: one text moves their shares by 10 points or more. */
+const FEW = 10;
+
+/** A bar part's color on the screen: a scale's value, a category, or the one color of numbers. */
+function binColor(s: FieldSummary, b: Bin): string {
+  if (s.kind === 'categories') return categoryColor(s.bins.indexOf(b), !!b.extra, s.bins.filter((x) => !x.extra).length);
+  return s.kind === 'scale' ? scaleColor(s, b.value ?? 0) : 'var(--sum-seq-2)';
+}
+
+/** The key to a scale's colors: its whole points (combined half points take the colors between them). */
+function ScaleKey({ s }: { s: FieldSummary }) {
+  return (
+    <span className="sum-legend">
+      {s.bins
+        .filter((b) => !b.extra || Number.isInteger(b.value))
+        .map((b) => (
+          <span key={b.key}>
+            <i style={{ background: scaleColor(s, b.value ?? 0) }} />
+            {b.label}
+          </span>
+        ))}
+    </span>
+  );
+}
+
+/**
+ * A field split by a column of numbers (years, volumes), in order along it: the shares as stacked columns (on a scale
+ * around 0, below 0 down from the baseline and above 0 up, 0 straddling it; otherwise columns of 100%), and below, on
+ * their own axis, the means (or shares of yes) with their 95% intervals. Same geometry as the downloaded figure.
+ */
+function TimeChart({ groups, w, column }: { groups: TimeGroup[]; w: Words; column: string }) {
+  if (!groups.length) return <div className="hint">No {w.one} has a number in this column.</div>;
+  const stacks = timeStacks(groups);
+  const means = timeMeans(groups);
+  const hasStacks = stacks.parts.some((p) => p.length);
+  const N = groups.length;
+  const x = (i: number) => `${((i + 0.5) / N) * 100}%`;
+  const colW = `min(26px, ${(68 / N).toFixed(2)}%)`;
+  const ys = (v: number) => ((stacks.hi - v) / (stacks.hi - stacks.lo)) * 100;
+  const every = Math.max(1, Math.ceil(N / 14));
+  const plural = (n: number) => `${fmtInt(n)} ${n === 1 ? w.one : w.many}`;
+  // The key: from the period with the most values present (so a tie or an extra value seen anywhere is in it).
+  const keyFrom = groups.filter((g) => g.s.n && g.s.kind !== 'number').reduce<FieldSummary | null>((a, g) => (!a || g.s.bins.filter((b) => b.n).length > a.bins.filter((b) => b.n).length ? g.s : a), null);
+  const widestScale = groups.filter((g) => g.s.kind === 'scale' && g.s.n).reduce<FieldSummary | null>((a, g) => (!a || g.s.bins.length > a.bins.length ? g.s : a), null);
+  const meanWord = means?.share ? (groups.some((g) => g.s.yes?.word === '1') ? 'Share of 1s' : 'Share of yes') : 'Mean';
+  return (
+    <div className="sum-time">
+      {hasStacks && (
+        <>
+          <div className="sum-time-caption">{stacks.diverging ? `Share of ${w.many}: below 0 down, above 0 up` : `Share of ${w.many}`}</div>
+          <div className="sum-time-plot tall">
+            {stacks.ticks.map((t) => (
+              <div key={t} className={`sum-time-grid${t === 0 && stacks.diverging ? ' zero' : ''}`} style={{ top: `${ys(t)}%` }}>
+                <span>{Math.round(Math.abs(t) * 100)}%</span>
+              </div>
+            ))}
+            {stacks.parts.map((parts, i) =>
+              parts.map((p) => (
+                <span
+                  key={`${i}-${p.b.key}`}
+                  className={`sum-time-seg${groups[i].s.n < FEW ? ' few' : ''}`}
+                  style={{ left: x(i), width: colW, top: `${ys(p.to)}%`, height: `${ys(p.from) - ys(p.to)}%`, background: binColor(groups[i].s, p.b) }}
+                  data-tip={`${groups[i].name}: ${p.b.label}\n${plural(p.b.n)} (${pct(p.b.n, groups[i].s.n)} of ${fmtInt(groups[i].s.n)})${groups[i].s.n < FEW ? '\nFew texts: a single text moves the shares a lot' : ''}`}
+                />
+              )),
+            )}
+          </div>
+        </>
+      )}
+      {means && (
+        <>
+          <div className="sum-time-caption">{meanWord} (95% CI)</div>
+          <div className="sum-time-plot short">
+            {means.ticks.map((t) => (
+              <div key={t} className={`sum-time-grid${t === 0 && !means.share ? ' zero' : ''}`} style={{ top: `${((means.hi - t) / (means.hi - means.lo)) * 100}%` }}>
+                <span>{means.share ? `${Math.round(t * 100)}%` : scaleLabel(t)}</span>
+              </div>
+            ))}
+            <svg className="sum-time-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              {lineRuns(means.points).map((run, k) => (
+                <polyline
+                  key={k}
+                  points={run.map(({ i, m }) => `${((i + 0.5) / N) * 100},${((means.hi - m) / (means.hi - means.lo)) * 100}`).join(' ')}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </svg>
+            {means.points.map((p, i) => {
+              if (!p) return null;
+              const ym = (v: number) => `${((means.hi - v) / (means.hi - means.lo)) * 100}%`;
+              const f = means.share ? pct1 : (v: number) => num(v);
+              return (
+                <span key={i}>
+                  {p.ci && <span className="sum-time-ci" style={{ left: x(i), top: ym(p.ci[1]), height: `calc(${ym(p.ci[0])} - ${ym(p.ci[1])})` }} />}
+                  <span
+                    className={`sum-time-dot${groups[i].s.n < FEW ? ' few' : ''}`}
+                    style={{ left: x(i), top: ym(p.m) }}
+                    data-tip={`${groups[i].name}\n${meanWord}: ${f(p.m)}${p.ci ? `\n95% CI ${ciText(p.ci, f)}` : '\nNo interval below 10'}\n${plural(groups[i].s.n)}`}
+                  />
+                </span>
+              );
+            })}
+          </div>
+        </>
+      )}
+      <div className="sum-time-axis">
+        {/* (On a phone, every other label of these is left out too.) */}
+        {groups.map((g, i) =>
+          i % every ? null : (
+            <span key={i} style={{ left: x(i) }} data-thin={i % (every * 2) ? '' : undefined}>
+              {g.tick}
+            </span>
+          ),
+        )}
+      </div>
+      <div className="sum-time-column">{column}</div>
+      {hasStacks && keyFrom && <div className="sum-time-key">{keyFrom.kind === 'categories' ? <Legend s={keyFrom} /> : <ScaleKey s={widestScale ?? keyFrom} />}</div>}
+    </div>
+  );
+}
+
+/** Runs of consecutive points with a value (a period without one breaks the line). */
+function lineRuns(points: ({ m: number } | null)[]): { i: number; m: number }[][] {
+  const runs: { i: number; m: number }[][] = [];
+  let cur: { i: number; m: number }[] = [];
+  points.forEach((p, i) => {
+    if (p) cur.push({ i, m: p.m });
+    else if (cur.length) (runs.push(cur), (cur = []));
+  });
+  if (cur.length) runs.push(cur);
+  return runs.filter((r) => r.length > 1);
+}
+
 /* ---------------------------------------------------------------- mean strip */
 
 interface Axis {
@@ -486,20 +757,11 @@ function meanAxis(rows: RowData[], oneField: boolean): Axis | null {
   lo -= pad;
   hi += pad;
   if (share) (lo = Math.max(0, lo)), (hi = Math.min(1, hi));
-  const ticks = niceTicks(lo, hi);
+  const ticks = niceTicks(lo, hi, 4);
   const at = (x: number) => ((x - lo) / (hi - lo)) * 100;
   return { ticks: ticks.filter((t) => at(t) >= 0 && at(t) <= 100), at, label: share ? (x) => `${Math.round(x * 100)}%` : (x) => scaleLabel(x), share };
 }
 
-/** Three or four round ticks between `lo` and `hi`. */
-function niceTicks(lo: number, hi: number): number[] {
-  const raw = (hi - lo) / 3;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) ?? raw;
-  const out: number[] = [];
-  for (let t = Math.ceil(lo / step) * step; t <= hi + 1e-9; t += step) out.push(Math.round(t / step) * step);
-  return out;
-}
 
 function Strip({ s, axis }: { s: FieldSummary; axis: Axis }) {
   // (A row in another unit than the axis, e.g. a share of yes beside means, gets no mark.)

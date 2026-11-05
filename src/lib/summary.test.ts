@@ -347,3 +347,55 @@ describe('histogram and labels', () => {
     expect(scaleLabel(1 / 3)).toBe('0.33');
   });
 });
+
+describe('filter and periods', () => {
+  const prompt: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'structured', variables: [{ name: 'o', type: 'ordinal', values: ['-3', '-2', '-1', '0', '1', '2', '3'], description: '' }] };
+  // Years 1949–2026, one text each, journal AQ before 2021, then alternately AQ and JAS; score falls by year.
+  const years = Array.from({ length: 78 }, (_, i) => 1949 + i);
+  const docs = years.map((y, i) => doc(i, { year: String(y), journal: y < 2021 || i % 2 ? 'AQ' : 'JAS', file: `f${i}` }));
+  docs.push(doc(78, { year: 'unknown', journal: 'AQ' }));
+  const run = makeRun(prompt, docs.map((d) => d.id));
+  const score = (y: number) => String(Math.max(-3, Math.min(3, Math.round((1990 - y) / 15))));
+  const results = docs.map((d, i) => result(run.id, d.id, 1, { o: i < 78 ? score(years[i]) : '0' }));
+  const views = buildDocViews(docs, [run], results, run.id);
+  const items = runItems(run, docs, views);
+  const field = comparableFields(run, views.values())[0];
+
+  it('knows numeric columns and offers round steps', async () => {
+    const { columnInfo, periodSteps, splitColumns, filterColumns } = await import('./summary');
+    const cols = columnInfo(items);
+    const year = cols.find((c) => c.name === 'year')!;
+    expect(year).toMatchObject({ numeric: true, min: 1949, max: 2026, whole: true });
+    const { steps, preferred } = periodSteps(year);
+    expect(steps).not.toContain(0); // 78 values: no split by each one
+    expect(steps).toEqual(expect.arrayContaining([5, 10, 20, 25]));
+    expect(preferred).toBe(5);
+    expect(splitColumns(cols).map((c) => c.name)).toEqual(['year', 'journal']);
+    expect(filterColumns(cols).map((c) => c.name)).toEqual(['year', 'journal']);
+  });
+
+  it('splits years in five-year periods starting at multiples of five, unknown years last', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    const g = summarizeByGroup(run, field, items, 'year', 5, true);
+    expect(g[0]).toMatchObject({ group: '1945–1949', from: 1945, to: 1950 });
+    expect(g[0].summary.n).toBe(1);
+    expect(g[1]).toMatchObject({ group: '1950–1954' });
+    expect(g[1].summary.n).toBe(5);
+    expect(g[g.length - 2]).toMatchObject({ group: '2025–2029' });
+    expect(g[g.length - 2].summary.n).toBe(2);
+    expect(g[g.length - 1]).toMatchObject({ group: '(no value)', none: true });
+    expect(g.reduce((t, x) => t + x.summary.n, 0)).toBe(79);
+    // 1950–1954: scores of 1950…1954 = round(40/15)=3, round(39/15)=3, 2.53→3, 2.47→2, 2.4→2
+    expect(g[1].summary.mean).toBeCloseTo((3 + 3 + 3 + 2 + 2) / 5, 10);
+  });
+
+  it('shows only a subset: a value, or a range of numbers', async () => {
+    const { filterItems, subsetLabel } = await import('./summary');
+    expect(filterItems(items, { column: 'journal', value: 'JAS' }).length).toBe(3);
+    const late = filterItems(items, { column: 'year', from: 2000, to: 2026 });
+    expect(late.length).toBe(27);
+    expect(subsetLabel({ column: 'year', from: 2000, to: 2026 })).toBe('year 2000 to 2026');
+    expect(subsetLabel({ column: 'journal', value: 'JAS' })).toBe('journal = JAS');
+    expect(filterItems(items, null)).toBe(items);
+  });
+});

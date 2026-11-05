@@ -117,7 +117,7 @@ export function runCounts(items: RunItem[], replicates = 1): RunCounts {
 
 /**
  * The color of a value on a scale, as a position `p` along a list of named colors (0 = the first): around 0 for a
- * scale with values on both sides (gray at 0, orange below, blue above, lightest nearest 0), else light (low) to dark
+ * scale with values on both sides (gray at 0, blue below, orange above, lightest nearest 0), else light (low) to dark
  * (high). Names: "mid", "neg-1…3", "pos-1…3", "seq-1…3"; the screen (CSS variables) and the downloaded figures
  * (hex) each give them their colors and mix between them.
  */
@@ -368,40 +368,164 @@ export function histogram(xs: number[]): Bin[] {
   });
 }
 
-/**
- * The run's texts by a metadata column (e.g. era, journal), each group summarized: groups in natural order (1960s
- * before 1970s, 2 before 10), texts with no value last as "(no value)".
- */
-export function summarizeByGroup(run: Run, field: ComparableField, items: RunItem[], column: string): { group: string; none: boolean; summary: FieldSummary }[] {
-  const groups = new Map<string, RunItem[]>();
-  for (const item of items) {
-    const g = (item.doc.meta[column] ?? '').trim();
-    const list = groups.get(g);
-    if (list) list.push(item);
-    else groups.set(g, [item]);
-  }
-  const collator = new Intl.Collator('en-US', { numeric: true, sensitivity: 'base' });
-  return [...groups.entries()]
-    .sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : collator.compare(a, b)))
-    .map(([g, list]) => ({ group: g || '(no value)', none: g === '', summary: summarizeField(run, field, list) }));
+/* ------------------------------------------------------------------ columns: filter and split */
+
+/** A metadata column of the run's texts, as the filter and the split see it. */
+export interface ColumnInfo {
+  name: string;
+  /** Nine in ten of its values are numbers (years, volumes, issues, scores): filtered by a range, split in steps. */
+  numeric: boolean;
+  /** Its distinct values in natural order (1960s before 1970s, 2 before 10), up to 200 (`more` past that). */
+  values: string[];
+  more: boolean;
+  /** Numeric columns: the lowest and highest number, and whether all are whole numbers. */
+  min: number;
+  max: number;
+  whole: boolean;
+  /** Texts with a value. */
+  filled: number;
 }
 
-/**
- * Columns a run's texts can be split by, in the order the columns first appear: a few distinct values (2 to 30) among
- * the texts that have one, as the comparison report's breakdown, and not nearly one per text (a file name or an ID
- * in a small pilot: more than 70% of them different). A column with a value for only some texts still counts (the
- * rest form "(no value)").
- */
-export function groupColumns(items: RunItem[]): string[] {
-  const seen = new Map<string, { values: Set<string>; filled: number }>();
+const collator = new Intl.Collator('en-US', { numeric: true, sensitivity: 'base' });
+
+/** The metadata columns of the run's texts with at least two different values, in the order they first appear. */
+export function columnInfo(items: RunItem[]): ColumnInfo[] {
+  const seen = new Map<string, { values: Set<string>; filled: number; nums: number; min: number; max: number; whole: boolean }>();
   for (const { doc } of items)
     for (const [k, x] of Object.entries(doc.meta)) {
       const t = (x ?? '').trim();
       if (!t) continue;
-      let s = seen.get(k);
-      if (!s) seen.set(k, (s = { values: new Set(), filled: 0 }));
-      s.filled++;
-      if (s.values.size <= 30) s.values.add(t);
+      let c = seen.get(k);
+      if (!c) seen.set(k, (c = { values: new Set(), filled: 0, nums: 0, min: Infinity, max: -Infinity, whole: true }));
+      c.filled++;
+      if (c.values.size <= 200) c.values.add(t);
+      const n = toNumber(t);
+      if (Number.isFinite(n)) {
+        c.nums++;
+        c.min = Math.min(c.min, n);
+        c.max = Math.max(c.max, n);
+        if (!Number.isInteger(n)) c.whole = false;
+      }
     }
-  return [...seen.entries()].filter(([, s]) => s.values.size >= 2 && s.values.size <= 30 && s.values.size <= s.filled * 0.7).map(([k]) => k);
+  return [...seen.entries()]
+    .filter(([, c]) => c.values.size >= 2)
+    .map(([name, c]) => {
+      const numeric = c.nums >= c.filled * 0.9 && c.max > c.min;
+      const values = [...c.values].slice(0, 200).sort((a, b) => (numeric ? toNumber(a) - toNumber(b) || collator.compare(a, b) : collator.compare(a, b)));
+      return { name, numeric, values, more: c.values.size > 200, min: c.min, max: c.max, whole: c.whole, filled: c.filled };
+    });
+}
+
+/**
+ * Columns a run's texts can be split by: a few distinct values (2 to 30), as the comparison report's breakdown, and
+ * not nearly one per text (a file name or an ID in a small pilot: more than 70% of them different); and every column
+ * of numbers (years, volumes), which can be split in steps (`periodSteps`). A column with a value for only some texts
+ * still counts (the rest form "(no value)").
+ */
+export function splitColumns(columns: ColumnInfo[]): ColumnInfo[] {
+  return columns.filter((c) => c.numeric || (!c.more && c.values.length <= 30 && c.values.length <= c.filled * 0.7));
+}
+
+/** Columns texts can be shown by: numbers (a range), or values that repeat (not an identifier such as a file name). */
+export function filterColumns(columns: ColumnInfo[]): ColumnInfo[] {
+  return columns.filter((c) => c.numeric || (!c.more && c.values.length <= c.filled * 0.7));
+}
+
+/**
+ * The steps a column of numbers can be split in: 0 (each value, up to 40 of them), then round widths (2, 5, 10, 20, 25,
+ * 50, …) that give 3 to 40 groups; `preferred` is the one giving the most groups up to 20 (years 1949–2026: 5).
+ */
+export function periodSteps(c: ColumnInfo): { steps: number[]; preferred: number } {
+  const steps: number[] = [];
+  if (c.values.length <= 40 && !c.more) steps.push(0);
+  const groups = (w: number) => Math.floor(c.max / w) - Math.floor(c.min / w) + 1;
+  for (const mag of [0.01, 0.1, 1, 10, 100, 1000, 10000])
+    for (const m of [1, 2, 2.5, 5]) {
+      const w = Math.round(m * mag * 1000) / 1000;
+      if (w < 1 && c.whole) continue;
+      const g = groups(w);
+      if (g >= 3 && g <= 40 && !(w === 1 && c.whole && steps.includes(0) && g === c.values.length)) steps.push(w);
+    }
+  const sized = steps.filter((w) => w > 0 && groups(w) <= 20);
+  const preferred = steps.includes(0) && c.values.length <= 12 ? 0 : sized.length ? sized[0] : (steps[0] ?? 0);
+  return { steps, preferred };
+}
+
+/** One group of a split: its name, the texts with no value in the column, and for periods its bounds. */
+export interface Group {
+  group: string;
+  none: boolean;
+  from?: number;
+  to?: number;
+  summary: FieldSummary;
+}
+
+/**
+ * The run's texts by a metadata column (e.g. era, journal), each group summarized: groups in natural order (1960s
+ * before 1970s, 2 before 10), texts with no value last as "(no value)". With `step` (a column of numbers), periods of
+ * that width starting at multiples of it: 1950–1954, 1955–1959 for whole numbers (a period's last year is in it), or
+ * 0.5–1 for others; texts whose value isn't a number count as having none.
+ */
+export function summarizeByGroup(run: Run, field: ComparableField, items: RunItem[], column: string, step = 0, whole = true): Group[] {
+  const groups = new Map<string, { items: RunItem[]; from?: number; to?: number }>();
+  const add = (key: string, item: RunItem, from?: number, to?: number) => {
+    const g = groups.get(key);
+    if (g) g.items.push(item);
+    else groups.set(key, { items: [item], from, to });
+  };
+  for (const item of items) {
+    const raw = (item.doc.meta[column] ?? '').trim();
+    if (step > 0) {
+      const n = toNumber(raw);
+      if (!Number.isFinite(n)) add('', item);
+      else {
+        const from = Math.round(Math.floor(n / step + 1e-9) * step * 1e6) / 1e6;
+        add(String(from), item, from, Math.round((from + step) * 1e6) / 1e6);
+      }
+    } else add(raw, item);
+  }
+  const label = (from: number, to: number) => {
+    const end = whole ? to - 1 : to;
+    return end === from ? scaleLabel(from) : `${scaleLabel(from)}–${scaleLabel(end)}`;
+  };
+  return [...groups.entries()]
+    .sort(([a, x], [b, y]) => (a === '' ? 1 : b === '' ? -1 : x.from !== undefined && y.from !== undefined ? x.from - y.from : collator.compare(a, b)))
+    .map(([g, x]) => ({
+      group: g === '' ? '(no value)' : x.from !== undefined ? label(x.from, x.to!) : g,
+      none: g === '',
+      ...(x.from !== undefined ? { from: x.from, to: x.to } : {}),
+      summary: summarizeField(run, field, x.items),
+    }));
+}
+
+/** A subset of the run's texts: one value of a column, or a range of numbers (inclusive). */
+export interface Subset {
+  column: string;
+  value?: string;
+  from?: number;
+  to?: number;
+}
+
+/** The run's texts in the subset (all of them without one). */
+export function filterItems(items: RunItem[], subset: Subset | null): RunItem[] {
+  if (!subset) return items;
+  return items.filter(({ doc }) => {
+    const raw = (doc.meta[subset.column] ?? '').trim();
+    if (subset.value !== undefined) return raw === subset.value;
+    const n = toNumber(raw);
+    return Number.isFinite(n) && (subset.from === undefined || n >= subset.from - 1e-9) && (subset.to === undefined || n <= subset.to + 1e-9);
+  });
+}
+
+/** The subset in words: "journal = American Quarterly", "year 1990 to 2026". */
+export function subsetLabel(subset: Subset): string {
+  if (subset.value !== undefined) return `${subset.column} = ${subset.value}`;
+  const f = subset.from !== undefined ? scaleLabel(subset.from) : '';
+  const t = subset.to !== undefined ? scaleLabel(subset.to) : '';
+  return f && t ? (f === t ? `${subset.column} = ${f}` : `${subset.column} ${f} to ${t}`) : f ? `${subset.column} from ${f}` : t ? `${subset.column} up to ${t}` : subset.column;
+}
+
+/** Columns a run's texts can be split by (names only), as before: see `splitColumns`. */
+export function groupColumns(items: RunItem[]): string[] {
+  return splitColumns(columnInfo(items)).map((c) => c.name);
 }
