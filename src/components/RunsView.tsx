@@ -30,6 +30,7 @@ import {
 import type { Doc, Result, Run, Study } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, replacedAttempts, retryCounts, runTitle, runTokens, type DocView } from '../lib/view';
+import { RunSummaryPanel } from './RunSummary';
 import { Modal } from './ui';
 
 const STATUS_BADGE: Record<Run['status'], string> = {
@@ -228,6 +229,7 @@ export function RunsView() {
         )}
       </div>
 
+      {runs.length > 0 && <RunSummaryPanel />}
       {runs.length > 0 && <AgreementPanel />}
 
       {inspect && (
@@ -358,7 +360,7 @@ export function studyFieldNames(study: Study | null, runs: Run[], results: Resul
  */
 type RunData = { docs: Doc[]; list: Result[]; views: Map<string, DocView>; fields?: ComparableField[] };
 const runCache = new WeakMap<Run, RunData>();
-function runData(run: Run, docs: Doc[], results: Result[]): RunData {
+export function runData(run: Run, docs: Doc[], results: Result[]): RunData {
   const list = resultsByRun(results).get(run.id) ?? [];
   const c = runCache.get(run);
   if (c && c.docs === docs && c.list.length === list.length && c.list.every((r, i) => r === list[i])) return c;
@@ -366,7 +368,7 @@ function runData(run: Run, docs: Doc[], results: Result[]): RunData {
   runCache.set(run, fresh);
   return fresh;
 }
-function runFields(run: Run, docs: Doc[], results: Result[]): ComparableField[] {
+export function runFields(run: Run, docs: Doc[], results: Result[]): ComparableField[] {
   const c = runData(run, docs, results);
   return (c.fields ??= comparableFields(run, c.views.values()));
 }
@@ -504,7 +506,7 @@ export function outsideAnswersNote(o: NonNullable<Agreement['outsideAnswers']>, 
  * `value`, following changes at most once every `ms` (the last change always comes through). Results arrive every
  * quarter of a second during a run; the Agreement panel reads every answer again on each, which would hold up the page.
  */
-function useThrottled<T>(value: T, ms: number): T {
+export function useThrottled<T>(value: T, ms: number): T {
   const [shown, setShown] = useState(value);
   const last = useRef(0);
   useEffect(() => {

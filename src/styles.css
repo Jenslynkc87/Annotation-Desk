@@ -368,3 +368,45 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .kind-option { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); cursor: pointer; font: inherit; color: inherit; }
 .kind-option:hover { border-color: var(--navy); background: var(--navy-050); }
 .kind-option span { color: var(--muted); font-size: 13.5px; }
+
+/* ---------- run summary charts ---------- */
+:root {
+  --chart-1: #2a78d6;
+  --div-neg: #e34948;
+  --div-pos: #2a78d6;
+  --div-mid: #d6d4cf;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chart-1: #3987e5;
+    --div-neg: #e66767;
+    --div-pos: #3987e5;
+    --div-mid: #4a4a46;
+  }
+}
+.muted { color: var(--muted); }
+.chart { margin-top: 12px; max-width: 760px; }
+.chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart-axis { stroke: var(--line-strong); stroke-width: 1; }
+.chart-grid { stroke: var(--line); stroke-width: 1; }
+.chart-bar { fill: var(--chart-1); }
+.chart-line { fill: none; stroke: var(--chart-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-dot { fill: var(--chart-1); stroke: var(--card); stroke-width: 2; }
+.chart-dot.hollow { fill: var(--card); stroke: var(--chart-1); stroke-width: 2; }
+.chart-nbar { fill: var(--muted); opacity: 0.45; }
+.chart-label { fill: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chart-tick { fill: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.hbars { display: grid; gap: 6px; margin-top: 12px; max-width: 760px; }
+.hbar-row { display: grid; grid-template-columns: minmax(70px, 160px) minmax(0, 1fr) minmax(110px, max-content); align-items: center; gap: 10px; font-size: 13.5px; }
+.hbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar-track { height: 14px; position: relative; }
+.hbar-fill { display: block; height: 100%; background: var(--chart-1); border-radius: 0 4px 4px 0; min-width: 1px; }
+.hbar-value { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.div-track { height: 16px; position: relative; }
+.div-seg { position: absolute; top: 0; bottom: 0; box-shadow: inset 0 0 0 1px var(--card); }
+.div-center { position: absolute; top: -3px; bottom: -3px; left: 50%; border-left: 1px solid var(--ink); }
+.div-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; font-size: 13px; color: var(--muted); }
+.div-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+@media (max-width: 560px) {
+  .hbar-row { grid-template-columns: minmax(50px, 90px) minmax(0, 1fr) max-content; gap: 6px; font-size: 12.5px; }
+}
