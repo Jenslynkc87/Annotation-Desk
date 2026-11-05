@@ -1,0 +1,264 @@
+import { describe, expect, it } from 'vitest';
+import { comparableFields } from './compare';
+import { describe as describeNumbers, groupColumns, histogram, runCounts, runItems, scaleLabel, summarizeByGroup, summarizeField, tCritical95 } from './summary';
+import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type Run } from './types';
+import { buildDocViews } from './view';
+
+(globalThis as Record<string, unknown>).__APP_VERSION__ = 'test';
+
+const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
+function result(runId: string, docId: string, replicate: number, values: Record<string, string>, status: Result['status'] = 'ok'): Result {
+  return {
+    id: `${runId}:${docId}:${replicate}`, runId, studyId: 's', docId, replicate, status, values: status === 'ok' ? values : {}, rationale: '', reasoningSummary: '',
+    rawText: '', parseError: null, error: status === 'ok' ? null : 'failed', usage, latencyMs: 1, requestedAt: '', completedAt: '', responseId: '', modelReported: '', stopReason: 'end_turn',
+  };
+}
+function makeRun(prompt: PromptSpec, docIds: string[], replicates = 1): Run {
+  return {
+    id: 'r1', studyId: 's', number: 1, label: '', createdAt: '2026-11-05T10:00:00Z', finishedAt: null, mode: 'sync', scope: 'all', docIds, status: 'completed', batch: null, error: null,
+    snapshot: { appVersion: 't', model: DEFAULT_MODEL_SETTINGS, options: { ...DEFAULT_RUN_OPTIONS, replicates }, prompt, promptVersion: 1, promptHash: 'h', outputSchema: null, requestBase: {} },
+  };
+}
+const doc = (i: number, meta: Record<string, string> = {}): Doc => ({ id: `d${i}`, studyId: 's', docId: `art_${i}`, text: 't', meta, source: 'x', order: i, addedAt: '' });
+
+const structured: PromptSpec = {
+  ...DEFAULT_PROMPT,
+  outputMode: 'structured',
+  variables: [
+    { name: 'orientation', label: 'Evaluative orientation', type: 'ordinal', values: ['-3', '-2', '-1', '0', '1', '2', '3'], description: '' },
+    { name: 'orientation_explanation', type: 'text', values: [], description: '' },
+    { name: 'tone', type: 'category', values: ['Critical', 'Neutral', 'Appreciative'], description: '' },
+    { name: 'mentions_trump', type: 'boolean', values: [], description: '' },
+  ],
+};
+
+function setup(rows: { o: string; tone: string; yn: string; era: string }[], extra: Result[] = []) {
+  const docs = rows.map((r, i) => doc(i, { era: r.era, file: `art_${i}.md` }));
+  const run = makeRun(structured, docs.map((d) => d.id));
+  const results = [
+    ...rows.map((r, i) => result(run.id, `d${i}`, 1, { orientation: r.o, orientation_explanation: 'because', tone: r.tone, mentions_trump: r.yn })),
+    ...extra,
+  ];
+  const views = buildDocViews(docs, [run], results, run.id);
+  const items = runItems(run, docs, views);
+  const fields = comparableFields(run, views.values());
+  return { run, docs, items, fields };
+}
+
+describe('Student t critical values (two-sided 95%)', () => {
+  it('matches the tables from 9 degrees of freedom up', () => {
+    // R: qt(0.975, df)
+    const table: [number, number][] = [
+      [9, 2.262157],
+      [10, 2.228139],
+      [20, 2.085963],
+      [30, 2.042272],
+      [100, 1.983972],
+      [1000, 1.962339],
+    ];
+    for (const [df, t] of table) expect(Math.abs(tCritical95(df) - t)).toBeLessThan(0.0005);
+  });
+});
+
+describe('describing numbers', () => {
+  it('gives the mean, SD (n − 1), median and a t interval from 10 values', () => {
+    const xs = [-3, -1, 0, 0, 1, 1, 2, 2, 2, 3];
+    const d = describeNumbers(xs);
+    expect(d.mean).toBeCloseTo(0.7, 10);
+    // var = sum((x - 0.7)^2) / 9
+    const sd = Math.sqrt(xs.reduce((s, x) => s + (x - 0.7) ** 2, 0) / 9);
+    expect(d.sd).toBeCloseTo(sd, 10);
+    expect(d.median).toBe(1);
+    expect(d.ci![0]).toBeCloseTo(0.7 - (2.262157 * sd) / Math.sqrt(10), 3);
+    expect(d.ci![1]).toBeCloseTo(0.7 + (2.262157 * sd) / Math.sqrt(10), 3);
+    expect([d.min, d.max]).toEqual([-3, 3]);
+  });
+  it('gives no interval below 10 values', () => {
+    expect(describeNumbers([1, 2, 3]).ci).toBeNull();
+    expect(describeNumbers([]).mean).toBeNull();
+  });
+});
+
+describe('summarizing a structured run', () => {
+  const rows = [
+    { o: '-3', tone: 'Critical', yn: 'true', era: '1960s' },
+    { o: '-1', tone: 'Critical', yn: 'false', era: '1960s' },
+    { o: '0', tone: 'Neutral', yn: 'false', era: '1960s' },
+    { o: '2', tone: 'Appreciative', yn: 'false', era: '1970s' },
+    { o: '1', tone: 'Neutral', yn: 'true', era: '1970s' },
+    { o: '-2', tone: 'Critical', yn: 'false', era: '' },
+  ];
+
+  it('counts texts and leaves out free-text fields', () => {
+    const { items, fields } = setup(rows);
+    expect(runCounts(items)).toEqual({ total: 6, annotated: 6, partial: 0, failed: 0, waiting: 0 });
+    expect(fields.map((f) => f.key)).toEqual(['orientation', 'tone', 'mentions_trump']);
+  });
+
+  it('draws an ordinal −3…3 scale around 0, with every point, and its figures', () => {
+    const { run, items, fields } = setup(rows);
+    const s = summarizeField(run, fields[0], items);
+    expect(s.kind).toBe('scale');
+    expect(s.diverging).toBe(true);
+    expect(s.label).toBe('Evaluative orientation');
+    expect(s.bins.map((b) => [b.label, b.n])).toEqual([
+      ['−3', 1],
+      ['−2', 1],
+      ['−1', 1],
+      ['0', 1],
+      ['1', 1],
+      ['2', 1],
+      ['3', 0],
+    ]);
+    expect(s.n).toBe(6);
+    expect(s.mean).toBeCloseTo(-0.5, 10);
+    expect(s.median).toBe(-0.5);
+    expect(s.sides).toEqual({ below: 3, middle: 1, above: 2 });
+    expect(s.ci).toBeNull(); // fewer than 10 texts
+  });
+
+  it('keeps the codebook’s categories in order, with their own names, and no mean', () => {
+    const { run, items, fields } = setup(rows);
+    const s = summarizeField(run, fields[1], items);
+    expect(s.kind).toBe('categories');
+    expect(s.bins.map((b) => [b.label, b.n])).toEqual([
+      ['Critical', 3],
+      ['Neutral', 2],
+      ['Appreciative', 1],
+    ]);
+    expect(s.mean).toBeNull();
+    expect(s.yes).toBeNull();
+  });
+
+  it('gives a yes/no field’s share of yes', () => {
+    const { run, items, fields } = setup(rows);
+    const s = summarizeField(run, fields[2], items);
+    expect(s.bins.map((b) => [b.label, b.n])).toEqual([
+      ['Yes', 2],
+      ['No', 4],
+    ]);
+    expect(s.yes?.share).toBeCloseTo(2 / 6, 10);
+    expect(s.yes?.ci).toBeNull(); // fewer than 10
+  });
+
+  it('splits by a metadata column in natural order, texts without a value last', () => {
+    const { run, items, fields } = setup(rows);
+    expect(groupColumns(items)).toEqual(['era']); // file names differ for every text
+    const g = summarizeByGroup(run, fields[0], items, 'era');
+    expect(g.map((x) => [x.group, x.summary.n, x.summary.mean])).toEqual([
+      ['1960s', 3, -4 / 3],
+      ['1970s', 2, 1.5],
+      ['(no value)', 1, -2],
+    ]);
+    expect(g[2].none).toBe(true);
+  });
+
+  it('counts failed and waiting texts apart, and combines the rest', () => {
+    const docs = [doc(0), doc(1), doc(2), doc(3)];
+    const run = makeRun(structured, docs.map((d) => d.id), 2);
+    const results = [
+      result(run.id, 'd0', 1, { orientation: '1', tone: 'Neutral', mentions_trump: 'true' }),
+      result(run.id, 'd0', 2, { orientation: '2', tone: 'Critical', mentions_trump: 'false' }),
+      result(run.id, 'd1', 1, { orientation: '-1', tone: 'Neutral', mentions_trump: 'false' }),
+      result(run.id, 'd1', 2, {}, 'error'),
+      result(run.id, 'd2', 1, {}, 'error'),
+      result(run.id, 'd2', 2, {}, 'error'),
+    ];
+    const views = buildDocViews(docs, [run], results, run.id);
+    const items = runItems(run, docs, views);
+    expect(runCounts(items)).toEqual({ total: 4, annotated: 2, partial: 1, failed: 1, waiting: 1 });
+    const fields = comparableFields(run, views.values());
+    const o = summarizeField(run, fields[0], items);
+    // d0: median of 1 and 2 = 1.5, a half point between the scale's points; d1: −1.
+    expect(o.bins.filter((b) => b.n).map((b) => [b.label, b.n, !!b.extra])).toEqual([
+      ['−1', 1, false],
+      ['1.5', 1, true],
+    ]);
+    expect(o.bins.map((b) => b.value)).toEqual([-3, -2, -1, 0, 1, 1.5, 2, 3]);
+    expect(o.mean).toBeCloseTo(0.25, 10);
+    // Ties: d0's tone is a tie, its yes/no too.
+    const tone = summarizeField(run, fields[1], items);
+    expect(tone.bins.map((b) => [b.label, b.n, !!b.extra])).toEqual([
+      ['Critical', 0, false],
+      ['Neutral', 1, false],
+      ['Appreciative', 0, false],
+      ['No majority (tie)', 1, true],
+    ]);
+    const yn = summarizeField(run, fields[2], items);
+    expect(yn.bins.map((b) => [b.label, b.n])).toEqual([
+      ['Yes', 0],
+      ['No', 1],
+      ['No majority (tie)', 1],
+    ]);
+    // The share of yes is among texts with yes or no.
+    expect(yn.yes).toMatchObject({ share: 0, n: 1 });
+  });
+});
+
+describe('summarizing a plain-text run with JSON scores', () => {
+  const prompt: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'text', variables: [] };
+  function textSetup(answers: string[], scoreScale?: { min: number; max: number }) {
+    const docs = answers.map((_, i) => doc(i));
+    const run = { ...makeRun(prompt, docs.map((d) => d.id)), ...(scoreScale ? { scoreScale } : {}) };
+    const results = answers.map((a, i) => result(run.id, `d${i}`, 1, { response: a }));
+    const views = buildDocViews(docs, [run], results, run.id);
+    const items = runItems(run, docs, views);
+    return { run, items, fields: comparableFields(run, views.values()) };
+  }
+
+  it('leaves out answers that aren’t numbers (e.g. "NA") and reports them, and counts answers without the key', () => {
+    const { run, items, fields } = textSetup(['{"score": 2, "explanation": "x"}', '{"score": -1}', '{"score": "NA"}', '{"score": 1}', 'Just prose.']);
+    const f = fields.find((x) => x.key === 'score')!;
+    const s = summarizeField(run, f, items);
+    expect(s.kind).toBe('scale');
+    expect(s.n).toBe(3);
+    expect(s.leftOut).toEqual({ n: 1, values: ['na'] });
+    expect(s.missing).toBe(1);
+    // Scale: the whole numbers seen, −1 to 2.
+    expect(s.bins.map((b) => b.label)).toEqual(['−1', '0', '1', '2']);
+    expect(s.diverging).toBe(true);
+  });
+
+  it('uses the study’s declared scale for the points', () => {
+    const { run, items, fields } = textSetup(['{"score": 2}', '{"score": 0}', '{"score": 1}'], { min: -3, max: 3 });
+    const s = summarizeField(run, fields[0], items);
+    expect(s.bins.map((b) => b.label)).toEqual(['−3', '−2', '−1', '0', '1', '2', '3']);
+    expect(s.range).toEqual([-3, 3]);
+  });
+
+  it('draws 0/1 flags as a scale of two points, not around 0', () => {
+    const { run, items, fields } = textSetup(['{"flag": 1}', '{"flag": 0}', '{"flag": 1}']);
+    const s = summarizeField(run, fields[0], items);
+    expect(s.kind).toBe('scale');
+    expect(s.diverging).toBe(false);
+    expect(s.bins.map((b) => [b.label, b.n])).toEqual([
+      ['0', 1],
+      ['1', 2],
+    ]);
+    expect(s.mean).toBeCloseTo(2 / 3, 10);
+  });
+
+  it('draws other numbers as a histogram', () => {
+    const answers = Array.from({ length: 40 }, (_, i) => `{"confidence": ${(i * 2.5).toFixed(1)}}`);
+    const { run, items, fields } = textSetup(answers);
+    const s = summarizeField(run, fields[0], items);
+    expect(s.kind).toBe('number');
+    expect(s.bins).toHaveLength(10);
+    expect(s.bins.reduce((t, b) => t + b.n, 0)).toBe(40);
+    expect(s.ci).not.toBeNull();
+  });
+});
+
+describe('histogram and labels', () => {
+  it('puts the highest value in the last bin', () => {
+    const xs = Array.from({ length: 21 }, (_, i) => i * 5);
+    const bins = histogram(xs);
+    expect(bins).toHaveLength(10);
+    expect(bins[9].n).toBe(3); // 90, 95, 100
+    expect(bins[0].label).toBe('0–10');
+  });
+  it('shows a real minus sign', () => {
+    expect(scaleLabel(-2.5)).toBe('−2.5');
+    expect(scaleLabel(1 / 3)).toBe('0.33');
+  });
+});

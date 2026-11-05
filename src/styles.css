@@ -368,3 +368,132 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .kind-option { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); cursor: pointer; font: inherit; color: inherit; }
 .kind-option:hover { border-color: var(--navy); background: var(--navy-050); }
 .kind-option span { color: var(--muted); font-size: 13.5px; }
+
+/* ---------- Runs & agreement: Results (one run's answers at a glance) ---------- */
+:root {
+  /* Around 0: below in orange, above in blue (not red and blue, which read as US parties), gray at 0. Each arm runs
+     from its lightest (nearest 0) to its darkest (the end of the scale). Checked with the dataviz palette validator. */
+  --sum-mid: #d5d4d1;
+  --sum-neg-1: #eca071; --sum-neg-2: #dc702f; --sum-neg-3: #a64a18;
+  --sum-pos-1: #86b6ef; --sum-pos-2: #3987e5; --sum-pos-3: #1c5cab;
+  /* A scale on one side of 0 (1–5, 0/1): light (low) to dark (high). */
+  --sum-seq-1: #86b6ef; --sum-seq-2: #3987e5; --sum-seq-3: #1c5cab;
+  /* Categories, in a fixed order. */
+  --sum-cat-1: #2a78d6; --sum-cat-2: #eb6834; --sum-cat-3: #1baf7a; --sum-cat-4: #eda100;
+  --sum-cat-5: #e87ba4; --sum-cat-6: #008300; --sum-cat-7: #6250d6; --sum-cat-8: #e34948;
+  --sum-other: #b9b7b0;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sum-mid: #46484b;
+    --sum-neg-1: #844420; --sum-neg-2: #c7692c; --sum-neg-3: #f2a26a;
+    --sum-pos-1: #275591; --sum-pos-2: #3d84db; --sum-pos-3: #86b8f3;
+    --sum-seq-1: #275591; --sum-seq-2: #3d84db; --sum-seq-3: #86b8f3;
+    --sum-cat-1: #3987e5; --sum-cat-2: #d95926; --sum-cat-3: #199e70; --sum-cat-4: #c98500;
+    --sum-cat-5: #d55181; --sum-cat-6: #008300; --sum-cat-7: #9085e9; --sum-cat-8: #e66767;
+    --sum-other: #5a5c60;
+  }
+}
+.sum-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 340px)); gap: 10px; }
+.sum-counts { margin: 0; font-size: 14.5px; font-variant-numeric: tabular-nums; }
+.sum-err { color: var(--err); font-weight: 600; }
+.sum-live { color: var(--muted); }
+.sum-title-note { text-transform: none; letter-spacing: 0; font-weight: 450; margin-left: 6px; }
+
+/* Rows: name | distribution | mean on a shared axis | mean as text | n */
+.sum-rows { display: flex; flex-direction: column; }
+.sum-row {
+  display: grid; grid-template-columns: minmax(110px, 220px) minmax(180px, 1fr) minmax(120px, 200px) minmax(130px, 170px) 64px;
+  gap: 14px; align-items: center; padding: 7px 8px; border-radius: var(--radius-sm); font-size: 14px;
+}
+.sum-rows.no-strip .sum-row { grid-template-columns: minmax(110px, 220px) minmax(180px, 1fr) minmax(130px, 200px) 64px; }
+.sum-rows.no-strip .sum-strip-cell, .sum-rows.no-strip .sum-h-strip { display: none; }
+.sum-row + .sum-row { border-top: 1px solid var(--line); }
+.sum-row.sum-head { font-size: 12px; color: var(--muted); padding-top: 0; padding-bottom: 4px; align-items: end; }
+.sum-row.sum-head + .sum-row { border-top: 0; }
+.sum-row.clickable { cursor: pointer; }
+.sum-row.clickable:hover { background: color-mix(in srgb, var(--navy-050) 60%, transparent); }
+.sum-row.clickable:focus-visible { outline: 2px solid var(--navy); outline-offset: -2px; }
+.sum-row.selected { background: var(--navy-050); }
+.sum-row.selected .sum-name { color: var(--navy); font-weight: 650; }
+.sum-row.muted .sum-name { color: var(--muted); font-style: italic; }
+.sum-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sum-n, .sum-h-n { text-align: right; font-variant-numeric: tabular-nums; }
+.sum-mean { font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sum-ci { color: var(--muted); font-size: 12.5px; }
+.sum-ink { color: var(--ink); font-weight: 600; }
+.sum-div { display: flex; align-items: center; gap: 8px; }
+.sum-side { width: 34px; flex: none; text-align: right; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sum-side.right { text-align: left; }
+.sum-track { position: relative; flex: 1; height: 14px; }
+.sum-track.full { background: var(--line); border-radius: 7px; overflow: hidden; }
+/* Parts touch with a 2px gap in the card's color between them. */
+.sum-seg { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--card); border-right: 1px solid var(--card); background-clip: padding-box; }
+.sum-track:not(.full) .sum-seg:first-of-type { border-radius: 0; }
+.sum-center { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--line-strong); }
+.sum-h-strip, .sum-strip-cell { position: relative; }
+.sum-ticks { position: relative; display: block; height: 16px; }
+.sum-ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sum-ticks span.start { transform: none; }
+.sum-ticks span.end { transform: translateX(-100%); }
+.sum-legend { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 5px; font-size: 12px; color: var(--muted); }
+.sum-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.sum-row.sum-key { padding-top: 0; padding-bottom: 6px; }
+.sum-row.sum-key .sum-legend { grid-column: 2 / -1; margin-top: 0; }
+.sum-row.sum-key + .sum-row { border-top: 0; }
+.sum-strip { position: relative; display: block; height: 14px; }
+.sum-strip-base { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--line); }
+.sum-strip-zero { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }
+.sum-strip-ci { position: absolute; top: 50%; height: 2px; margin-top: -1px; background: var(--navy); border-radius: 1px; }
+.sum-strip-dot { position: absolute; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--navy); box-shadow: 0 0 0 2px var(--card); }
+
+/* Detail of the chosen field: chart and figures */
+.sum-detail { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.sum-detail-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.sum-detail-head h3 { margin: 0; font-size: 16px; font-weight: 640; }
+.sum-kind { font-size: 13px; color: var(--muted); }
+.sum-detail-body { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(220px, 1fr); gap: 22px; align-items: start; }
+.sum-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.sum-stats .sum-wide { grid-column: span 2; }
+.sum-chart { padding: 0 4px; }
+.sum-plot { position: relative; height: 200px; margin-top: 24px; border-bottom: 1px solid var(--line-strong); }
+.sum-col-slot { position: absolute; top: 0; bottom: 0; transform: translateX(-50%); display: flex; justify-content: center; }
+.sum-col { position: absolute; bottom: 0; width: min(24px, 70%); border-radius: 4px 4px 0 0; }
+.sum-col.touch { width: calc(100% - 2px); }
+.sum-col-label { position: absolute; margin-bottom: 3px; padding: 0 2px; background: var(--card); z-index: 2; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sum-mean-mark { position: absolute; top: -20px; bottom: 0; width: 0; border-left: 1.5px solid var(--ink); opacity: 0.6; pointer-events: none; z-index: 1; }
+.sum-mean-label { position: absolute; top: -2px; left: 5px; font-size: 12px; white-space: nowrap; color: var(--ink); font-variant-numeric: tabular-nums; }
+.sum-mean-label.left { left: auto; right: 5px; }
+.sum-axis { position: relative; height: 22px; font-size: 12.5px; color: var(--muted); }
+.sum-axis span { position: absolute; top: 4px; transform: translateX(-50%); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sum-cats { display: flex; flex-direction: column; gap: 6px; }
+.sum-cat { display: grid; grid-template-columns: minmax(80px, 180px) minmax(80px, 1fr) 110px; gap: 10px; align-items: center; font-size: 14px; }
+.sum-cat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sum-cat.extra .sum-cat-name { color: var(--muted); font-style: italic; }
+.sum-cat-bar { height: 14px; }
+.sum-cat-bar > span { display: block; height: 100%; border-radius: 0 4px 4px 0; min-width: 1px; }
+.sum-cat-n { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+.sum-tip {
+  position: fixed; z-index: 70; pointer-events: none; background: var(--card); color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); padding: 6px 10px; font-size: 13px; box-shadow: 0 6px 20px rgba(0,0,0,.14); max-width: 250px; font-variant-numeric: tabular-nums;
+}
+.sum-tip strong { display: block; font-weight: 620; }
+
+@media (max-width: 900px) {
+  .sum-detail-body { grid-template-columns: minmax(0, 1fr); }
+  .sum-row, .sum-rows.no-strip .sum-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name n" "bar bar" "strip mean"; row-gap: 6px; }
+  .sum-rows.no-strip .sum-row { grid-template-areas: "name n" "bar bar" "mean mean"; }
+  .sum-name { grid-area: name; }
+  .sum-n, .sum-h-n { grid-area: n; }
+  .sum-bar-cell, .sum-h-bar { grid-area: bar; }
+  .sum-strip-cell, .sum-h-strip { grid-area: strip; }
+  .sum-mean, .sum-h-mean { grid-area: mean; text-align: right; }
+  .sum-row.sum-head > span:first-child, .sum-row.sum-key > span:first-child { display: none; }
+  .sum-row.sum-key { grid-template-areas: "bar bar"; }
+  .sum-row.sum-key .sum-legend { grid-area: bar; }
+}
+@media (max-width: 720px) {
+  .sum-controls { grid-template-columns: minmax(0, 1fr); }
+  .sum-cat { grid-template-columns: minmax(70px, 120px) minmax(60px, 1fr) auto; }
+}

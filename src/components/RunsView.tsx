@@ -30,6 +30,7 @@ import {
 import type { Doc, Result, Run, Study } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, replacedAttempts, retryCounts, runTitle, runTokens, type DocView } from '../lib/view';
+import { RunSummary } from './RunSummary';
 import { Modal } from './ui';
 
 const STATUS_BADGE: Record<Run['status'], string> = {
@@ -227,6 +228,8 @@ export function RunsView() {
           </div>
         )}
       </div>
+
+      {runs.length > 0 && <ResultsPanel />}
 
       {runs.length > 0 && <AgreementPanel />}
 
@@ -516,6 +519,22 @@ function useThrottled<T>(value: T, ms: number): T {
     return () => clearTimeout(t);
   }, [value, shown, ms]);
   return shown;
+}
+
+/**
+ * Results: one run's answers at a glance (`RunSummary`), from the same cached per-run data as the Agreement panel and
+ * on the same texts (also those removed from the study but kept for the runs that used them), at most once a second
+ * during a run.
+ */
+function ResultsPanel() {
+  const study = useStore((s) => currentStudy(s))!;
+  const runs = useStore((s) => s.runs);
+  const activeDocs = useStore((s) => s.docs);
+  const removedDocs = useStore((s) => s.removedDocs);
+  const docs = useMemo(() => withRemoved(activeDocs, removedDocs), [activeDocs, removedDocs]);
+  const results = useThrottled(useStore((s) => s.results), 1000);
+  const load = (run: Run) => ({ views: runData(run, docs, results).views, fields: runFields(run, docs, results) });
+  return <RunSummary study={study} runs={runs} docs={docs} load={load} />;
 }
 
 function AgreementPanel() {
