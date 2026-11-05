@@ -399,6 +399,13 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .sum-err { color: var(--err); font-weight: 600; }
 .sum-live { color: var(--muted); }
 .sum-title-note { text-transform: none; letter-spacing: 0; font-weight: 450; margin-left: 6px; }
+.sum-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.sum-section-head .section-title { margin: 0; }
+.sum-head-right { margin-left: auto; }
+.btn.sum-dl { gap: 5px; color: var(--muted); }
+.sum .menu-pop { min-width: 340px; }
+.sum .menu-item { white-space: nowrap; }
+.sum .menu-note { max-width: 320px; }
 
 /* Rows: name | distribution | mean on a shared axis | mean as text | n */
 .sum-rows { display: flex; flex-direction: column; }

@@ -1,11 +1,16 @@
-import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import type { ComparableField } from '../lib/compare';
 import { fixed } from '../lib/metrics';
 import { words } from '../lib/subject';
-import { groupColumns, runCounts, runItems, scaleLabel, summarizeByGroup, summarizeField, type Bin, type FieldSummary } from '../lib/summary';
+import { CATEGORY_SLOTS, categoryKey, groupColumns, runCounts, runItems, scaleLabel, scaleStops, summarizeByGroup, summarizeField, type Bin, type FieldSummary } from '../lib/summary';
 import type { Doc, Run, Study } from '../lib/types';
 import { fmtInt } from '../lib/util';
-import { runTitle, type DocView } from '../lib/view';
+import { runName, runTitle, type DocView } from '../lib/view';
+import { binCsvRows, csvColumns, fieldFigure, FIGURE_WIDTHS, PNG_DPI, rowsFigure, summaryCsvRows, svgToPng, type FigureRow } from '../lib/figure';
+import { toCsv, type Row } from '../lib/export/tables';
+import { toast } from '../lib/store';
+import { dateStamp, download, errorMessage, slug } from '../lib/util';
+import { Icon, Menu } from './ui';
 
 type Words = ReturnType<typeof words>;
 
@@ -45,6 +50,12 @@ export function RunSummary({
   const groups = useMemo(() => (split && field ? summarizeByGroup(run, field, items, split) : []), [split, field, run, items]);
   const tip = useTip();
   const running = run.status === 'running' || run.status === 'submitted';
+  // What the downloads are named after and carry (in the SVG's description and the CSV's columns).
+  const name = `run${runName(run, runs)}`;
+  const about = (what: string) =>
+    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}. Annotation Desk ${__APP_VERSION__}, ${new Date().toISOString().slice(0, 10)}.`;
+  const csvMeta = { run: `#${runName(run, runs)}`, model: run.snapshot.model.model, appVersion: __APP_VERSION__ };
+  const file = (part: string) => `${slug(study.name || 'study')}_${name}_${part}`;
 
   return (
     <div className="card card-pad sum" onMouseMove={tip.move} onMouseLeave={tip.hide}>
@@ -100,9 +111,16 @@ export function RunSummary({
         <>
           {summaries.length > 1 && (
             <>
-              <p className="section-title" style={{ marginTop: 18 }}>
-                Fields <span className="sum-title-note">choose one to see it in detail</span>
-              </p>
+              <div className="sum-section-head" style={{ marginTop: 18 }}>
+                <p className="section-title">
+                  Fields <span className="sum-title-note">choose one to see it in detail</span>
+                </p>
+                <Downloads
+                  name={file('fields')}
+                  svg={(widthMm) => rowsFigure(rowsOf(summaries), { widthMm, oneField: false, description: about('every field'), manyWord: w.many })}
+                  csv={() => summaryCsvRows(rowsOf(summaries), csvMeta)}
+                />
+              </div>
               <Rows
                 rows={summaries.map((s) => ({ id: s.key, name: s.label, s }))}
                 selected={chosen?.key}
@@ -112,12 +130,37 @@ export function RunSummary({
               />
             </>
           )}
-          {chosen && <Detail s={chosen} w={w} replicates={replicates} />}
+          {chosen && (
+            <Detail
+              s={chosen}
+              w={w}
+              replicates={replicates}
+              downloads={
+                <Downloads
+                  name={file(slug(chosen.label))}
+                  svg={(widthMm) => fieldFigure(chosen, { widthMm, description: about(`the field “${chosen.label}”`), manyWord: w.many })}
+                  csv={() => binCsvRows(chosen, csvMeta)}
+                />
+              }
+            />
+          )}
           {chosen && split && groups.length > 0 && (
             <>
-              <p className="section-title" style={{ marginTop: 22 }}>
-                {chosen.label} by {split}
-              </p>
+              <div className="sum-section-head" style={{ marginTop: 22 }}>
+                <p className="section-title">
+                  {chosen.label} by {split}
+                </p>
+                <Downloads
+                  name={file(`${slug(chosen.label)}-by-${slug(split)}`)}
+                  svg={(widthMm) =>
+                    rowsFigure(
+                      groups.map((g) => ({ name: g.group, s: g.summary })),
+                      { widthMm, oneField: true, description: about(`the field “${chosen.label}” by ${split}`), manyWord: w.many },
+                    )
+                  }
+                  csv={() => summaryCsvRows(groups.map((g) => ({ name: g.group, s: g.summary })), { ...csvMeta, field: chosen.label, groupColumn: split })}
+                />
+              </div>
               <Rows rows={groups.map((g) => ({ id: g.group, name: g.group, s: g.summary, muted: g.none }))} w={w} ariaLabel={`${chosen.label} by ${split}`} oneField />
               <p className="hint" style={{ marginTop: 8 }}>
                 Descriptive: groups are not tested against each other. No interval below 10 {w.many}.
@@ -163,23 +206,10 @@ function Counts({ counts: c, w, replicates, running }: { counts: ReturnType<type
 
 /* ---------------------------------------------------------------- colors */
 
-/** The color of a value on a scale: around 0 for a scale with values on both sides, else light (low) to dark (high). */
+/** A value's color on the screen (`scaleStops`), from the panel's CSS colors. */
 function scaleColor(s: Pick<FieldSummary, 'diverging' | 'range' | 'bins'>, v: number): string {
-  const [lo, hi] = s.range ?? [0, 1];
-  if (s.diverging) {
-    if (v === 0) return 'var(--sum-mid)';
-    const side = v < 0 ? 'neg' : 'pos';
-    const end = v < 0 ? -lo : hi;
-    // The smallest step away from 0 on this side (1 on −3…3) takes the arm's lightest color, the end its darkest;
-    // anything nearer 0 (a combined half point) lies between the middle and the lightest.
-    const steps = s.bins.map((b) => b.value ?? 0).filter((x) => (v < 0 ? x < 0 : x > 0) && Number.isInteger(x));
-    const first = steps.length ? Math.min(...steps.map(Math.abs)) : 1;
-    const a = Math.abs(v);
-    const p = a < first ? a / first : end > first ? 1 + ((Math.min(a, end) - first) / (end - first)) * 2 : 3;
-    return mix([`var(--sum-mid)`, `var(--sum-${side}-1)`, `var(--sum-${side}-2)`, `var(--sum-${side}-3)`], p);
-  }
-  const p = hi > lo ? ((Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo)) * 2 : 2;
-  return mix(['var(--sum-seq-1)', 'var(--sum-seq-2)', 'var(--sum-seq-3)'], p);
+  const { stops, p } = scaleStops(s, v);
+  return mix(stops.map((k) => `var(--sum-${k})`), p);
 }
 
 /** A color `p` of the way along `stops` (0 = the first, stops.length − 1 = the last), mixed in OKLab. */
@@ -190,12 +220,8 @@ function mix(stops: string[], p: number): string {
   return `color-mix(in oklab, ${stops[i + 1]} ${Math.round(f * 100)}%, ${stops[i]})`;
 }
 
-const CATEGORY_SLOTS = 8;
-/** Categories in a stacked bar: the codebook's first seven in the fixed palette order, the rest (and ties) as "Other". */
-function categoryColor(i: number, extra: boolean, total: number): string {
-  if (extra || (total > CATEGORY_SLOTS && i >= CATEGORY_SLOTS - 1)) return 'var(--sum-other)';
-  return `var(--sum-cat-${i + 1})`;
-}
+/** Categories in a stacked bar: the codebook's first seven in the fixed palette order, the rest (and ties) gray. */
+const categoryColor = (i: number, extra: boolean, total: number) => `var(--sum-${categoryKey(i, extra, total)})`;
 
 /* ---------------------------------------------------------------- rows */
 
@@ -494,12 +520,13 @@ function Strip({ s, axis }: { s: FieldSummary; axis: Axis }) {
 
 /* ---------------------------------------------------------------- detail */
 
-function Detail({ s, w, replicates }: { s: FieldSummary; w: Words; replicates: number }) {
+function Detail({ s, w, replicates, downloads }: { s: FieldSummary; w: Words; replicates: number; downloads: ReactNode }) {
   return (
     <div className="sum-detail">
       <div className="sum-detail-head">
         <h3>{s.label}</h3>
         <span className="sum-kind">{kindText(s)}</span>
+        {s.n > 0 && <span className="sum-head-right">{downloads}</span>}
       </div>
       {s.leftOut.n > 0 && (
         <div className="notice warn" style={{ marginBottom: 10 }}>
@@ -657,6 +684,60 @@ function CategoryBars({ s, w }: { s: FieldSummary; w: Words }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/* ---------------------------------------------------------------- downloads */
+
+const rowsOf = (summaries: FieldSummary[]): FigureRow[] => summaries.map((s) => ({ name: s.label, s }));
+
+/**
+ * The Download menu of a figure: SVG (vector) and PNG (600 dpi) at one column's or the full page's width, and the
+ * numbers behind it as CSV. The figures are drawn for print (`src/lib/figure.ts`), not copied from the screen.
+ */
+function Downloads({ name, svg, csv }: { name: string; svg: (widthMm: number) => string; csv: () => Row[] }) {
+  const [busy, setBusy] = useState(false);
+  const stamp = dateStamp();
+  const save = async (kind: 'svg' | 'png', mm: number) => {
+    try {
+      setBusy(true);
+      const text = svg(mm);
+      if (kind === 'svg') download(`${name}_${mm}mm_${stamp}.svg`, text, 'image/svg+xml');
+      else download(`${name}_${mm}mm_${PNG_DPI}dpi_${stamp}.png`, await svgToPng(text, mm));
+    } catch (e) {
+      toast(`Download failed: ${errorMessage(e)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Menu
+      button={(open) => (
+        <button className="btn small ghost sum-dl" onClick={open} disabled={busy} title="Download this figure (SVG or PNG) or its numbers (CSV)">
+          <Icon name="download" size={14} /> {busy ? 'Saving…' : 'Download'}
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          {FIGURE_WIDTHS.map((x) => (
+            <button key={`svg${x.mm}`} className="menu-item" onClick={() => (close(), void save('svg', x.mm))}>
+              Figure, SVG <small>{x.label}</small>
+            </button>
+          ))}
+          {FIGURE_WIDTHS.map((x) => (
+            <button key={`png${x.mm}`} className="menu-item" onClick={() => (close(), void save('png', x.mm))}>
+              Figure, PNG {PNG_DPI} dpi <small>{x.label}</small>
+            </button>
+          ))}
+          <div className="menu-sep" />
+          <button className="menu-item" onClick={() => (close(), download(`${name}_${stamp}.csv`, toCsv(...csvColumns(csv())), 'text/csv'))}>
+            Numbers, CSV
+          </button>
+          <div className="menu-note">SVG is vector: sharp at any size; opens in Word, PowerPoint, Inkscape and Illustrator, which can also save it as EPS or PDF.</div>
+        </>
+      )}
+    </Menu>
   );
 }
 

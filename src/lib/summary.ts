@@ -115,6 +115,38 @@ export function runCounts(items: RunItem[], replicates = 1): RunCounts {
   return c;
 }
 
+/**
+ * The color of a value on a scale, as a position `p` along a list of named colors (0 = the first): around 0 for a
+ * scale with values on both sides (gray at 0, orange below, blue above, lightest nearest 0), else light (low) to dark
+ * (high). Names: "mid", "neg-1…3", "pos-1…3", "seq-1…3"; the screen (CSS variables) and the downloaded figures
+ * (hex) each give them their colors and mix between them.
+ */
+export function scaleStops(s: Pick<FieldSummary, 'diverging' | 'range' | 'bins'>, v: number): { stops: string[]; p: number } {
+  const [lo, hi] = s.range ?? [0, 1];
+  if (s.diverging) {
+    if (v === 0) return { stops: ['mid'], p: 0 };
+    const side = v < 0 ? 'neg' : 'pos';
+    const end = v < 0 ? -lo : hi;
+    // The smallest whole step away from 0 on this side (1 on −3…3) takes the arm's lightest color, the end its darkest;
+    // anything nearer 0 (a combined half point) lies between the middle and the lightest.
+    const steps = s.bins.map((b) => b.value ?? 0).filter((x) => (v < 0 ? x < 0 : x > 0) && Number.isInteger(x));
+    const first = steps.length ? Math.min(...steps.map(Math.abs)) : 1;
+    const a = Math.abs(v);
+    const p = a < first ? a / first : end > first ? 1 + ((Math.min(a, end) - first) / (end - first)) * 2 : 3;
+    return { stops: ['mid', `${side}-1`, `${side}-2`, `${side}-3`], p };
+  }
+  const p = hi > lo ? ((Math.min(hi, Math.max(lo, v)) - lo) / (hi - lo)) * 2 : 2;
+  return { stops: ['seq-1', 'seq-2', 'seq-3'], p };
+}
+
+/** The palette has this many category colors; past it, the eighth category on share one gray. */
+export const CATEGORY_SLOTS = 8;
+/** The color name of the `i`-th category of a field with `total` own categories ("cat-1"…), or "other" (gray). */
+export function categoryKey(i: number, extra: boolean, total: number): string {
+  if (extra || (total > CATEGORY_SLOTS && i >= CATEGORY_SLOTS - 1)) return 'other';
+  return `cat-${i + 1}`;
+}
+
 /** A number as shown on a scale: a real minus sign, at most 2 decimals ("−3", "0.5", "1.33"). */
 export function scaleLabel(x: number): string {
   const s = String(Math.round(x * 100) / 100);
