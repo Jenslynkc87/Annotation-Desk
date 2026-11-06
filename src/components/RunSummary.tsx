@@ -3,8 +3,8 @@ import type { ComparableField } from '../lib/compare';
 import { fixed } from '../lib/metrics';
 import { words } from '../lib/subject';
 import {
+  binCategoryKey,
   CATEGORY_SLOTS,
-  categoryKey,
   columnInfo,
   filterColumns,
   filterItems,
@@ -22,14 +22,16 @@ import {
   type Group,
   type Subset,
   TIE_KEY,
+  wholePercent,
+  yesPercent,
 } from '../lib/summary';
 import type { Doc, Run, Study } from '../lib/types';
 import { fmtInt } from '../lib/util';
 import { runName, runTitle, type DocView } from '../lib/view';
-import { binCsvRows, csvColumns, fieldFigure, FIGURE_WIDTHS, niceTicks, PNG_DPI, rowsFigure, summaryCsvRows, svgToPng, timeFigure, timeMeans, timeStacks, type FigureRow, type TimeGroup } from '../lib/figure';
+import { axisRows, binCsvRows, csvColumns, FEW, fieldFigure, FIGURE_WIDTHS, niceTicks, PNG_DPI, rowsFigure, summaryCsvRows, svgToPng, tickLabel, timeFigure, timeMeans, timeStacks, type FigureRow, type TimeGroup } from '../lib/figure';
 import { toCsv, type Row } from '../lib/export/tables';
 import { toast } from '../lib/store';
-import { dateStamp, download, errorMessage, slug } from '../lib/util';
+import { download, errorMessage, slug } from '../lib/util';
 import { Icon, Menu } from './ui';
 
 type Words = ReturnType<typeof words>;
@@ -66,10 +68,13 @@ export function RunSummary({
   const [filterPick, setFilterPick] = useState<{ column: string; value: string; from: string; to: string }>({ column: '', value: '', from: '', to: '' });
   const fcol = filterable.find((c) => c.name === filterPick.column);
   const number = (t: string) => (t.trim() === '' || !Number.isFinite(Number(t)) ? undefined : Number(t));
+  // (A range typed the wrong way round, 2000 to 1990, is read as 1990 to 2000.)
+  const orderedRange = (column: string, from?: number, to?: number): Subset =>
+    from !== undefined && to !== undefined && from > to ? { column, from: to, to: from } : { column, from, to };
   const subset: Subset | null = !fcol
     ? null
     : fcol.numeric
-      ? { column: fcol.name, from: number(filterPick.from), to: number(filterPick.to) }
+      ? orderedRange(fcol.name, number(filterPick.from), number(filterPick.to))
       : { column: fcol.name, value: fcol.values.includes(filterPick.value) ? filterPick.value : fcol.values[0] };
   const subsetKey = subset ? JSON.stringify(subset) : '';
   const shownSubset = subset && (subset.value !== undefined || subset.from !== undefined || subset.to !== undefined) ? subset : null;
@@ -97,17 +102,29 @@ export function RunSummary({
     const key = (x: Group) => (x.none ? Infinity : (x.summary.mean ?? x.summary.yes?.share ?? Infinity));
     return [...g].sort((a, b) => key(a) - key(b));
   }, [split, field, run, items, step, scol, byMean]);
-  const overTime = !!scol?.numeric;
+  // Periods of a column of numbers are drawn over their values; each value of it (a few codes, −3…3) as rows, which
+  // don't suggest even spacing between values that may be uneven.
+  const overTime = !!scol?.numeric && step > 0;
   const tip = useTip();
   const running = run.status === 'running' || run.status === 'submitted';
   // What the downloads are named after and carry (in the SVG's description and the CSV's columns).
   const name = `run${runName(run, runs)}`;
   const shownLabel = shownSubset ? subsetLabel(shownSubset) : '';
   const about = (what: string) =>
-    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}${shownLabel ? `, ${w.many} with ${shownLabel}` : ''}. Annotation Desk ${__APP_VERSION__}, ${new Date().toISOString().slice(0, 10)}.`;
-  const csvMeta = { run: `#${runName(run, runs)}`, model: run.snapshot.model.model, appVersion: __APP_VERSION__, ...(shownLabel ? { subset: shownLabel } : {}) };
-  const file = (part: string) => `${slug(study.name || 'study')}_${name}_${part}${shownLabel ? `_${slug(shownLabel)}` : ''}`;
-  const splitName = `${split}${steps && step > 0 ? ` (steps of ${step})` : ''}`;
+    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}${shownLabel ? `, ${w.many} with ${shownLabel}` : ''}. Annotation Desk ${__APP_VERSION__}, ${localDate()}.`;
+  const csvMeta = {
+    study: study.name || 'Untitled',
+    run: `#${runName(run, runs)}`,
+    model: run.snapshot.model.model,
+    promptVersion: run.snapshot.promptVersion,
+    appVersion: __APP_VERSION__,
+    ...(shownLabel ? { subset: shownLabel } : {}),
+  };
+  const file = (part: string) => `${fileSlug(study.name || 'study')}_${name}_${part}${shownLabel ? `_${fileSlug(shownLabel)}` : ''}`;
+  const splitName = `${split}${steps && step > 0 ? ` (periods of ${step})` : ''}`;
+  // The over-time axis: what its labels stand for, and what the data cover (the first and last periods may be partial).
+  const axisName = steps && step > 0 ? `${split}, periods of ${step} labeled by their first value` : split;
+  const coverage = scol?.numeric ? `${split} values from ${scaleLabel(scol.min)} to ${scaleLabel(scol.max)}` : '';
   const timeGroups: TimeGroup[] = overTime ? groups.filter((g) => !g.none).map((g) => ({ tick: g.from !== undefined ? scaleLabel(g.from) : g.group, name: g.group, s: g.summary })) : [];
   // Annotated texts without a number in the split column (left out of the over-time chart).
   const noneGroup = groups.find((g) => g.none);
@@ -206,7 +223,7 @@ export function RunSummary({
         )}
       </div>
 
-      <Counts counts={counts} w={w} replicates={replicates} running={running} subset={shownLabel} />
+      {!(shownLabel && !counts.total) && <Counts counts={counts} w={w} replicates={replicates} running={running} subset={shownLabel} />}
 
       {!counts.annotated ? (
         <div className="empty">
@@ -275,11 +292,17 @@ export function RunSummary({
                       <input type="checkbox" checked={byMean} onChange={(e) => setByMean(e.target.checked)} /> Sort by {groups.some((g) => g.summary.mean !== null) ? 'mean' : 'share'}
                     </label>
                   )}
+                  {(!overTime || timeGroups.length > 0) && (
                   <Downloads
-                    name={file(`${slug(chosen.label)}-by-${slug(split)}${steps && step > 0 ? `-${step}` : ''}`)}
+                    name={file(`${fileSlug(chosen.label)}-by-${fileSlug(split)}${steps && step > 0 ? `-${step}` : ''}`)}
                     svg={(widthMm) =>
                       overTime
-                        ? timeFigure(timeGroups, { widthMm, column: splitName, description: about(`the field “${chosen.label}” by ${splitName}`), manyWord: w.many })
+                        ? timeFigure(timeGroups, {
+                            widthMm,
+                            column: axisName,
+                            description: about(`the field “${chosen.label}” by ${axisName} (${coverage}); * marks periods with fewer than 10 ${w.many}`),
+                            manyWord: w.many,
+                          })
                         : rowsFigure(
                             groups.map((g) => ({ name: g.group, s: g.summary })),
                             { widthMm, oneField: true, description: about(`the field “${chosen.label}” by ${split}`), manyWord: w.many },
@@ -287,22 +310,24 @@ export function RunSummary({
                     }
                     csv={() =>
                       summaryCsvRows(
-                        groups.map((g) => ({ name: g.group, s: g.summary, from: g.from, to: g.to })),
+                        // (The over-time figure leaves out texts without a number: so does its CSV.)
+                        groups.filter((g) => !overTime || !g.none).map((g) => ({ name: g.group, s: g.summary, from: g.from, to: g.to })),
                         { ...csvMeta, field: chosen.label, groupColumn: split },
                       )
                     }
                   />
+                  )}
                 </span>
               </div>
               {overTime ? (
-                <TimeChart groups={timeGroups} w={w} column={splitName} />
+                <TimeChart groups={timeGroups} w={w} column={axisName} />
               ) : (
                 <Rows rows={groups.map((g) => ({ id: g.group, name: g.group, s: g.summary, muted: g.none }))} w={w} ariaLabel={`${chosen.label} by ${split}`} oneField />
               )}
               <p className="hint" style={{ marginTop: 8 }}>
-                Descriptive: groups are not tested against each other. No interval below 10 {w.many}.
-                {overTime && steps && step > 0 && ' Periods start at multiples of the step, so the first and last may be only partly covered.'}
-                {overTime && timeGroups.some((g) => g.s.n > 0 && g.s.n < FEW) && ` Paler columns have fewer than ${FEW} ${w.many}.`}
+                Descriptive: groups are not tested against each other.
+                {overTime && ` Periods start at multiples of ${step}, so the first and last may be only partly covered (${coverage}).`}
+                {overTime && timeGroups.some((g) => g.s.n > 0 && g.s.n < FEW) && ` ${timeMeans(timeGroups) ? '* and hollow dots' : '*'}: fewer than ${FEW} ${w.many}, so one ${w.one} moves the shares by 10 points or more.`}
                 {overTime && noneCount > 0 && ` ${fmtInt(noneCount)} annotated ${noneCount === 1 ? w.one : w.many} without a number in “${split}” ${noneCount === 1 ? 'is' : 'are'} left out of the chart.`}
               </p>
             </>
@@ -310,6 +335,8 @@ export function RunSummary({
           <p className="hint" style={{ marginTop: 14 }}>
             Each {w.one} counts once{replicates > 1 ? ', with its combined value (the median on a scale, the mean for numbers, the majority for categories), as in the Results table' : ''}. Failed{' '}
             {w.many} and {w.many} without an answer are not counted. Intervals are 95% (t for means, Wilson for shares), from 10 {w.many}.
+            {summaries.some((x) => x.bins.some((b) => b.key === TIE_KEY && b.n)) &&
+              ` Shares of yes and of the most common category leave out the ${w.many} whose annotations had no majority (ties); the bars show them.`}
           </p>
         </>
       )}
@@ -335,7 +362,7 @@ function Counts({ counts: c, w, replicates, running, subset }: { counts: ReturnT
       {replicates > 1 && c.fewer > 0 && (
         <>
           {' · '}
-          <span title="Some of their annotations failed or never came back: their values combine the others">
+          <span title="Some of their annotations failed or never came back; their values combine the remaining annotations">
             {fmtInt(c.fewer)} with fewer than {replicates} annotations
           </span>
         </>
@@ -361,8 +388,8 @@ function mix(stops: string[], p: number): string {
   return `color-mix(in oklab, ${stops[i + 1]} ${Math.round(f * 100)}%, ${stops[i]})`;
 }
 
-/** Categories in a stacked bar: the codebook's first seven in the fixed palette order, the rest (and ties) gray. */
-const categoryColor = (i: number, extra: boolean, total: number) => `var(--sum-${categoryKey(i, extra, total)})`;
+/** A categories field's bar part: its category's color (the codebook's first seven, in a fixed order), the tie gray, or the light gray of other values. */
+const catColor = (s: Pick<FieldSummary, 'bins'>, b: Bin) => `var(--sum-${binCategoryKey(s, b)})`;
 
 /* ---------------------------------------------------------------- rows */
 
@@ -373,10 +400,12 @@ interface RowData {
   muted?: boolean;
 }
 
-/** A share as a whole percentage; a share that rounds to 0 but isn't, as "<1%". */
-const pct = (n: number, total: number) => (!total ? '—' : n > 0 && (n / total) * 100 < 0.5 ? '<1%' : `${Math.round((n / total) * 100)}%`);
+/** A share as a whole percentage, from the counts; a share that rounds to 0 but isn't, as "<1%". */
+const pct = (n: number, total: number) => (!total ? '—' : wholePercent(n, total));
+/** An interval's bound as a percentage to one decimal (a share of yes itself: `yesPercent`, from its counts). */
 const pct1 = (x: number) => `${(x * 100).toFixed(1)}%`;
-const num = (x: number | null, d = 2) => (x === null ? '—' : fixed(x, d).replace(/^-/, '−'));
+/** A figure with 2 decimals, or 1 from 100 up (a mean year reads 1886.5, not 1886.51); a real minus sign. */
+const num = (x: number | null, d?: number) => (x === null ? '—' : fixed(x, d ?? (Math.abs(x) >= 100 ? 1 : 2)).replace(/^-/, '−'));
 const ciText = (ci: [number, number] | null, f: (x: number) => string) => (ci ? `${f(ci[0])} to ${f(ci[1])}` : '');
 
 /**
@@ -400,11 +429,13 @@ function Rows({
   oneField?: boolean;
 }) {
   const keyOnce = oneField ? rows.find((r) => r.s.kind === 'categories' && r.s.n)?.s : undefined;
+  const ids = rows.map((r) => r.id);
   // Bars around 0 share one center, so the rows line up: as far left as the row reaching furthest below 0, and right.
   const div = rows.filter((r) => r.s.diverging && r.s.sides && r.s.n);
   const leftMax = Math.max(0, ...div.map((r) => (r.s.sides!.below + r.s.sides!.middle / 2) / r.s.n));
   const rightMax = Math.max(0, ...div.map((r) => (r.s.sides!.above + r.s.sides!.middle / 2) / r.s.n));
   const axis = meanAxis(rows, !!oneField);
+  const onAxis = new Set(axisRows(rows, !!oneField).map((r) => r.id));
   return (
     <div className={`sum-rows${axis ? '' : ' no-strip'}`} role={onSelect ? 'listbox' : 'table'} aria-label={ariaLabel}>
       <div className="sum-row sum-head" aria-hidden="true">
@@ -428,7 +459,7 @@ function Rows({
       {keyOnce && (
         <div className="sum-row sum-key">
           <span />
-          <Legend s={keyOnce} />
+          <Legend s={keyOnce} also={rows.map((r) => r.s)} />
         </div>
       )}
       {rows.map((r) => {
@@ -439,10 +470,19 @@ function Rows({
               'aria-selected': on,
               tabIndex: 0,
               onClick: () => onSelect(r.id),
-              onKeyDown: (e: KeyboardEvent) => {
+              onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   onSelect(r.id);
+                }
+                // (Up and down move through the fields, as in a list.)
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  const next = ids[ids.indexOf(r.id) + (e.key === 'ArrowDown' ? 1 : -1)];
+                  if (next === undefined) return;
+                  onSelect(next);
+                  const el = e.key === 'ArrowDown' ? e.currentTarget.nextElementSibling : e.currentTarget.previousElementSibling;
+                  if (el instanceof HTMLElement) el.focus();
                 }
               },
             }
@@ -456,7 +496,7 @@ function Rows({
               <RowBar s={r.s} leftMax={leftMax} rightMax={rightMax} w={w} />
               {!oneField && r.s.kind === 'categories' && r.s.n > 0 && <Legend s={r.s} />}
             </span>
-            <span className="sum-strip-cell">{axis && <Strip s={r.s} axis={axis} />}</span>
+            <span className="sum-strip-cell">{axis && <Strip s={r.s} axis={axis} on={onAxis.has(r.id)} />}</span>
             <span className="sum-mean">
               <MeanText s={r.s} />
             </span>
@@ -472,37 +512,42 @@ function Rows({
 function meanHeader(rows: RowData[]): string {
   const means = rows.some((r) => r.s.mean !== null);
   const words = new Set(rows.flatMap((r) => (r.s.yes ? [r.s.yes.word] : [])));
-  const yes = words.size === 0 ? '' : words.size > 1 ? 'share' : words.has('1') ? 'share of 1s' : 'yes';
+  const share = words.size === 0 ? '' : words.size > 1 ? 'share of yes or 1s' : words.has('1') ? 'share of 1s' : 'share of yes';
   const cats = rows.some((r) => r.s.kind === 'categories' && !r.s.yes);
-  if (!means && !yes) return 'Most common';
-  if (!means) return `${yes[0].toUpperCase()}${yes.slice(1)}${cats ? ', or most common' : ' (95% CI)'}`;
-  return yes ? `Mean or ${yes} (95% CI)` : 'Mean (95% CI)';
+  const parts = [means ? 'mean' : '', share, cats ? 'most common' : ''].filter(Boolean);
+  const text = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} or ${parts[parts.length - 1]}` : parts[0] ?? '';
+  return `${text[0]?.toUpperCase() ?? ''}${text.slice(1)}${means || share ? ' (95% CI)' : ''}`;
 }
 
 function MeanText({ s }: { s: FieldSummary }) {
-  if (s.yes)
+  if (s.yes) {
+    // (Ties left out of the share, as for the most common category: said on hover when there are any.)
+    const left = s.n - s.yes.n;
     return (
-      <>
-        <strong>{pct1(s.yes.share)}</strong> <span className="sum-ci">{ciText(s.yes.ci, pct1)}</span>
-      </>
+      <span title={left ? `Share of the ${fmtInt(s.yes.n)} with ${s.yes.word === '1' ? '0 or 1' : 'yes or no'}; ${fmtInt(left)} without a majority left out` : undefined}>
+        <strong>{yesPercent(s.yes)}</strong> <span className="sum-ci">{ciText(s.yes.ci, pct1)}</span>
+      </span>
     );
+  }
   if (s.mean !== null)
     return (
       <>
         <strong>{num(s.mean)}</strong> <span className="sum-ci">{ciText(s.ci, (x) => num(x))}</span>
       </>
     );
-  // Categories: the most common of the codebook's (not "No majority" or a value outside it), as a share of the texts
-  // with a majority: ties left out of the denominator, as in the share of yes.
-  const top = s.bins.filter((b) => !b.extra).sort((a, b) => b.n - a.n)[0];
+  // Categories: the most common of the codebook's (not "No majority" or a value outside it; all of them when tied), as a
+  // share of the texts with a majority: ties left out of the denominator, as in the share of yes.
+  const own = s.bins.filter((b) => !b.extra);
+  const most = Math.max(0, ...own.map((b) => b.n));
+  const tops = own.filter((b) => b.n === most);
   const ties = s.bins.find((b) => b.key === TIE_KEY)?.n ?? 0;
-  return top && top.n ? (
-    <span className="sum-ci" title={ties ? `Share of the ${fmtInt(s.n - ties)} with a majority (${fmtInt(ties)} ties left out, as for yes / no)` : undefined}>
-      Most: <strong className="sum-ink">{top.label}</strong> ({pct(top.n, s.n - ties)}
-      {ties ? ' with a majority' : ''})
+  if (!most) return <span className="sum-ci">—</span>;
+  const names = tops.map((b) => b.label).join(', ');
+  const share = `${pct(most, s.n - ties)}${tops.length > 1 ? ' each' : ''}`;
+  return (
+    <span className="sum-ci" title={`Most common: ${names} (${share}${ties ? ` of the ${fmtInt(s.n - ties)} with a majority; ${fmtInt(ties)} ties left out` : ''})`}>
+      Most: <strong className="sum-ink">{names}</strong> ({share})
     </span>
-  ) : (
-    <span className="sum-ci">—</span>
   );
 }
 
@@ -550,44 +595,57 @@ function RowBar({ s, leftMax, rightMax, w }: { s: FieldSummary; leftMax: number;
   // A bar of parts from left to right: a scale's points in order, categories in the codebook's order.
   let at = 0;
   const shown = s.bins.filter((b) => b.n);
-  const color = (b: Bin) =>
-    s.kind === 'categories' ? categoryColor(s.bins.indexOf(b), !!b.extra, s.bins.filter((x) => !x.extra).length) : s.kind === 'scale' ? scaleColor(s, b.value ?? 0) : 'var(--sum-seq-2)';
+  const color = (b: Bin) => (s.kind === 'categories' ? catColor(s, b) : s.kind === 'scale' ? scaleColor(s, b.value ?? 0) : 'var(--sum-seq-2)');
   return (
     <span className="sum-div">
-      <span className="sum-track full" role="img" aria-label={`${s.label}: ${aria}`}>
-        {s.kind === 'number' ? (
-          <span className="sum-seg" style={{ left: 0, width: '100%', background: 'var(--sum-seq-1)' }} data-tip={`${s.label}: numbers from ${num(s.min)} to ${num(s.max)}`} />
-        ) : (
-          shown.map((b) => {
+      {s.kind === 'number' ? (
+        // (Numbers have no parts to share out: their range, and the field's chart below.)
+        <span className="sum-ci">
+          numbers from {s.min === null ? '—' : scaleLabel(s.min)} to {s.max === null ? '—' : scaleLabel(s.max)}
+        </span>
+      ) : (
+        <span className="sum-track full" role="img" aria-label={`${s.label}: ${aria}`}>
+          {shown.map((b) => {
             const width = (b.n / s.n) * 100;
             const el = <span key={b.key} className="sum-seg" style={{ left: `${at}%`, width: `${width}%`, background: color(b) }} data-tip={tipFor(b)} />;
             at += width;
             return el;
-          })
-        )}
-      </span>
+          })}
+        </span>
+      )}
     </span>
   );
 }
 
-/** The key to a categories bar: each category's color and name (others and ties share the gray). */
-function Legend({ s }: { s: FieldSummary }) {
+/**
+ * The key to a categories bar: each category's color and name, then one light gray for other values (outside the
+ * codebook, or past eight categories) and the darker gray of “No majority (tie)”, each only if some text has it, here
+ * or in any of `also` (the other groups of a split, so the key covers every bar).
+ */
+function Legend({ s, also = [] }: { s: FieldSummary; also?: FieldSummary[] }) {
   const own = s.bins.filter((b) => !b.extra);
-  // (Past eight categories, the eighth on share one gray with values outside the codebook and ties.)
   const colored = own.length > CATEGORY_SLOTS ? own.slice(0, CATEGORY_SLOTS - 1) : own;
-  const gray = [...own.slice(colored.length), ...s.bins.filter((b) => b.extra && b.n)];
+  const all = [s, ...also];
+  const others = new Set([...own.slice(colored.length).map((b) => b.label), ...all.flatMap((x) => x.bins.filter((b) => b.extra && b.key !== TIE_KEY && b.n).map((b) => b.label))]);
+  const ties = all.some((x) => x.bins.some((b) => b.key === TIE_KEY && b.n));
   return (
     <span className="sum-legend">
-      {colored.map((b, i) => (
+      {colored.map((b) => (
         <span key={b.key}>
-          <i style={{ background: categoryColor(i, false, own.length) }} />
+          <i style={{ background: catColor(s, b) }} />
           {b.label}
         </span>
       ))}
-      {gray.length > 0 && (
+      {others.size > 0 && (
         <span>
           <i style={{ background: 'var(--sum-other)' }} />
-          {gray.length === 1 ? gray[0].label : 'Others'}
+          {others.size === 1 ? [...others][0] : 'Other values'}
+        </span>
+      )}
+      {ties && (
+        <span>
+          <i style={{ background: 'var(--sum-tie)' }} />
+          No majority (tie)
         </span>
       )}
     </span>
@@ -596,12 +654,9 @@ function Legend({ s }: { s: FieldSummary }) {
 
 /* ---------------------------------------------------------------- over time */
 
-/** Periods with fewer texts than this are drawn paler: one text moves their shares by 10 points or more. */
-const FEW = 10;
-
 /** A bar part's color on the screen: a scale's value, a category, or the one color of numbers. */
 function binColor(s: FieldSummary, b: Bin): string {
-  if (s.kind === 'categories') return categoryColor(s.bins.indexOf(b), !!b.extra, s.bins.filter((x) => !x.extra).length);
+  if (s.kind === 'categories') return catColor(s, b);
   return s.kind === 'scale' ? scaleColor(s, b.value ?? 0) : 'var(--sum-seq-2)';
 }
 
@@ -649,16 +704,24 @@ function TimeChart({ groups, w, column }: { groups: TimeGroup[]; w: Words; colum
           <div className="sum-time-plot tall">
             {stacks.ticks.map((t) => (
               <div key={t} className={`sum-time-grid${t === 0 && stacks.diverging ? ' zero' : ''}`} style={{ top: `${ys(t)}%` }}>
-                <span>{Math.round(Math.abs(t) * 100)}%</span>
+                <span>{tickLabel(Math.abs(t), true)}</span>
               </div>
             ))}
+            {/* (Periods with fewer than 10 texts: an asterisk over the column.) */}
+            {stacks.parts.map((parts, i) =>
+              groups[i].s.n > 0 && groups[i].s.n < FEW && parts.length ? (
+                <span key={`few-${i}`} className="sum-time-star" style={{ left: x(i), top: `${ys(Math.max(...parts.map((p) => p.to)))}%` }} aria-hidden="true">
+                  *
+                </span>
+              ) : null,
+            )}
             {stacks.parts.map((parts, i) =>
               parts.map((p) => (
                 <span
                   key={`${i}-${p.b.key}`}
-                  className={`sum-time-seg${groups[i].s.n < FEW ? ' few' : ''}`}
+                  className="sum-time-seg"
                   style={{ left: x(i), width: colW, top: `${ys(p.to)}%`, height: `${ys(p.from) - ys(p.to)}%`, background: binColor(groups[i].s, p.b) }}
-                  data-tip={`${groups[i].name}: ${p.b.label}\n${plural(p.b.n)} (${pct(p.b.n, groups[i].s.n)} of ${fmtInt(groups[i].s.n)})${groups[i].s.n < FEW ? '\nFew texts: a single text moves the shares a lot' : ''}`}
+                  data-tip={`${groups[i].name}: ${p.b.label}\n${plural(p.b.n)} (${pct(p.b.n, groups[i].s.n)} of ${fmtInt(groups[i].s.n)})${groups[i].s.n < FEW ? `\nFewer than ${FEW} ${w.many}: one ${w.one} moves the shares by 10 points or more` : ''}`}
                 />
               )),
             )}
@@ -671,7 +734,7 @@ function TimeChart({ groups, w, column }: { groups: TimeGroup[]; w: Words; colum
           <div className="sum-time-plot short">
             {means.ticks.map((t) => (
               <div key={t} className={`sum-time-grid${t === 0 && !means.share ? ' zero' : ''}`} style={{ top: `${((means.hi - t) / (means.hi - means.lo)) * 100}%` }}>
-                <span>{means.share ? `${Math.round(t * 100)}%` : scaleLabel(t)}</span>
+                <span>{tickLabel(t, means.share)}</span>
               </div>
             ))}
             <svg className="sum-time-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -687,13 +750,16 @@ function TimeChart({ groups, w, column }: { groups: TimeGroup[]; w: Words; colum
               if (!p) return null;
               const ym = (v: number) => `${((means.hi - v) / (means.hi - means.lo)) * 100}%`;
               const f = means.share ? pct1 : (v: number) => num(v);
+              // (A share of yes from its counts, and of the texts with yes or no: ties left out.)
+              const y = groups[i].s.yes;
+              const value = means.share && y ? `${yesPercent(y)}${y.n < groups[i].s.n ? ` of the ${fmtInt(y.n)} with ${y.word === '1' ? '0 or 1' : 'yes or no'}` : ''}` : f(p.m);
               return (
                 <span key={i}>
                   {p.ci && <span className="sum-time-ci" style={{ left: x(i), top: ym(p.ci[1]), height: `calc(${ym(p.ci[0])} - ${ym(p.ci[1])})` }} />}
                   <span
                     className={`sum-time-dot${groups[i].s.n < FEW ? ' few' : ''}`}
                     style={{ left: x(i), top: ym(p.m) }}
-                    data-tip={`${groups[i].name}\n${meanWord}: ${f(p.m)}${p.ci ? `\n95% CI ${ciText(p.ci, f)}` : '\nNo interval below 10'}\n${plural(groups[i].s.n)}`}
+                    data-tip={`${groups[i].name}\n${meanWord}: ${value}${p.ci ? `\n95% CI ${ciText(p.ci, f)}` : '\nNo interval below 10'}\n${plural(groups[i].s.n)}${groups[i].s.n < FEW ? ` (fewer than ${FEW})` : ''}`}
                   />
                 </span>
               );
@@ -712,7 +778,9 @@ function TimeChart({ groups, w, column }: { groups: TimeGroup[]; w: Words; colum
         )}
       </div>
       <div className="sum-time-column">{column}</div>
-      {hasStacks && keyFrom && <div className="sum-time-key">{keyFrom.kind === 'categories' ? <Legend s={keyFrom} /> : <ScaleKey s={widestScale ?? keyFrom} />}</div>}
+      {hasStacks && keyFrom && (
+        <div className="sum-time-key">{keyFrom.kind === 'categories' ? <Legend s={keyFrom} also={groups.map((g) => g.s)} /> : <ScaleKey s={widestScale ?? keyFrom} />}</div>
+      )}
     </div>
   );
 }
@@ -745,14 +813,9 @@ interface Axis {
  * scales, or have none (Number fields), except for the groups of one field.
  */
 function meanAxis(rows: RowData[], oneField: boolean): Axis | null {
-  const means = rows.filter((r) => r.s.mean !== null);
-  const share = !means.length;
-  const use = share ? rows.filter((r) => r.s.yes) : means;
+  const use = axisRows(rows, oneField);
   if (!use.length) return null;
-  // (Fields without a scale, e.g. two Number fields such as a year and a confidence, are not put on one axis; groups of
-  // one field are.)
-  const ranges = new Set(use.map((r) => JSON.stringify(r.s.range)));
-  if (!share && !oneField && (ranges.size > 1 || use.some((r) => !r.s.range))) return null;
+  const share = use[0].s.mean === null;
   const xs = use.flatMap((r) => (share ? [r.s.yes!.share, ...(r.s.yes!.ci ?? [])] : [r.s.mean!, ...(r.s.ci ?? [])]));
   if (use.some((r) => r.s.diverging)) xs.push(0);
   let lo = Math.min(...xs);
@@ -767,17 +830,18 @@ function meanAxis(rows: RowData[], oneField: boolean): Axis | null {
   if (share) (lo = Math.max(0, lo)), (hi = Math.min(1, hi));
   const ticks = niceTicks(lo, hi, 4);
   const at = (x: number) => ((x - lo) / (hi - lo)) * 100;
-  return { ticks: ticks.filter((t) => at(t) >= 0 && at(t) <= 100), at, label: share ? (x) => `${Math.round(x * 100)}%` : (x) => scaleLabel(x), share };
+  return { ticks: ticks.filter((t) => at(t) >= 0 && at(t) <= 100), at, label: (x) => tickLabel(x, share), share };
 }
 
 
-function Strip({ s, axis }: { s: FieldSummary; axis: Axis }) {
-  // (A row in another unit than the axis, e.g. a share of yes beside means, gets no mark.)
+function Strip({ s, axis, on }: { s: FieldSummary; axis: Axis; on: boolean }) {
+  // (A row not on the axis, e.g. a share of yes or a Number field beside the −3…3 means, gets no mark.)
+  if (!on) return null;
   const m = axis.share ? s.yes?.share : s.mean;
   if (m === undefined || m === null) return null;
   const ci = axis.share ? s.yes?.ci : s.ci;
   const zero = !axis.share && s.diverging ? axis.at(0) : null;
-  const tip = `${s.label}\n${axis.share ? `${s.yes?.word === '1' ? 'Share of 1s' : 'Yes'}: ${pct1(m)}` : `Mean: ${num(m)}`}${ci ? `\n95% CI ${ciText(ci, axis.share ? pct1 : (x) => num(x))}` : '\nNo interval below 10'}`;
+  const tip = `${s.label}\n${axis.share ? `${s.yes?.word === '1' ? 'Share of 1s' : 'Share of yes'}: ${s.yes ? yesPercent(s.yes) : pct1(m)}` : `Mean: ${num(m)}`}${ci ? `\n95% CI ${ciText(ci, axis.share ? pct1 : (x) => num(x))}` : '\nNo interval below 10'}`;
   return (
     <span className="sum-strip" data-tip={tip}>
       <span className="sum-strip-base" />
@@ -812,13 +876,21 @@ function Detail({ s, w, replicates, downloads }: { s: FieldSummary; w: Words; re
             <Tile k={`${w.Many} with a value`} v={fmtInt(s.n)} sub={s.missing ? `${fmtInt(s.missing)} annotated without one` : undefined} />
             {s.yes ? (
               <Tile
-                k={s.yes.word === '1' ? 'Share of 1s' : 'Yes'}
-                v={pct1(s.yes.share)}
-                sub={[s.yes.ci ? `95% CI ${ciText(s.yes.ci, pct1)}` : '', s.yes.n < s.n ? `of the ${fmtInt(s.yes.n)} with ${s.yes.word === '1' ? '0 or 1' : 'yes or no'}` : ''].filter(Boolean).join('; ') || undefined}
+                k={s.yes.word === '1' ? 'Share of 1s' : 'Share of yes'}
+                v={yesPercent(s.yes)}
+                sub={
+                  s.yes.ci || s.yes.n < s.n ? (
+                    <>
+                      {s.yes.ci && <CiLines ci={s.yes.ci} f={pct1} />}
+                      {s.yes.ci && s.yes.n < s.n && <br />}
+                      {s.yes.n < s.n && `of the ${fmtInt(s.yes.n)} with ${s.yes.word === '1' ? '0 or 1' : 'yes or no'}`}
+                    </>
+                  ) : undefined
+                }
               />
             ) : s.mean !== null ? (
               <>
-                <Tile k="Mean" v={num(s.mean)} sub={s.ci ? `95% CI ${ciText(s.ci, (x) => num(x))}` : 'no interval below 10'} />
+                <Tile k="Mean" v={num(s.mean)} sub={s.ci ? <CiLines ci={s.ci} f={(x) => num(x)} /> : 'no interval below 10'} />
                 <Tile k="Median" v={s.median === null ? '—' : scaleLabel(s.median)} sub={s.min !== null && s.max !== null ? `range ${scaleLabel(s.min)} to ${scaleLabel(s.max)}` : undefined} />
                 <Tile k="Standard deviation" v={num(s.sd)} />
                 {s.sides && (
@@ -855,6 +927,17 @@ function leftOutNote(s: FieldSummary, w: Words): string {
   return `${fmtInt(n)} ${n === 1 ? `${w.one} has an answer` : `${w.many} have answers`} left out of the chart and the figures (${why.join(', ')}): ${shown}.`;
 }
 
+/** “95% CI” over the interval, which stays on one line. */
+function CiLines({ ci, f }: { ci: [number, number]; f: (x: number) => string }) {
+  return (
+    <>
+      95% CI
+      <br />
+      <span className="sum-nowrap">{ciText(ci, f)}</span>
+    </>
+  );
+}
+
 function kindText(s: FieldSummary): string {
   if (s.kind === 'categories') return s.yes ? 'yes / no' : 'categories';
   if (s.yes) return '0 or 1';
@@ -862,7 +945,7 @@ function kindText(s: FieldSummary): string {
   return s.range ? `scale ${scaleLabel(s.range[0])} to ${scaleLabel(s.range[1])}` : 'scale';
 }
 
-function Tile({ k, v, sub, wide }: { k: string; v: string; sub?: string; wide?: boolean }) {
+function Tile({ k, v, sub, wide }: { k: string; v: string; sub?: ReactNode; wide?: boolean }) {
   return (
     <div className={`stat${wide ? ' sum-wide' : ''}`}>
       <div className="k">{k}</div>
@@ -896,18 +979,14 @@ function Columns({ s, w }: { s: FieldSummary; w: Words }) {
   // (A histogram's bin edges, every other one when there are more than 6 bins.)
   const ticks: { x: number; label: string }[] = histogram
     ? [...s.bins.map((b) => ({ x: b.from!, label: b.fromLabel! })), { x: s.bins[s.bins.length - 1].to!, label: s.bins[s.bins.length - 1].toLabel! }].filter(
-        (_, i, all) => all.length <= 7 || i % 2 === 0 || i === all.length - 1,
+        // (Every other edge past 6 bins, always including the last, so the labels stay evenly spaced.)
+        (_, i, all) => all.length <= 7 || i % 2 === (all.length - 1) % 2,
       )
     : s.bins.filter((b) => !(b.extra && b.value !== undefined && !Number.isInteger(b.value) && s.kind === 'scale')).map((b) => ({ x: b.value ?? 0, label: b.label }));
   const color = (b: Bin) => (s.kind === 'scale' ? scaleColor(s, b.value ?? 0) : 'var(--sum-seq-2)');
   return (
     <div className="sum-chart" role="img" aria-label={`${s.label}: ${s.bins.map((b) => `${b.label}: ${fmtInt(b.n)}`).join(', ')}${s.mean !== null ? `; mean ${num(s.mean)}` : ''}`}>
       <div className="sum-plot">
-        {s.mean !== null && (
-          <span className="sum-mean-mark" style={{ left: `${at(s.mean)}%` }}>
-            <span className={`sum-mean-label${at(s.mean) > 70 ? ' left' : ''}`}>mean {num(s.mean)}</span>
-          </span>
-        )}
         {s.bins.map((b) => {
           // (The tallest bar reaches 86% of the plot, so its share fits above it.)
           const h = (b.n / max) * 86;
@@ -930,6 +1009,14 @@ function Columns({ s, w }: { s: FieldSummary; w: Words }) {
           </span>
         ))}
       </div>
+      {/* The mean: a marker under the axis (a line through the plot would cross the bars' labels). */}
+      {s.mean !== null && (
+        <div className="sum-mean-row">
+          <span className={`sum-mean-at${at(s.mean) > 75 ? ' left' : ''}`} style={{ left: `${at(s.mean)}%` }}>
+            <i aria-hidden="true">▲</i> mean {num(s.mean)}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -937,7 +1024,6 @@ function Columns({ s, w }: { s: FieldSummary; w: Words }) {
 /** Categories: one bar per category, names on the left, in the colors of the bars above (so this is their key). */
 function CategoryBars({ s, w }: { s: FieldSummary; w: Words }) {
   const max = Math.max(1, ...s.bins.map((b) => b.n));
-  const own = s.bins.filter((b) => !b.extra).length;
   return (
     <div className="sum-cats" role="table" aria-label={s.label}>
       {s.bins.map((b) => (
@@ -946,7 +1032,7 @@ function CategoryBars({ s, w }: { s: FieldSummary; w: Words }) {
             {b.label}
           </span>
           <span className="sum-cat-bar" role="cell">
-            <span style={{ width: `${(b.n / max) * 100}%`, background: categoryColor(s.bins.indexOf(b), !!b.extra, own) }} />
+            <span style={{ width: `${(b.n / max) * 100}%`, background: catColor(s, b) }} />
           </span>
           <span className="sum-cat-n" role="cell">
             {fmtInt(b.n)} <span className="sum-ci">({pct(b.n, s.n)})</span>
@@ -961,19 +1047,38 @@ function CategoryBars({ s, w }: { s: FieldSummary; w: Words }) {
 
 const rowsOf = (summaries: FieldSummary[]): FigureRow[] => summaries.map((s) => ({ name: s.label, s }));
 
+/** Today in the owner's time zone, as 2026-11-06. */
+function localDate(d = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * A name for a file: minus signs kept as “minus” and Nordic letters spelled out before the usual slug ("score −3 to −1"
+ * → score-minus3-to-minus1, "Kønsroller" → konsroller), so names stay readable and distinct.
+ */
+export function fileSlug(text: string): string {
+  const t = text
+    .replace(/[−–]\s*(?=\d)|-(?=\d)/g, 'minus')
+    .replace(/[øØ]/g, (c) => (c === 'ø' ? 'o' : 'O'))
+    .replace(/[æÆ]/g, (c) => (c === 'æ' ? 'ae' : 'Ae'))
+    .replace(/ß/g, 'ss');
+  return slug(t);
+}
+
 /**
  * The Download menu of a figure: SVG (vector) and PNG (600 dpi) at one column's or the full page's width, and the
  * numbers behind it as CSV. The figures are drawn for print (`src/lib/figure.ts`), not copied from the screen.
  */
 function Downloads({ name, svg, csv }: { name: string; svg: (widthMm: number) => string; csv: () => Row[] }) {
   const [busy, setBusy] = useState(false);
-  const stamp = dateStamp();
+  // (The date of the download, in the owner's time zone, taken on the click.)
+  const stamp = () => localDate().replace(/-/g, '');
   const save = async (kind: 'svg' | 'png', mm: number) => {
     try {
       setBusy(true);
       const text = svg(mm);
-      if (kind === 'svg') download(`${name}_${mm}mm_${stamp}.svg`, text, 'image/svg+xml');
-      else download(`${name}_${mm}mm_${PNG_DPI}dpi_${stamp}.png`, await svgToPng(text, mm));
+      if (kind === 'svg') download(`${name}_${mm}mm_${stamp()}.svg`, text, 'image/svg+xml');
+      else download(`${name}_${mm}mm_${PNG_DPI}dpi_${stamp()}.png`, await svgToPng(text, mm));
     } catch (e) {
       toast(`Download failed: ${errorMessage(e)}`, 'error');
     } finally {
@@ -1001,10 +1106,10 @@ function Downloads({ name, svg, csv }: { name: string; svg: (widthMm: number) =>
             </button>
           ))}
           <div className="menu-sep" />
-          <button className="menu-item" onClick={() => (close(), download(`${name}_${stamp}.csv`, toCsv(...csvColumns(csv())), 'text/csv'))}>
+          <button className="menu-item" onClick={() => (close(), download(`${name}_${stamp()}.csv`, toCsv(...csvColumns(csv())), 'text/csv'))}>
             Numbers, CSV
           </button>
-          <div className="menu-note">SVG is vector: sharp at any size; opens in Word, PowerPoint, Inkscape and Illustrator, which can also save it as EPS or PDF.</div>
+          <div className="menu-note">SVG is vector: sharp at any size. Word and PowerPoint open it; Inkscape and Illustrator can also save it as EPS or PDF.</div>
         </>
       )}
     </Menu>

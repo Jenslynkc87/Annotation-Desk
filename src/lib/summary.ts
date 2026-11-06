@@ -69,6 +69,8 @@ export interface FieldSummary {
    * combined 0.5, is neither), with its 95% Wilson interval. `word`: "Yes", or "1" for a 0/1 scale.
    */
   yes: { share: number; n: number; ci: [number, number] | null; word: 'Yes' | '1' } | null;
+  /** Plain-text scores read as a 0/1 flag (`isFlag`). */
+  flag?: true;
 }
 
 export interface RunCounts {
@@ -147,10 +149,30 @@ export function categoryKey(i: number, extra: boolean, total: number): string {
   return `cat-${i + 1}`;
 }
 
-/** A number as shown on a scale: a real minus sign, at most 2 decimals ("−3", "0.5", "1.33"). */
+/**
+ * The color name of a categories field's bar part: the category's own color, a darker gray for “No majority (tie)”
+ * (its own entry in the key, so it isn't read as “other values”), a light gray for anything else outside the codebook.
+ */
+export function binCategoryKey(s: Pick<FieldSummary, 'bins'>, b: Bin): string {
+  if (b.key === TIE_KEY) return 'tie';
+  return categoryKey(s.bins.indexOf(b), !!b.extra, s.bins.filter((x) => !x.extra).length);
+}
+
+/** A number as shown on a scale: a real minus sign, at most 2 decimals ("−3", "0.5", "1.33"), halves rounded away from 0 on both sides (−2.875 → −2.88, as 2.875 → 2.88). */
 export function scaleLabel(x: number): string {
-  const s = String(Math.round(x * 100) / 100);
+  const r = Math.sign(x) * (Math.round(Math.abs(x) * 100) / 100);
+  const s = String(r === 0 ? 0 : r);
   return s.startsWith('-') ? `−${s.slice(1)}` : s;
+}
+
+/** `n` of `total` as a whole percentage, from the counts (92 of 160 is 58%, not 57%); a share that rounds to 0 but isn't, "<1%". */
+export function wholePercent(n: number, total: number): string {
+  return n > 0 && n * 200 < total ? '<1%' : `${Math.round((n * 100) / total)}%`;
+}
+
+/** A share of yes (of 1s) to one decimal, from its counts (23 of 80 is 28.8%). */
+export function yesPercent(y: { share: number; n: number }): string {
+  return `${(Math.round((Math.round(y.share * y.n) * 1000) / y.n) / 10).toFixed(1)}%`;
 }
 
 /**
@@ -238,7 +260,7 @@ export const TIE_KEY = '\u0000tie';
  * One field of one run, over `items` (the run's texts, or a group of them): its bars and figures. Texts without an
  * answer (failed, waiting) are not counted at all; annotated texts without a value for the field are `missing`.
  */
-export function summarizeField(run: Run, field: ComparableField, items: RunItem[], categoryOrder?: string[]): FieldSummary {
+export function summarizeField(run: Run, field: ComparableField, items: RunItem[], categoryOrder?: string[], like?: FieldSummary): FieldSummary {
   const shape = shapeOf(field);
   const values: string[] = [];
   // (Each value as written, for the note on values left out: "NA", not "na".)
@@ -282,7 +304,8 @@ export function summarizeField(run: Run, field: ComparableField, items: RunItem[
   // Numbers: values that aren't (e.g. "NA" in a plain-text answer) are left out and reported; so are numbers off a
   // fixed scale (a 9 for "can't tell" on −3…3, or beside a flag's 0 and 1), as in the Agreement panel and the exports.
   const nums = values.map((x) => toNumber(x));
-  const flag = isFlag(field, nums.filter(Number.isFinite));
+  // (A group of a split is read as the whole field is: a flag or not, and on its histogram's bins, so the groups line up.)
+  const flag = like ? !!like.flag : isFlag(field, nums.filter(Number.isFinite));
   const kind: SummaryKind = flag ? 'scale' : shape.kind;
   const points = flag ? [0, 1] : shape.points;
   const range: [number, number] | null = flag ? [0, 1] : shape.range;
@@ -309,7 +332,7 @@ export function summarizeField(run: Run, field: ComparableField, items: RunItem[
     // them (plain-text answers on a scale of the answers seen) in their place.
     const all = [...new Set([...points, ...counts.keys()])].sort(sortNumeric);
     bins = all.map((x) => ({ key: String(x), label: scaleLabel(x), n: counts.get(x) ?? 0, value: x, ...(points.includes(x) ? {} : { extra: true }) }));
-  } else bins = histogram(xs);
+  } else bins = like && like.kind === 'number' ? histogramOn(xs, like.bins) : histogram(xs);
   // A 0/1 scale (a flag, or a codebook of 0 and 1): its mean is a share, so the share of 1s with a Wilson interval.
   const zeroOne = kind === 'scale' && points.length === 2 && points[0] === 0 && points[1] === 1;
   const yes = zeroOne ? share(xs.filter((x) => x === 1).length, xs.filter((x) => x === 0).length, '1') : null;
@@ -325,6 +348,7 @@ export function summarizeField(run: Run, field: ComparableField, items: RunItem[
     ...(zeroOne ? { mean: null, sd: null, ci: null } : {}),
     sides,
     yes,
+    ...(flag ? { flag: true as const } : {}),
   };
 }
 
@@ -335,16 +359,19 @@ function share(yes: number, no: number, word: 'Yes' | '1'): FieldSummary['yes'] 
 }
 
 /**
- * Numbers: a bar per value when there are at most 15 distinct ones, else bins of a round width (1, 2, 2.5 or 5 times a
- * power of ten) starting at a multiple of it, about 10 of them: years 1965–2014 in bins of 5 from 1965. The highest
- * value goes into the last bin.
+ * Numbers: a bar per value when there are at most 15 distinct ones, evenly enough spaced to sit on one axis (the range
+ * at most 30 times the smallest gap), else bins of a round width (1, 2, 2.5 or 5 times a power of ten) starting at a
+ * multiple of it, about 10 of them: years 1965–2014 in bins of 5 from 1965. The highest value goes into the last bin.
  */
 export function histogram(xs: number[]): Bin[] {
   if (!xs.length) return [];
   const counts = new Map<number, number>();
   for (const x of xs) counts.set(x, (counts.get(x) ?? 0) + 1);
-  if (counts.size <= 15)
-    return [...counts.entries()].sort((a, b) => a[0] - b[0]).map(([x, n]) => ({ key: String(x), label: scaleLabel(x), n, value: x }));
+  const distinct = [...counts.keys()].sort((a, b) => a - b);
+  let gap = Infinity;
+  for (let i = 1; i < distinct.length; i++) gap = Math.min(gap, distinct[i] - distinct[i - 1]);
+  if (counts.size <= 15 && (counts.size === 1 || (distinct[distinct.length - 1] - distinct[0]) / gap <= 30))
+    return distinct.map((x) => ({ key: String(x), label: scaleLabel(x), n: counts.get(x)!, value: x }));
   let lo = Infinity;
   let hi = -Infinity;
   for (const x of xs) (lo = Math.min(lo, x)), (hi = Math.max(hi, x));
@@ -362,11 +389,30 @@ export function histogram(xs: number[]): Bin[] {
     const t = (Math.abs(x) < width * 1e-9 ? 0 : x).toFixed(decimals);
     return t.startsWith('-') ? `−${t.slice(1)}` : t;
   };
+  // (Edges rounded, so the CSV says 0.6–0.7, not 0.6000000000000001–0.7000000000000001.)
+  const round = (x: number) => Math.round(x * 1e9) / 1e9;
   return n.map((c, i) => {
-    const a = start + i * width;
-    const b = a + width;
+    const a = round(start + i * width);
+    const b = round(start + (i + 1) * width);
     return { key: `${a}|${b}`, label: `${edge(a)}–${edge(b)}`, n: c, value: (a + b) / 2, from: a, to: b, fromLabel: edge(a), toLabel: edge(b) };
   });
+}
+
+/** `xs` counted on the bins of another histogram (the whole field's, for one group of a split): the same edges or values, every bin kept. */
+function histogramOn(xs: number[], template: Bin[]): Bin[] {
+  const bins = template.map((b) => ({ ...b, n: 0 }));
+  if (!bins.length) return histogram(xs);
+  for (const x of xs) {
+    let i: number;
+    if (bins[0].from === undefined) i = bins.findIndex((b) => b.value === x);
+    else {
+      // (As `histogram`: from the bin's first edge up to the next, the highest value in the last bin.)
+      i = bins.findIndex((b) => x >= b.from! - 1e-9 && x < b.to! - 1e-9);
+      if (i < 0 && x >= bins[bins.length - 1].from! - 1e-9 && x <= bins[bins.length - 1].to! + 1e-9) i = bins.length - 1;
+    }
+    if (i >= 0) bins[i].n++;
+  }
+  return bins;
 }
 
 /* ------------------------------------------------------------------ columns: filter and split */
@@ -449,11 +495,17 @@ export function periodSteps(c: ColumnInfo): { steps: number[]; preferred: number
   const steps: number[] = [];
   if (c.values.length <= 40 && !c.more) steps.push(0);
   const groups = (w: number) => Math.floor(c.max / w) - Math.floor(c.min / w) + 1;
+  // (No step finer than the values themselves: a column of decades, 1900, 1910, …, gets no 2- or 5-year periods,
+  // which would be mostly empty.)
+  const nums = c.more ? [] : [...new Set(c.values.map((v) => toNumber(v)).filter(Number.isFinite))].sort((a, b) => a - b);
+  let gap = Infinity;
+  for (let i = 1; i < nums.length; i++) gap = Math.min(gap, nums[i] - nums[i - 1]);
   for (const mag of [0.01, 0.1, 1, 10, 100, 1000, 10000])
     for (const m of [1, 2, 2.5, 5]) {
       const w = Math.round(m * mag * 1000) / 1000;
       // (Whole numbers: whole steps only, so every period holds the same number of values: no 2.5-year periods.)
       if (c.whole && !Number.isInteger(w)) continue;
+      if (Number.isFinite(gap) && w < gap - 1e-9) continue;
       const g = groups(w);
       if (g >= 3 && g <= 40 && !(w === 1 && c.whole && steps.includes(0) && g === c.values.length)) steps.push(w);
     }
@@ -508,21 +560,23 @@ export function summarizeByGroup(run: Run, field: ComparableField, items: RunIte
     }
   }
   const label = (from: number, to: number) => {
-    if (step === 0) return scaleLabel(from);
+    // (Each value as it is: 0.125 and 0.126 are two groups, not two of “0.13”.)
+    if (step === 0) return String(from).replace(/^-/, '−');
     // (Whole numbers: the last value in the period, 1950–1954. Others: up to but not including the next, 0.2–<0.3.)
     if (whole) return to - 1 === from ? scaleLabel(from) : `${scaleLabel(from)}–${scaleLabel(to - 1)}`;
     return `${scaleLabel(from)}–<${scaleLabel(to)}`;
   };
-  // Categories without a codebook: one order (most frequent first) over all the texts, so a category keeps its color
-  // in every group.
-  const order = field.level === 'nominal' && !field.yesNo && !field.allowed.length ? summarizeField(run, field, items).bins.filter((b) => !b.extra).map((b) => b.key) : undefined;
+  // The whole field over all the texts: how each group is read (a flag or not; numbers on the same histogram bins), and
+  // for categories without a codebook one order (most frequent first), so a category keeps its color in every group.
+  const all = summarizeField(run, field, items);
+  const order = field.level === 'nominal' && !field.yesNo && !field.allowed.length ? all.bins.filter((b) => !b.extra).map((b) => b.key) : undefined;
   return [...groups.entries()]
     .sort(([a, x], [b, y]) => (a === '' ? 1 : b === '' ? -1 : x.from !== undefined && y.from !== undefined ? x.from - y.from : collator.compare(a, b)))
     .map(([g, x]) => ({
       group: g === '' ? '(no value)' : x.from !== undefined ? label(x.from, x.to!) : g,
       none: g === '',
       ...(x.from !== undefined ? { from: x.from, to: step > 0 ? x.to : undefined } : {}),
-      summary: summarizeField(run, field, x.items, order),
+      summary: summarizeField(run, field, x.items, order, all),
     }));
 }
 

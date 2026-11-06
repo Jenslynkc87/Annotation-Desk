@@ -491,3 +491,62 @@ describe('review of the filter and periods (Nov 6)', () => {
     expect(subsetLabel({ column: 'x', from: -2 })).toBe('x from −2');
   });
 });
+
+describe('final check (Nov 6)', () => {
+  const prompt: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'text', variables: [] };
+  const mk = (answers: string[], metas: Record<string, string>[]) => {
+    const docs = answers.map((_, i) => doc(i, metas[i]));
+    const run = makeRun(prompt, docs.map((d) => d.id));
+    const results = answers.map((a, i) => result(run.id, `d${i}`, 1, { response: a }));
+    const views = buildDocViews(docs, [run], results, run.id);
+    return { run, items: runItems(run, docs, views), fields: comparableFields(run, views.values()) };
+  };
+
+  it('counts every group of a split on the whole field’s histogram bins, so zeros in one are real', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    // 0–100 scores: the first era low, the second high.
+    const answers = Array.from({ length: 60 }, (_, i) => `{"confidence": ${i < 30 ? i : 40 + i}}`);
+    const { run, items, fields } = mk(answers, answers.map((_, i) => ({ era: i < 30 ? 'early' : 'late' })));
+    const all = summarizeField(run, fields[0], items);
+    expect(all.kind).toBe('number');
+    const g = summarizeByGroup(run, fields[0], items, 'era');
+    for (const x of g) {
+      expect(x.summary.bins.map((b) => b.key)).toEqual(all.bins.map((b) => b.key));
+    }
+    // Each group's counts add up to its texts, and the two groups to the whole.
+    expect(g.map((x) => x.summary.bins.reduce((t, b) => t + b.n, 0))).toEqual([30, 30]);
+    expect(all.bins.map((b) => b.n)).toEqual(all.bins.map((_, k) => g[0].summary.bins[k].n + g[1].summary.bins[k].n));
+  });
+
+  it('reads every group of a split as the whole field is (a flag stays a flag)', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    // A flag with one far code: in the small group the 9 is a third of its answers.
+    const answers = [...Array(30).fill('{"flag": 1}'), ...Array(20).fill('{"flag": 0}'), '{"flag": 0}', '{"flag": 1}', '{"flag": 9}'];
+    const metas = answers.map((_, i) => ({ g: i < 50 ? 'a' : 'b' }));
+    const { run, items, fields } = mk(answers, metas);
+    const g = summarizeByGroup(run, fields[0], items, 'g');
+    expect(g.map((x) => [x.summary.kind, x.summary.yes?.word])).toEqual([
+      ['scale', '1'],
+      ['scale', '1'],
+    ]);
+    expect(g[1].summary.leftOut.offScale).toBe(1);
+  });
+
+  it('labels each value of a column of decimals exactly', async () => {
+    const { summarizeByGroup } = await import('./summary');
+    const { run, items, fields } = mk(['{"s": 1}', '{"s": 2}'], [{ w: '0.125' }, { w: '0.126' }]);
+    expect(summarizeByGroup(run, fields[0], items, 'w', 0, false, true).map((x) => x.group)).toEqual(['0.125', '0.126']);
+  });
+
+  it('rounds halves away from 0 on both sides, and percentages from the counts', async () => {
+    const { wholePercent, yesPercent } = await import('./summary');
+    expect(scaleLabel(-2.875)).toBe('−2.88');
+    expect(scaleLabel(2.875)).toBe('2.88');
+    expect(scaleLabel(-0.001)).toBe('0');
+    expect(wholePercent(92, 160)).toBe('58%');
+    expect(wholePercent(1, 300)).toBe('<1%');
+    expect(wholePercent(1, 200)).toBe('1%');
+    expect(yesPercent({ share: 23 / 80, n: 80 })).toBe('28.8%');
+    expect(yesPercent({ share: 1 / 2, n: 2 })).toBe('50.0%');
+  });
+});

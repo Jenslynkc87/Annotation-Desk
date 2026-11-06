@@ -42,10 +42,12 @@ describe('figures', () => {
     expect(svg.trim().endsWith('</svg>')).toBe(true);
   });
 
-  it('draws one field as columns with the mean marked, at one column’s width', () => {
+  it('draws one field as columns with the mean marked under the axis, at one column’s width', () => {
     const svg = fieldFigure(a, { widthMm: 85, description: 'd' });
     expect(svg).toContain('width="85mm"');
-    expect(svg).toMatch(/mean −?0\.\d+|mean 0/);
+    expect(svg).toMatch(/mean −?0\.\d\d</);
+    // (A marker, not a line through the plot.)
+    expect(svg).toMatch(/<path d="M[\d.]+ [\d.]+ L/);
     expect(svg).not.toMatch(/NaN|undefined|Infinity/);
     // One column per point.
     expect((svg.match(/<rect /g) ?? []).length).toBe(1 + 7);
@@ -183,6 +185,101 @@ describe('over time', () => {
   it('gives the CSV the period bounds and the subset', () => {
     const s = scale([1, 1, 1, 1, 1, 1, 1]);
     const [row] = summaryCsvRows([{ name: '1950–1954', s, from: 1950, to: 1955 }], { run: '#1', model: 'm', appVersion: 'v', field: 'F', groupColumn: 'year', subset: 'journal = AQ' });
-    expect(row).toMatchObject({ subset: 'journal = AQ', year: '1950–1954', period_from: 1950, period_to_before: 1955 });
+    expect(row).toMatchObject({ subset: 'journal = AQ', year: '1950–1954', period_start: 1950, period_end_exclusive: 1955 });
+  });
+});
+
+describe('final check of the downloads (Nov 6)', () => {
+  it('keeps at least two ticks, labeled with the decimals they have', async () => {
+    const { niceTicks, tickLabel } = await import('./figure');
+    expect(niceTicks(0.1, 0.9, 2)).toEqual([0.25, 0.75]);
+    expect(niceTicks(-0.7, 0.4, 2).length).toBeGreaterThanOrEqual(2);
+    expect(tickLabel(0.175, true)).toBe('17.5%');
+    expect(tickLabel(0.475, false)).toBe('0.475');
+    expect(tickLabel(-1, false)).toBe('−1');
+    expect(tickLabel(0, true)).toBe('0%');
+  });
+
+  it('writes the share’s denominator, the scale’s ends and zeros only within a scale', async () => {
+    const { csvColumns } = await import('./figure');
+    const s1 = scale([1, 0, 0, 0, 0, 0, 1]);
+    const s2: FieldSummary = { ...scale([0, 0, 0, 1, 0, 0, 0]), key: 'b', label: 'B', bins: [...scale([0, 0, 0, 1, 0, 0, 0]).bins, { key: '0.5', label: '0.5', n: 2, value: 0.5, extra: true }] };
+    const flag: FieldSummary = {
+      ...scale([0, 0, 0, 0, 0, 0, 0]),
+      key: 'f',
+      label: 'Flag',
+      diverging: false,
+      range: [0, 1],
+      bins: [
+        { key: '0', label: '0', n: 3, value: 0 },
+        { key: '1', label: '1', n: 5, value: 1 },
+      ],
+      n: 9,
+      mean: null,
+      sides: null,
+      yes: { share: 5 / 8, n: 8, ci: null, word: '1' },
+    };
+    const rows = summaryCsvRows(
+      [
+        { name: 'A', s: s1 },
+        { name: 'B', s: s2 },
+        { name: 'Flag', s: flag },
+      ],
+      { study: 'S', run: '#1', model: 'm', promptVersion: 3, appVersion: 'v' },
+    );
+    expect(rows[0]).toMatchObject({ study: 'S', prompt_version: 3, scale_min: -3, scale_max: 3, 'n_0.5': 0 });
+    // The flag: 0 and 1 are its own; −3, 0.5 and 3 aren't on its scale (blank, not 0).
+    expect(rows[2]).toMatchObject({ share_1: 0.625, share_n: 8, n_0: 3, n_1: 5 });
+    expect(rows[2]['n_-3']).toBeUndefined();
+    expect(rows[2]['n_0.5']).toBe(0);
+    const [, cols] = csvColumns(rows);
+    expect(cols.indexOf('share_1')).toBeLessThan(cols.indexOf('share_n'));
+    expect(cols.slice(0, 5)).toEqual(['study', 'run', 'model', 'prompt_version', 'field']);
+  });
+
+  it('prefixes a group column named like one of the table’s own', () => {
+    const s = scale([1, 1, 1, 1, 1, 1, 1]);
+    const [row] = summaryCsvRows([{ name: '7', s }], { run: '#1', model: 'm', appVersion: 'v', field: 'F', groupColumn: 'n' });
+    expect(row).toMatchObject({ group_n: '7', n: 7 });
+  });
+
+  it('gives one field’s CSV the field’s n and mean on every row', () => {
+    const s = scale([2, 0, 0, 0, 0, 0, 2]);
+    const rows = binCsvRows(s, { study: 'S', run: '#2', model: 'm', promptVersion: 1, appVersion: 'v' });
+    expect(rows[0]).toMatchObject({ study: 'S', prompt_version: 1, field_n: 4, field_mean: 0 });
+  });
+
+  it('writes out the figures of rows not on the shared axis, and a Number field’s range', async () => {
+    const { describe: describeNumbers } = await import('./summary');
+    const a = scale([2, 5, 9, 12, 8, 4, 1]);
+    const xs = Array.from({ length: 20 }, (_, i) => 1950 + i * 3);
+    const num: FieldSummary = { ...scale([0, 0, 0, 0, 0, 0, 0]), key: 'y', label: 'Year', kind: 'number', diverging: false, range: null, bins: histogram(xs), n: 20, ...describeNumbers(xs), sides: null };
+    const svg = rowsFigure(
+      [
+        { name: 'A', s: a },
+        { name: 'Year', s: num },
+      ],
+      { widthMm: 175, oneField: false, description: 'd' },
+    );
+    expect(svg).toContain('numbers from 1950 to 2007');
+    expect(svg).toMatch(/mean 1978\.5/);
+    expect(svg).not.toMatch(/NaN|undefined|Infinity/);
+  });
+
+  it('marks small periods with an asterisk and hollow dots, and says so', async () => {
+    const { timeFigure } = await import('./figure');
+    const small = scale([0, 1, 1, 2, 1, 0, 0]);
+    const big = scale([2, 5, 9, 12, 8, 4, 1]);
+    const svg = timeFigure(
+      [
+        { tick: '1950', name: '1950–1954', s: big },
+        { tick: '1955', name: '1955–1959', s: small },
+      ],
+      { widthMm: 175, description: 'd', column: 'year' },
+    );
+    expect(svg).toContain('>*<');
+    expect(svg).toContain('fill="#ffffff" stroke="#1a1a1a"');
+    expect(svg).toContain('fewer than 10 texts');
+    expect(svg).not.toContain('fill-opacity');
   });
 });
