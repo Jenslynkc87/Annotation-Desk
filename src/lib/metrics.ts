@@ -1,5 +1,6 @@
 // Agreement statistics between two sets of labels for the same items.
 // Pairs with a missing value on either side are dropped before computing.
+import { normalizeLabel } from './prompt';
 
 export type Level = 'nominal' | 'ordinal' | 'interval';
 
@@ -623,7 +624,9 @@ export type Aggregation = 'majority' | 'median' | 'mean';
 
 /**
  * Combine replicates: majority vote (categories; ties reported as "a | b"), median (ordinal scales:
- * a whole number with an odd number of replicates) or mean (numbers).
+ * a whole number with an odd number of replicates) or mean (numbers). The vote counts values that the statistics read
+ * as the same label (`normalizeLabel`: "Essay" and "essay", "very  positive" and "very positive") as one, under the
+ * spelling given most often (the first of them when tied), so annotations that differ only in case are no tie.
  */
 export function aggregate(values: string[], method: Aggregation): string {
   const v = values.filter((x) => x !== '');
@@ -634,10 +637,17 @@ export function aggregate(values: string[], method: Aggregation): string {
     const value = method === 'mean' ? xs.reduce((s, x) => s + x, 0) / xs.length : xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
     return String(Math.round(value * 1000) / 1000);
   }
-  const counts = new Map<string, number>();
-  for (const x of v) counts.set(x, (counts.get(x) ?? 0) + 1);
-  const max = Math.max(...counts.values());
-  const top = [...counts.entries()].filter(([, c]) => c === max).map(([x]) => x);
+  // (Per label as read: how often each spelling of it was given, in the order first given.)
+  const labels = new Map<string, { n: number; forms: Map<string, number> }>();
+  for (const x of v) {
+    const k = normalizeLabel(x);
+    const g = labels.get(k) ?? labels.set(k, { n: 0, forms: new Map() }).get(k)!;
+    g.n++;
+    g.forms.set(x, (g.forms.get(x) ?? 0) + 1);
+  }
+  const max = Math.max(...[...labels.values()].map((g) => g.n));
+  const spelling = (forms: Map<string, number>) => [...forms.entries()].reduce((best, e) => (e[1] > best[1] ? e : best))[0];
+  const top = [...labels.values()].filter((g) => g.n === max).map((g) => spelling(g.forms));
   return top.length === 1 ? top[0] : top.sort().join(' | ');
 }
 

@@ -1,5 +1,6 @@
 // Attach human labels (an "answer key") from a spreadsheet to texts already in the study.
 // Rows are matched to texts by ID or file name; the texts themselves are never changed.
+import { scoreKeep, type ScoreKeep } from '../compare';
 import { isMissingLabel } from '../metrics';
 import { flattenJsonResponse, isExplanationKey, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY } from '../prompt';
 import type { Doc, PromptSpec, Result, Run } from '../types';
@@ -393,10 +394,13 @@ function copiedColumns(
       for (const rep of reps.values()) series.push({ run: run.id, answers: (doc) => (rep.has(doc) ? (c) => answersOf(rep.get(doc)!, c) : undefined) });
       if (reps.size < 2) continue;
       const memo = new Map<string, ReturnType<Answers>>();
+      // (Scores on a fixed scale are combined as the run's own views combine them: read from all of its answers.)
+      let keep: ScoreKeep | undefined;
+      const keepFor = (r: Run) => (keep ??= scoreKeep(r, results));
       const combined: Answers = (doc) => {
         if (memo.has(doc)) return memo.get(doc);
         // (buildDocViews reads only the text's id.)
-        const v = buildDocViews([{ id: doc } as Doc], [run], docs.get(doc) ?? [], run.id).get(doc);
+        const v = buildDocViews([{ id: doc } as Doc], [run], docs.get(doc) ?? [], run.id, keepFor).get(doc);
         const flat = v && textRuns.has(run.id) ? (flattenJsonResponse(v.values[TEXT_RESPONSE_KEY]) ?? {}) : {};
         const out = v && v.status !== 'none' ? (c: string) => [v.values[keyOf(c)] ?? '', v.values[c] ?? '', flat[keyOf(c)] ?? ''] : undefined;
         memo.set(doc, out);

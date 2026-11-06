@@ -1,6 +1,7 @@
 // Derived views over results: which result(s) to show per text, and aggregated values.
+import { combineNumbers, scoreKeep, type ScoreKeep } from './compare';
 import { aggregate, type Aggregation } from './metrics';
-import { flattenJsonResponse, isExplanationKey, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY, toNumber } from './prompt';
+import { flattenJsonResponse, isExplanationKey, normalizeLabel, outputFields, RATIONALE_KEY, TEXT_RESPONSE_KEY, toNumber } from './prompt';
 import type { Doc, PromptSpec, Result, Run } from './types';
 import { slug } from './util';
 
@@ -23,8 +24,14 @@ export function aggregationFor(prompt: PromptSpec, field: string): Aggregation {
   return t === 'ordinal' ? 'median' : t === 'number' ? 'mean' : 'majority';
 }
 
-export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filter: RunFilter): Map<string, DocView> {
+/**
+ * The texts' views. Plain-text JSON scores with a fixed scale are combined by `scoreKeep` read from all of the run's
+ * answers in `results`; a caller with only some of them (one text) passes `keepFor`, read from all of them.
+ */
+export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filter: RunFilter, keepFor?: (run: Run) => ScoreKeep): Map<string, DocView> {
   const runById = new Map(runs.map((r) => [r.id, r]));
+  const keeps = new Map<string, ScoreKeep>();
+  const keepOf = (run: Run) => keeps.get(run.id) ?? keeps.set(run.id, keepFor ? keepFor(run) : scoreKeep(run, results)).get(run.id)!;
   const byDoc = new Map<string, Result[]>();
   for (const r of results) {
     if (filter !== 'latest' && r.runId !== filter) continue;
@@ -48,7 +55,7 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
     if (chosenRun) {
       const ok = reps.filter((r) => r.status === 'ok');
       const prompt = chosenRun.snapshot.prompt;
-      const combined = ok.length > 1 && prompt.outputMode === 'text' ? combineJsonAnswers(ok) : null;
+      const combined = ok.length > 1 && prompt.outputMode === 'text' ? combineJsonAnswers(ok, keepOf(chosenRun)) : null;
       const fields = outputFields(prompt);
       const typeOf = (f: string) => prompt.variables.find((v) => v.name === f)?.type;
       const isExplanation = (f: string) => isExplanationKey(f) && typeOf(f) === 'text';
@@ -59,7 +66,9 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
         if (isExplanation(f)) continue;
         const vals = ok.map((r) => r.values[f] ?? '');
         values[f] = combined ?? aggregate(vals, aggregationFor(prompt, f));
-        if (vals.length > 1 && !combined) consistency[f] = vals.filter((v) => v === values[f]).length / vals.length;
+        // (As the vote reads them: "essay" agrees with a combined "Essay".)
+        const own = normalizeLabel(values[f]);
+        if (vals.length > 1 && !combined) consistency[f] = vals.filter((v) => normalizeLabel(v) === own).length / vals.length;
       }
       const okValues = ok.map((r) => r.values);
       for (const f of fields.filter(isExplanation)) values[f] = ok[explanationSource(f, values, okValues, labels, numeric)]?.values[f] ?? '';
@@ -84,9 +93,9 @@ export function buildDocViews(docs: Doc[], runs: Run[], results: Result[], filte
  * a single answer. (The answers as a whole always differ, e.g. in their explanations.) Only the answers that
  * are JSON are combined: one written as prose has no scores to add, like a failed one. Null if none is JSON.
  * A value that is a number in most answers is a score: the median of its numbers ("NA" in one answer is left
- * out, as agreement leaves it out).
+ * out, as agreement leaves it out; on a fixed scale also a number off it, see `combineNumbers`).
  */
-function combineJsonAnswers(ok: Result[]): string | null {
+function combineJsonAnswers(ok: Result[], keep: ScoreKeep, leftOut?: { n: number }): string | null {
   const answers = ok.map((r) => flattenJsonResponse(r.values[TEXT_RESPONSE_KEY])).filter((x): x is Record<string, string> => !!x);
   if (!answers.length) return null;
   const keys = [...new Set(answers.flatMap((x) => Object.keys(x)))];
@@ -99,13 +108,33 @@ function combineJsonAnswers(ok: Result[]): string | null {
   const combined: Record<string, string> = {};
   const labels = keys.filter((k) => !isExplanationKey(k));
   for (const k of labels) {
-    combined[k] = scores.includes(k)
-      ? aggregate(answers.map((x) => toNumber(x[k] ?? '')).filter(Number.isFinite).map(String), 'median')
-      : aggregate(answers.map((x) => x[k] ?? ''), 'majority');
+    if (!scores.includes(k)) {
+      combined[k] = aggregate(answers.map((x) => x[k] ?? ''), 'majority');
+      continue;
+    }
+    const xs = answers.map((x) => toNumber(x[k] ?? '')).filter(Number.isFinite);
+    const on = combineNumbers(xs, keep.get(k));
+    if (leftOut) leftOut.n += xs.length - on.length;
+    combined[k] = aggregate(on.map(String), 'median');
   }
   for (const k of keys.filter(isExplanationKey)) combined[k] = answers[explanationSource(k, combined, answers, labels, new Set(scores))][k] ?? '';
   // Keys in the order of the first answer; numbers as numbers.
   return JSON.stringify(Object.fromEntries(keys.map((k) => [k, scores.includes(k) && combined[k] !== '' ? Number(combined[k]) : combined[k]])));
+}
+
+/**
+ * A plain-text run annotated more than once: how many numbers in its answers, over the texts shown, were left out
+ * when they were combined for being off a fixed scale (`combineNumbers`; `keep` as `buildDocViews` read it).
+ */
+export function offScaleLeftOut(run: Run, views: Iterable<DocView>, keep: ScoreKeep): number {
+  const leftOut = { n: 0 };
+  if (!keep.size || run.snapshot.prompt.outputMode !== 'text') return 0;
+  for (const v of views) {
+    if (v.run?.id !== run.id) continue;
+    const ok = v.results.filter((r) => r.status === 'ok');
+    if (ok.length > 1) combineJsonAnswers(ok, keep, leftOut);
+  }
+  return leftOut.n;
 }
 
 /**
@@ -124,7 +153,7 @@ function explanationSource(key: string, combined: Record<string, string>, answer
     let d = 0;
     for (const s of relevant) {
       const [a, c] = [x[s] ?? '', combined[s] ?? ''];
-      d += numeric.has(s) && isNum(a) && isNum(c) ? Math.abs(Number(a) - Number(c)) : a === c ? 0 : 1;
+      d += numeric.has(s) && isNum(a) && isNum(c) ? Math.abs(Number(a) - Number(c)) : normalizeLabel(a) === normalizeLabel(c) ? 0 : 1;
     }
     if (d < bestDistance) [best, bestDistance] = [i, d];
   });

@@ -2,10 +2,10 @@
 import { ZipDeflate } from 'fflate';
 import { logPagesForRun } from '../db';
 import { fixed, fmtStat } from '../metrics';
-import { combineFields, comparableFields, fieldValue } from '../compare';
+import { combineFields, comparableFields, fieldValue, scoreKeep } from '../compare';
 import { agreement, type Agreement, type CiStat } from '../metrics';
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY } from '../prompt';
-import { buildDocViews, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, runOrder, type RetriedRequests } from '../view';
+import { buildDocViews, offScaleLeftOut, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, runOrder, type RetriedRequests } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import { isEntries, words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
@@ -693,6 +693,9 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   // Plain-text runs whose answers give scores as JSON: ok answers without them (e.g. in prose). With several answers
   // per text, such an answer is left out when they are combined, like a failed one, but it still counts as ok.
   const withoutScores = scoreKeys.length ? ok.filter((r) => !flattenJsonResponse(r.values[TEXT_RESPONSE_KEY])).length : 0;
+  // Scores off a fixed scale (the study's declared scale, or 0…1 for a yes/no in numbers) left out when a text's
+  // answers were combined, because another answer of the text was on it (see combineNumbers).
+  const offScale = scoreKeys.length && reps > 1 ? offScaleLeftOut(run, views.values(), scoreKeep(run, d.results)) : 0;
   // Categorical labels combined by majority vote: texts whose vote was tied (kept as "a | b", see aggregate()).
   const prompt = run.snapshot.prompt;
   const voted = prompt.outputMode === 'structured' && run.snapshot.options.replicates > 1 ? prompt.variables.filter((v) => v.type === 'category' || v.type === 'boolean') : [];
@@ -759,6 +762,7 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       failed: rs.filter((r) => r.status === 'error').length,
       parse_errors: rs.filter((r) => r.parseError).length,
       ...(scoreKeys.length ? { answers_without_scores: withoutScores } : {}),
+      ...(offScale ? { scores_off_scale_left_out_when_combined: offScale } : {}),
       // Requests of the partly annotated texts with no result (not sent, or no answer recorded).
       ...(reps > 1 ? { without_result_for_partly_annotated_texts: partly.reduce((s, id) => s + reps - perText.get(id)!, 0) } : {}),
       // Requests "Retry failed" sent again (at least this many when retried_note says so).
@@ -780,10 +784,10 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
   };
 }
 
-/** Did a majority vote tie (two or more values with the most votes)? Counted as aggregate() does. */
+/** Did a majority vote tie (two or more values with the most votes)? Counted as aggregate() does ("Essay" = "essay"). */
 function isTie(values: string[]): boolean {
   const counts = new Map<string, number>();
-  for (const v of values) if (v !== '') counts.set(v, (counts.get(v) ?? 0) + 1);
+  for (const v of values) if (v !== '') counts.set(normalizeLabel(v), (counts.get(normalizeLabel(v)) ?? 0) + 1);
   const max = Math.max(0, ...counts.values());
   return [...counts.values()].filter((c) => c === max).length > 1;
 }
@@ -794,6 +798,7 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
   const c = meta.corpus;
   const noScores = c.n_texts_answer_without_scores ?? 0;
   const withoutScores = meta.requests.answers_without_scores ?? 0;
+  const offScale = meta.requests.scores_off_scale_left_out_when_combined ?? 0;
   const removed = c.n_texts_removed_from_study_since;
   const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
   const reps = run.snapshot.options.replicates;
@@ -911,6 +916,9 @@ function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadat
       : noScores
         ? `${items(noScores)} ${was(noScores)} answered without scores (e.g. in prose) and ${was(noScores)} excluded.`
         : '',
+    offScale
+      ? `${n(offScale)} score${offScale === 1 ? '' : 's'} off the scale (e.g. a code such as 9 for “can’t tell”) ${was(offScale)} left out when the answers were combined, like a missing value, where another answer for the same ${w.one} was on the scale.`
+      : '',
     notSent ? notSentText : '',
     causes > 1 ? `Altogether, ${n(unlabelled)} of the ${items(c.n_texts_in_run)} in the run have no label.` : '',
     removed

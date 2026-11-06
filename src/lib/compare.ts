@@ -51,22 +51,34 @@ function answerNumbers(r: Result): { keys: string[]; nums: number[] } | null {
 export function comparableFields(run: Run, views: Iterable<DocView>): ComparableField[] {
   const p = run.snapshot.prompt;
   if (p.outputMode === 'structured') return p.variables.filter((v) => v.type !== 'text').map((v) => codebookField(p, v));
+  return scoreFields(run, shownAnswers(run, views));
+}
+
+function* shownAnswers(run: Run, views: Iterable<DocView>): Iterable<Result> {
+  for (const view of views) if (view.run?.id === run.id) yield* view.results;
+}
+
+/** A yes/no in numbers: answers far enough from 0…1 to be codes (a 9 for "can't tell"), as `scoreFields` reads them. */
+const farFromZeroOne = (x: number) => x < -scaleStep([0, 1]) || x > 1 + scaleStep([0, 1]);
+
+/**
+ * A plain-text run's JSON scores (see `comparableFields`), read from the run's ok answers among `results` (its
+ * single answers, not combined ones).
+ */
+export function scoreFields(run: Run, results: Iterable<Result>): ComparableField[] {
   // Read from the separate answers, not the combined ones: the median of two answers can fall between whole
   // numbers (e.g. 1.5), which must not turn a field of whole-number scores into an interval field.
   // (Each key's values as numbers, NaN for text.)
   const values = new Map<string, number[]>();
-  for (const view of views) {
-    if (view.run?.id !== run.id) continue;
-    for (const r of view.results) {
-      if (r.status !== 'ok') continue;
-      const answer = answerNumbers(r);
-      if (!answer) continue;
-      answer.keys.forEach((k, i) => {
-        const list = values.get(k);
-        if (list) list.push(answer.nums[i]);
-        else values.set(k, [answer.nums[i]]);
-      });
-    }
+  for (const r of results) {
+    if (r.runId !== run.id || r.status !== 'ok') continue;
+    const answer = answerNumbers(r);
+    if (!answer) continue;
+    answer.keys.forEach((k, i) => {
+      const list = values.get(k);
+      if (list) list.push(answer.nums[i]);
+      else values.set(k, [answer.nums[i]]);
+    });
   }
   // The study's scale for scores (e.g. −3 to 3), set by the owner: a field whose answers mostly lie on it is compared
   // on it, as on a codebook's ordinal scale (other numbers, e.g. a 0–100 confidence, keep the range seen).
@@ -76,19 +88,11 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
     .map(([key, xs]) => [key, xs.filter(Number.isFinite)] as const)
     .filter(([key, nums]) => nums.length > 0 && nums.length >= (values.get(key)?.length ?? 0) / 2)
     .map(([key, nums]): ComparableField => {
-      // (Not a key answered only with 0 and 1, e.g. a flag: that is read as a yes/no, as without the scale.)
-      const flag = nums.every((x) => x === 0 || x === 1);
-      if (declared && !flag && nums.filter((x) => x >= declared.min && x <= declared.max).length * 2 >= nums.length) {
-        const allowed = Array.from({ length: declared.max - declared.min + 1 }, (_, i) => String(declared.min + i));
-        return { key, label: key, level: 'ordinal', allowed, range: [declared.min, declared.max], yesNo: false };
-      }
-      const ordinal = nums.every(Number.isInteger);
       // A yes/no in numbers (`zeroOneScores`): every answer from 0 to 1, or most answers 0 or 1 with at most one in a
       // hundred (at least one) near them, e.g. a stray 2 or −1, besides codes far off them (a 9 for "can't tell", far
       // as the rating-scale rule reads a label). A −3…3 scale whose answers are mostly 0 or 1 mostly has more −1s and
       // 2s; one that hasn't is still compared as numbers against numbers (only a field in words pairs as yes/no).
-      const step = scaleStep([0, 1]);
-      const far = (x: number) => x < -step || x > 1 + step;
+      const far = farFromZeroOne;
       let zeroOrOne = 0;
       let near = 0;
       const farValues: number[] = [];
@@ -101,6 +105,18 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       // ten. A percentage, 0–10 intensity or year field that is mostly 0 has many different far values: its own scale.
       const codes = new Set(farValues).size <= 2 && farValues.length <= nums.length / 10;
       const zeroOne = nums.every((x) => x >= 0 && x <= 1) || (zeroOrOne * 2 > nums.length && near <= Math.max(1, nums.length / 100) && codes);
+      if (declared) {
+        // Not a key answered only with 0 and 1 (a flag), also with codes far off them that are off the scale too (a 9
+        // for "can't tell" next to −3…3): that is read as a yes/no, as without the scale. (A stray 2 or −1 is on the
+        // scale: the key is then read on it, as before.)
+        const off = (x: number) => x < declared.min || x > declared.max;
+        const flag = codes && nums.every((x) => x === 0 || x === 1 || (far(x) && off(x)));
+        if (!flag && nums.filter((x) => !off(x)).length * 2 >= nums.length) {
+          const allowed = Array.from({ length: declared.max - declared.min + 1 }, (_, i) => String(declared.min + i));
+          return { key, label: key, level: 'ordinal', allowed, range: [declared.min, declared.max], yesNo: false };
+        }
+      }
+      const ordinal = nums.every(Number.isInteger);
       // Whole-number scores: the scale is every value from the lowest to the highest seen, so weighted κ measures
       // distances on the scale even where a value (e.g. −2) was never used. (No codebook says what the scale is.)
       let lo = Infinity;
@@ -110,6 +126,35 @@ export function comparableFields(run: Run, views: Iterable<DocView>): Comparable
       const range: [number, number] = [lo, hi];
       return { key, label: key, level: ordinal ? ('ordinal' as const) : ('interval' as const), allowed, scaleSeen: true, range, yesNo: false, zeroOne };
     });
+}
+
+/** Which numbers of a JSON score count when a text's answers are combined (see `combineNumbers`). */
+export type ScoreKeep = Map<string, (x: number) => boolean>;
+
+/**
+ * A plain-text run's scores that have a fixed scale: the study's declared score scale (`Run.scoreScale`), or 0…1 for a
+ * yes/no in numbers (`zeroOne`), with the numbers on it. Read from all of the run's answers among `results`, so the
+ * texts of a run are combined alike wherever they are shown. Keys with only the range seen have none.
+ */
+export function scoreKeep(run: Run, results: Iterable<Result>): ScoreKeep {
+  const keep: ScoreKeep = new Map();
+  if (run.snapshot.prompt.outputMode !== 'text') return keep;
+  for (const f of scoreFields(run, results)) {
+    const r = f.range;
+    if (!f.scaleSeen && r) keep.set(f.key, (x) => x >= r[0] && x <= r[1]);
+    else if (f.zeroOne) keep.set(f.key, (x) => !farFromZeroOne(x));
+  }
+  return keep;
+}
+
+/**
+ * A text's numbers for one JSON score, to be combined: on a fixed scale (`scoreKeep`), a number off it (a 9 for
+ * "can't tell" next to a 1, a 5 on a declared −3…3) is left out, as "NA" is, so it doesn't move the median, unless
+ * every number is off it (the combined value is then left out and reported by the statistics, as before).
+ */
+export function combineNumbers(xs: number[], keep: ((x: number) => boolean) | undefined): number[] {
+  const on = keep ? xs.filter(keep) : xs;
+  return on.length ? on : xs;
 }
 
 /** A codebook field (not free text) of a structured prompt, as `comparableFields` gives it. */
