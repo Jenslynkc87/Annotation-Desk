@@ -54,4 +54,4 @@ A browser-only research workbench for LLM-assisted text annotation (Anthropic + 
 `npx tsc --noEmit -p .`, `npx vitest run`, `npx vite build`.
 
 ## Publishing
-The site deploys from the repository's default branch, `claude/gifted-bell-is85me`. Work goes to the session's own branch; only when the owner says "publish", fast-forward the default branch to it (`git push origin HEAD:claude/gifted-bell-is85me` after checking it is a fast-forward). Batch changes; don't publish unasked. No need to watch the deploy: GitHub emails the owner if it fails.
+The site deploys from the repository's default branch, `main`. Work goes to the session's own branch; only when the owner says "publish", fast-forward the default branch to it (`git push origin HEAD:main` after checking it is a fast-forward). Batch changes; don't publish unasked. No need to watch the deploy: GitHub emails the owner if it fails.
