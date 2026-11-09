@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import type { ComparableField } from '../lib/compare';
 import { fixed } from '../lib/metrics';
+import { toNumber } from '../lib/prompt';
 import { words } from '../lib/subject';
 import {
   binCategoryKey,
@@ -124,7 +125,19 @@ export function RunSummary({
   const splitName = `${split}${steps && step > 0 ? ` (periods of ${step})` : ''}`;
   // The over-time axis: what its labels stand for, and what the data cover (the first and last periods may be partial).
   const axisName = steps && step > 0 ? `${split}, periods of ${step} labeled by their first value` : split;
-  const coverage = scol?.numeric ? `${split} values from ${scaleLabel(scol.min)} to ${scaleLabel(scol.max)}` : '';
+  // (Of the texts shown: with a filter such as 1990 to 1999, not the whole run's 1949 to 2026.)
+  const shownRange = useMemo(() => {
+    if (!scol?.numeric) return null;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const { doc } of items) {
+      const t = (doc.meta[scol.name] ?? '').trim();
+      const n = t ? toNumber(t) : NaN;
+      if (Number.isFinite(n)) (lo = Math.min(lo, n)), (hi = Math.max(hi, n));
+    }
+    return lo <= hi ? ([lo, hi] as const) : null;
+  }, [items, scol]);
+  const coverage = shownRange ? `${split} values from ${scaleLabel(shownRange[0])} to ${scaleLabel(shownRange[1])}` : '';
   const timeGroups: TimeGroup[] = overTime ? groups.filter((g) => !g.none).map((g) => ({ tick: g.from !== undefined ? scaleLabel(g.from) : g.group, name: g.group, s: g.summary })) : [];
   // Annotated texts without a number in the split column (left out of the over-time chart).
   const noneGroup = groups.find((g) => g.none);
@@ -300,7 +313,7 @@ export function RunSummary({
                         ? timeFigure(timeGroups, {
                             widthMm,
                             column: axisName,
-                            description: about(`the field “${chosen.label}” by ${axisName} (${coverage}); * marks periods with fewer than 10 ${w.many}`),
+                            description: about(`the field “${chosen.label}” by ${axisName}${coverage ? ` (${coverage})` : ''}; * marks periods with fewer than 10 ${w.many}`),
                             manyWord: w.many,
                           })
                         : rowsFigure(
@@ -326,7 +339,7 @@ export function RunSummary({
               )}
               <p className="hint" style={{ marginTop: 8 }}>
                 Descriptive: groups are not tested against each other.
-                {overTime && ` Periods start at multiples of ${step}, so the first and last may be only partly covered (${coverage}).`}
+                {overTime && ` Periods start at multiples of ${step}, so the first and last may be only partly covered${coverage ? ` (${coverage})` : ''}.`}
                 {overTime && timeGroups.some((g) => g.s.n > 0 && g.s.n < FEW) && ` ${timeMeans(timeGroups) ? '* and hollow dots' : '*'}: fewer than ${FEW} ${w.many}, so one ${w.one} moves the shares by 10 points or more.`}
                 {overTime && noneCount > 0 && ` ${fmtInt(noneCount)} annotated ${noneCount === 1 ? w.one : w.many} without a number in “${split}” ${noneCount === 1 ? 'is' : 'are'} left out of the chart.`}
               </p>

@@ -961,17 +961,17 @@ function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
             {stats.withinTolerance !== null && stats.tolerance > 0 && (
               <Stat k={`Within ±${stats.tolerance} point${stats.tolerance === 1 ? '' : 's'}`} v={fmtPct(stats.withinTolerance)} sub={ciText(stats.ci.withinTolerance, true)} />
             )}
-            <Stat k="Cohen's κ" v={fmtStat(stats.cohenKappa)} sub={ciText(stats.ci.cohenKappa)} />
-            {stats.weightedKappaLinear !== null && <Stat k="Weighted κ (linear)" v={fmtStat(stats.weightedKappaLinear)} sub={ciText(stats.ci.weightedKappaLinear)} />}
-            {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={fmtStat(stats.weightedKappa)} sub={ciText(stats.ci.weightedKappa)} />}
-            <Stat k={`Krippendorff's α (${stats.level})`} v={fmtStat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
-            <Stat k="Gwet's AC1" v={fmtStat(stats.gwetAC1)} sub={ciText(stats.ci.gwetAC1)} />
-            {stats.gwetAC2Linear !== null && <Stat k="Gwet's AC2 (linear)" v={fmtStat(stats.gwetAC2Linear)} sub={ciText(stats.ci.gwetAC2Linear)} />}
-            {stats.spearman !== null && <Stat k="Spearman ρ" v={fmtStat(stats.spearman)} />}
+            <Stat k="Cohen's κ" v={stat(stats.cohenKappa)} sub={ciText(stats.ci.cohenKappa)} />
+            {stats.weightedKappaLinear !== null && <Stat k="Weighted κ (linear)" v={stat(stats.weightedKappaLinear)} sub={ciText(stats.ci.weightedKappaLinear)} />}
+            {stats.weightedKappa !== null && <Stat k="Weighted κ (quadratic)" v={stat(stats.weightedKappa)} sub={ciText(stats.ci.weightedKappa)} />}
+            <Stat k={`Krippendorff's α (${stats.level})`} v={stat(stats.krippendorffAlpha)} sub={ciText(stats.ci.krippendorffAlpha)} />
+            <Stat k="Gwet's AC1" v={stat(stats.gwetAC1)} sub={ciText(stats.ci.gwetAC1)} />
+            {stats.gwetAC2Linear !== null && <Stat k="Gwet's AC2 (linear)" v={stat(stats.gwetAC2Linear)} sub={ciText(stats.ci.gwetAC2Linear)} />}
+            {stats.spearman !== null && <Stat k="Spearman ρ" v={stat(stats.spearman)} />}
             {stats.meanDifference !== null && (
-              <Stat k="Mean difference (Compared with − Annotations)" v={fmtStat(stats.meanDifference)} sub={ciText(stats.ci.meanDifference)} />
+              <Stat k="Mean difference (Compared with − Annotations)" v={stat(stats.meanDifference)} sub={ciText(stats.ci.meanDifference)} />
             )}
-            {stats.mae !== null && <Stat k="Mean absolute difference" v={fmtStat(stats.mae)} sub={ciText(stats.ci.mae)} />}
+            {stats.mae !== null && <Stat k="Mean absolute difference" v={stat(stats.mae)} sub={ciText(stats.ci.mae)} />}
           </div>
           <p className="hint">
             Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95%; Wilson intervals for shares (exact, within the tolerance, 2+ points, opposite direction), bootstrap (2,000 resamples of {w.many}) for the rest. No interval below 10 {w.many}; “—” means a figure can’t be computed (e.g. one side gave the same value every time); Gwet’s AC1/AC2 are not given for Number fields, which have no fixed scale. When
@@ -986,14 +986,14 @@ function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
                     <tr>
                       <th />
                       {stats.categories.map((c) => (
-                        <th key={c} className="num">{c}</th>
+                        <th key={c} className="num" style={{ minWidth: 46 }}>{shownCategory(c)}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {stats.categories.map((r) => (
                       <tr key={r}>
-                        <th>{r}</th>
+                        <th className={stats.categories.every((x) => x.trim() !== '' && !Number.isNaN(Number(x))) ? 'num' : undefined}>{shownCategory(r)}</th>
                         {stats.categories.map((c) => (
                           <td key={c} className="num" style={r === c ? { fontWeight: 650, background: 'var(--ok-bg)' } : stats.confusion[r][c] ? { background: 'var(--err-bg)' } : undefined}>
                             {stats.confusion[r][c] || ''}
@@ -1098,10 +1098,16 @@ function Glance({ stats, w }: { stats: Agreement; w: Words }) {
 }
 
 /** "95% CI 0.71–0.86" (percentages for percent agreement); empty when there are too few texts. */
+/** A coefficient or difference for the screen: three decimals, with a real minus sign (as in the intervals). */
+const stat = (x: number | null) => fmtStat(x).replace(/^-/, '−');
+
+/** A category for the screen: a negative number with a real minus sign ("−3"); the value itself is unchanged. */
+const shownCategory = (c: string) => (/^-\d/.test(c) ? `−${c.slice(1)}` : c);
+
 function formatCi(ci: [number, number] | null | undefined, pct = false): string {
   if (!ci) return '';
-  // (A real minus sign; and 3 decimals where 2 would show a bound that isn't 0 as 0.00.)
-  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : fixed(x, x !== 0 && Math.abs(x) < 0.005 ? 3 : 2).replace(/^-/, '−'));
+  // (A real minus sign; and 3 decimals where 2 would show a bound that isn't 0 as 0.00, unless 3 would show 0.000.)
+  const f = (x: number) => (pct ? `${(x * 100).toFixed(1)}%` : fixed(x, Math.abs(x) >= 0.0005 && Math.abs(x) < 0.005 ? 3 : 2).replace(/^-/, '−'));
   // "to", not a dash: "−0.05–0.00" is hard to read with negative numbers.
   return `95% CI ${f(ci[0])} to ${f(ci[1])}`;
 }
