@@ -3,7 +3,7 @@ import { codebookField, comparableFields, fieldValue, labelScale, type Comparabl
 import { labelValue, namedField } from '../lib/export/tables';
 import { grownScale, isMissingLabel, ratingRange } from '../lib/metrics';
 import { fieldLabel, isProseField, normalizeLabel, outputFields, TEXT_RESPONSE_KEY, toNumber } from '../lib/prompt';
-import { batchParts, batchPlan, cancelJob, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
+import { batchParts, batchPlan, checkBatch, currentStudy, getState, remainingDocs, removeDocs, startRun, toast, updateStudy, useStore } from '../lib/store';
 import type { Doc, PromptSpec, Run, Variable } from '../lib/types';
 import { provider } from '../lib/providers';
 import { calibrate, describeEstimate, estimateRun, usePriceOverrides, type Estimate } from '../lib/pricing';
@@ -14,6 +14,7 @@ import { words, isEntries } from '../lib/subject';
 import { CorpusImport } from './CorpusImport';
 import { CostEstimate, EstimateLink, remainingRule } from './CostEstimate';
 import { DocDrawer } from './DocDrawer';
+import { RunProgress } from './RunProgress';
 import { SampleDialog } from './SampleDialog';
 import { SetupPanel } from './SetupPanel';
 import { Icon, Menu, NumberField } from './ui';
@@ -436,26 +437,7 @@ function TextsAndResults() {
   const testDoc = docs.find((d) => selected.has(d.id)) ?? docs[0];
   const busy = !!job || !!submitting || !!deletingWhat;
   // The progress of a run and its Cancel button, shown whatever else is on the page.
-  const progress = (
-    <>
-      {(submitting || deletingWhat) && !job && <div className="progress-label">{submitting || deletingWhat}</div>}
-      {job && (
-        <div>
-          <div className="progress">
-            <div style={{ width: `${(job.done / Math.max(1, job.total)) * 100}%` }} />
-          </div>
-          <div className="progress-label">
-            <span>
-              {job.done} of {job.total} requests{job.failed ? ` · ${job.failed} failed` : ''}
-            </span>
-            <button className="btn small danger" onClick={cancelJob}>
-              <Icon name="stop" size={12} /> Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </>
-  );
+  const progress = <RunProgress />;
 
   return (
     <>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { agreement, fixed, fmtPct, fmtStat, isMissingLabel, scaleStep, type Agreement, type Level } from '../lib/metrics';
+import { agreement, BOOTSTRAP_RESAMPLES, fixed, fmtPct, fmtStat, isMissingLabel, scaleStep, type Agreement, type Level } from '../lib/metrics';
 import { codebookField, combineFields, comparableFields, fieldValue, labelScale, type ComparableField } from '../lib/compare';
 import { computeIntervals } from '../lib/intervals';
 import type { ReportJob, ReportMessage } from '../lib/report.worker';
@@ -30,6 +30,7 @@ import {
 import type { Doc, Result, Run, Study } from '../lib/types';
 import { dateStamp, download, errorMessage, fmtDateTime, fmtInt, slug } from '../lib/util';
 import { buildDocViews, replacedAttempts, retryCounts, runTitle, runTokens, type DocView } from '../lib/view';
+import { RunProgress } from './RunProgress';
 import { RunSummary } from './RunSummary';
 import { Modal } from './ui';
 
@@ -70,6 +71,10 @@ export function RunsView() {
         <div className="card-head">
           <h2>Runs</h2>
           <span className="right">Every run freezes the prompt, model and settings it used.</span>
+        </div>
+        {/* A run or Retry failed under way: its progress and Cancel, here as on the Workbench. */}
+        <div className="runs-progress">
+          <RunProgress />
         </div>
         {!runs.length ? (
           <div className="empty">
@@ -974,7 +979,7 @@ function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
             {stats.mae !== null && <Stat k="Mean absolute difference" v={stat(stats.mae)} sub={ciText(stats.ci.mae)} />}
           </div>
           <p className="hint">
-            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95%; Wilson intervals for shares (exact, within the tolerance, 2+ points, opposite direction), bootstrap (2,000 resamples of {w.many}) for the rest. No interval below 10 {w.many}; “—” means a figure can’t be computed (e.g. one side gave the same value every time); Gwet’s AC1/AC2 are not given for Number fields, which have no fixed scale. When
+            Labels are compared after trimming and lower-casing (yes/true and no/false are treated alike, and for yes/no fields also 1 and 0). {w.Many} missing from either source are left out. Intervals: 95%; Wilson intervals for shares (exact, within the tolerance, 2+ points, opposite direction), bootstrap ({fmtInt(BOOTSTRAP_RESAMPLES)} resamples of {w.many}) for the rest. No interval below 10 {w.many}; “—” means a figure can’t be computed (e.g. one side gave the same value every time); Gwet’s AC1/AC2 are not given for Number fields, which have no fixed scale. When
             you iterate on prompts, keep a held-out set of labelled {w.many} for the final estimate so the reported agreement isn't inflated by prompt selection.
           </p>
           {showMatrix && (

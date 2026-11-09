@@ -214,6 +214,8 @@ table.data.estimate-table .num { text-align: right; font-variant-numeric: tabula
 .progress { height: 6px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: 12px; }
 .progress > div { height: 100%; background: var(--navy); transition: width .25s; }
 .progress-label { font-size: 13px; color: var(--muted); margin-top: 6px; display: flex; justify-content: space-between; gap: 8px; }
+.runs-progress:not(:empty) { margin-bottom: 14px; }
+.runs-progress .progress { margin-top: 0; }
 .notice { border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; background: var(--navy-050); color: var(--ink); overflow-wrap: break-word; }
 .notice.warn { background: var(--warn-bg); }
 .notice.err { background: var(--err-bg); }

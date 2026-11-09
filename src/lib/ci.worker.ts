@@ -1,5 +1,5 @@
 // Bootstrap intervals for the Agreement panel, computed away from the page so it stays responsive
-// (2,000 resamples of a full corpus take several seconds).
+// (10,000 resamples of a full corpus take a moment).
 import { agreement, type Level } from './metrics';
 
 export interface IntervalJob {

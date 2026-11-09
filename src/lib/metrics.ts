@@ -92,12 +92,27 @@ function distinct(pairs: [string, string][], first: string[] = []): string[] {
   return [...set];
 }
 
+/**
+ * How many texts each pair stands for. The coefficients take it as an optional last argument: the bootstrap passes
+ * each distinct pair once with the number of times it was drawn, instead of a list as long as the corpus. Without it
+ * every pair counts once. The counts are whole numbers above 0, so the tables built from them are the same either way.
+ */
+export type PairCounts = ArrayLike<number>;
+const totalOf = (pairs: [string, string][], times?: PairCounts): number => {
+  if (!times) return pairs.length;
+  let n = 0;
+  for (let i = 0; i < pairs.length; i++) n += times[i];
+  return n;
+};
+
 /** How often each value occurs, counting both sides of every pair. */
-function valueCounts(pairs: [string, string][]): Map<string, number> {
+function valueCounts(pairs: [string, string][], times?: PairCounts): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const [a, b] of pairs) {
-    counts.set(a, (counts.get(a) ?? 0) + 1);
-    counts.set(b, (counts.get(b) ?? 0) + 1);
+  for (let i = 0; i < pairs.length; i++) {
+    const [a, b] = pairs[i];
+    const c = times ? times[i] : 1;
+    counts.set(a, (counts.get(a) ?? 0) + c);
+    counts.set(b, (counts.get(b) ?? 0) + c);
   }
   return counts;
 }
@@ -119,8 +134,8 @@ export function percentAgreement(pairs: [string, string][]): number | null {
  * combined label between two scale points (e.g. 0.5, the median of an even number of annotations) gets
  * partial credit by its distance instead of becoming an extra step that stretches every other distance.
  */
-export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear' | 'quadratic' = 'none', scale: string[] = []): number | null {
-  const n = pairs.length;
+export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear' | 'quadratic' = 'none', scale: string[] = [], times?: PairCounts): number | null {
+  const n = totalOf(pairs, times);
   if (!n) return null;
   const cats = sortCats(distinct(pairs, scale));
   if (cats.length < 2) return null;
@@ -129,53 +144,66 @@ export function cohenKappa(pairs: [string, string][], weights: 'none' | 'linear'
   // Position on the scale: the value itself for numbers, else the category's rank.
   const at = cats.every(isNum) ? cats.map(Number) : cats.map((_, i) => i);
   const range = Math.max(...at) - Math.min(...at);
-  const dist = (i: number, j: number) => Math.abs(at[i] - at[j]) / range;
-  const w = (i: number, j: number) => (weights === 'none' ? (i === j ? 0 : 1) : weights === 'linear' ? dist(i, j) : dist(i, j) ** 2);
-  const obs = Array.from({ length: k }, () => new Array(k).fill(0));
-  const ra = new Array(k).fill(0);
-  const rb = new Array(k).fill(0);
-  for (const [a, b] of pairs) {
-    const i = idx.get(a)!;
-    const j = idx.get(b)!;
-    obs[i][j]++;
-    ra[i]++;
-    rb[j]++;
+  // (The table is one flat row of numbers, and the weights are worked out in the loop: this runs for every resample.)
+  const obs = new Float64Array(k * k);
+  const ra = new Float64Array(k);
+  const rb = new Float64Array(k);
+  for (let p = 0; p < pairs.length; p++) {
+    const i = idx.get(pairs[p][0])!;
+    const j = idx.get(pairs[p][1])!;
+    const c = times ? times[p] : 1;
+    obs[i * k + j] += c;
+    ra[i] += c;
+    rb[j] += c;
   }
+  // A category one side never gave adds exactly 0 to both sums: passed over (unless the weights can't be computed).
+  const skip = weights === 'none' || range > 0;
   let po = 0;
   let pe = 0;
-  for (let i = 0; i < k; i++)
+  for (let i = 0; i < k; i++) {
+    if (skip && !ra[i]) continue;
     for (let j = 0; j < k; j++) {
-      po += w(i, j) * obs[i][j];
-      pe += (w(i, j) * ra[i] * rb[j]) / n;
+      if (skip && !rb[j]) continue;
+      const d = weights === 'none' ? (i === j ? 0 : 1) : Math.abs(at[i] - at[j]) / range;
+      const w = weights === 'quadratic' ? d ** 2 : d;
+      po += w * obs[i * k + j];
+      pe += (w * ra[i] * rb[j]) / n;
     }
+  }
   if (pe === 0) return null;
   return 1 - po / pe;
 }
 
 /** Krippendorff's alpha for two coders (complete pairs). */
-export function krippendorffAlpha(pairs: [string, string][], level: Level): number | null {
-  if (pairs.length < 2) return null;
+export function krippendorffAlpha(pairs: [string, string][], level: Level, times?: PairCounts): number | null {
+  if (totalOf(pairs, times) < 2) return null;
   if (level !== 'nominal' && !pairs.every(([a, b]) => isNum(a) && isNum(b))) level = 'nominal';
   const values = sortCats(distinct(pairs));
   if (values.length < 2) return null;
   const idx = new Map(values.map((v, i) => [v, i]));
   const k = values.length;
   // Coincidence matrix: each unit with two values contributes once in each direction.
-  const o = Array.from({ length: k }, () => new Array(k).fill(0));
-  for (const [a, b] of pairs) {
-    o[idx.get(a)!][idx.get(b)!]++;
-    o[idx.get(b)!][idx.get(a)!]++;
+  // (One flat row of numbers: this runs for every resample.)
+  const o = new Float64Array(k * k);
+  for (let p = 0; p < pairs.length; p++) {
+    const a = idx.get(pairs[p][0])!;
+    const b = idx.get(pairs[p][1])!;
+    const c = times ? times[p] : 1;
+    o[a * k + b] += c;
+    o[b * k + a] += c;
   }
-  const nc = o.map((row) => row.reduce((s, x) => s + x, 0));
+  const nc = new Array<number>(k).fill(0);
+  for (let c = 0; c < k; c++) for (let d = 0; d < k; d++) nc[c] += o[c * k + d];
   const n = nc.reduce((s, x) => s + x, 0);
   // Running totals of nc, so the ordinal distance is one subtraction, not a loop (wide scales such as years have
   // hundreds of values). The counts are whole numbers, so the sums are exact and the result unchanged.
   const upTo = [0];
   for (let g = 0; g < k; g++) upTo.push(upTo[g] + nc[g]);
+  const at = level === 'interval' ? values.map(Number) : [];
   const delta2 = (c: number, d: number): number => {
     if (c === d) return 0;
     if (level === 'nominal') return 1;
-    if (level === 'interval') return (Number(values[c]) - Number(values[d])) ** 2;
+    if (level === 'interval') return (at[c] - at[d]) ** 2;
     const lo = Math.min(c, d);
     const hi = Math.max(c, d);
     return (upTo[hi + 1] - upTo[lo] - (nc[c] + nc[d]) / 2) ** 2;
@@ -185,7 +213,7 @@ export function krippendorffAlpha(pairs: [string, string][], level: Level): numb
   for (let c = 0; c < k; c++)
     for (let d = 0; d < k; d++) {
       const dd = delta2(c, d);
-      num += o[c][d] * dd;
+      num += o[c * k + d] * dd;
       den += nc[c] * nc[d] * dd;
     }
   if (den === 0) return null;
@@ -208,13 +236,14 @@ function fixedCategories(allowed: string[], numeric: boolean): string[] | null {
  * for it; a tie of categories ("a | b", majority vote) is split equally among them; on a numeric scale, a value between
  * two adjacent points (e.g. a 1.5 median) is split between them by distance. Null if a label fits none of these.
  */
-function marginalsOn(cats: string[], pairs: [string, string][], numeric: boolean): number[] | null {
+function marginalsOn(cats: string[], pairs: [string, string][], numeric: boolean, times?: PairCounts): number[] | null {
   const idx = new Map(cats.map((c, i) => [c, i]));
   const points = numeric ? cats.map(Number) : [];
   const at = (v: string) => idx.get(v) ?? (numeric && isNum(v) ? points.findIndex((p) => Math.abs(p - Number(v)) < 1e-9) : -1);
   const pi = new Array<number>(cats.length).fill(0);
-  for (const [v, count] of valueCounts(pairs)) {
-    const share = count / (2 * pairs.length);
+  const n = totalOf(pairs, times);
+  for (const [v, count] of valueCounts(pairs, times)) {
+    const share = count / (2 * n);
     const i = at(v);
     if (i >= 0) {
       pi[i] += share;
@@ -242,12 +271,14 @@ const spread = (pi: number[]) => pi.reduce((s, p) => s + p * (1 - p), 0);
  * disagreement but no extra category. Without a codebook (or when a label fits none of its categories): the
  * categories are those seen.
  */
-export function gwetAC1(pairs: [string, string][], allowed: string[] = [], numericScale = false): number | null {
-  const n = pairs.length;
+export function gwetAC1(pairs: [string, string][], allowed: string[] = [], numericScale = false, times?: PairCounts): number | null {
+  const n = totalOf(pairs, times);
   if (!n) return null;
-  const pa = pairs.filter(([a, b]) => a === b).length / n;
+  let same = 0;
+  for (let i = 0; i < pairs.length; i++) if (pairs[i][0] === pairs[i][1]) same += times ? times[i] : 1;
+  const pa = same / n;
   const fixed = fixedCategories(allowed, numericScale);
-  const pi = fixed && marginalsOn(fixed, pairs, numericScale);
+  const pi = fixed && marginalsOn(fixed, pairs, numericScale, times);
   let q: number;
   let sum: number;
   if (fixed && pi) {
@@ -257,7 +288,7 @@ export function gwetAC1(pairs: [string, string][], allowed: string[] = [], numer
     const cats = distinct(pairs, allowed);
     q = cats.length;
     if (q < 2) return null;
-    const counts = valueCounts(pairs);
+    const counts = valueCounts(pairs, times);
     sum = spread(cats.map((c) => (counts.get(c) ?? 0) / (2 * n)));
   }
   const pe = sum / (q - 1);
@@ -271,21 +302,21 @@ export function gwetAC1(pairs: [string, string][], allowed: string[] = [], numer
  * over them, and a value between two points (e.g. a 1.5 median) is split between them as in `marginalsOn`. Without
  * one (or with a value off it), the categories are the values seen. With identity weights this is AC1.
  */
-export function gwetAC2Linear(pairs: [string, string][], scale: string[] = []): number | null {
-  const n = pairs.length;
+export function gwetAC2Linear(pairs: [string, string][], scale: string[] = [], times?: PairCounts): number | null {
+  const n = totalOf(pairs, times);
   if (!n) return null;
   const fixed = fixedCategories(scale, true);
-  const pi = fixed && marginalsOn(fixed, pairs, true);
+  const pi = fixed && marginalsOn(fixed, pairs, true, times);
   const cats = fixed && pi ? fixed : sortCats(distinct(pairs, scale));
   const q = cats.length;
   if (q < 2 || !cats.every(isNum)) return null;
   const vals = cats.map(Number);
   const range = Math.max(...vals) - Math.min(...vals);
   const w = (a: number, b: number) => 1 - Math.abs(a - b) / range;
-  const pa = pairs.reduce((s, [a, b]) => s + w(Number(a), Number(b)), 0) / n;
+  const pa = pairs.reduce((s, [a, b], i) => s + (times ? times[i] : 1) * w(Number(a), Number(b)), 0) / n;
   let tw = 0;
   for (const a of vals) for (const b of vals) tw += w(a, b);
-  const counts = valueCounts(pairs);
+  const counts = valueCounts(pairs, times);
   const sum = spread(pi ?? cats.map((c) => (counts.get(c) ?? 0) / (2 * n)));
   const pe = (tw / (q * (q - 1))) * sum;
   if (pe === 1) return null;
@@ -336,19 +367,48 @@ export function seeded(seed: number) {
   };
 }
 
-const BOOTSTRAP_RESAMPLES = 2000;
+export const BOOTSTRAP_RESAMPLES = 10000;
 
-/** 95% percentile bootstrap intervals: texts are drawn with replacement and each statistic recomputed. */
-function bootstrapCI(pairs: [string, string][], stats: Partial<Record<CiStat, (p: [string, string][]) => number | null>>): Agreement['ci'] {
+/**
+ * 95% percentile bootstrap intervals: texts are drawn with replacement and each statistic recomputed.
+ * The coefficients depend only on how often each pair of labels occurs, so every resample is counted per distinct
+ * pair (on −3…3 at most 49 of them) and each statistic is computed from those counts: the same figures as from the
+ * drawn list of texts, at a fraction of the time, which is what makes 10,000 resamples of a full corpus practical.
+ */
+function bootstrapCI(pairs: [string, string][], stats: Partial<Record<CiStat, (p: [string, string][], times?: PairCounts) => number | null>>): Agreement['ci'] {
   const keys = Object.keys(stats) as CiStat[];
-  if (pairs.length < 10) return Object.fromEntries(keys.map((k) => [k, null]));
+  const n = pairs.length;
+  if (n < 10) return Object.fromEntries(keys.map((k) => [k, null]));
+  // The distinct pairs, in order of first appearance, and which of them each text has.
+  const cells: [string, string][] = [];
+  const cellOf = new Int32Array(n);
+  const seen = new Map<string, Map<string, number>>();
+  for (let i = 0; i < n; i++) {
+    const [a, b] = pairs[i];
+    const row = seen.get(a) ?? seen.set(a, new Map()).get(a)!;
+    let c = row.get(b);
+    if (c === undefined) {
+      c = cells.length;
+      row.set(b, c);
+      cells.push(pairs[i]);
+    }
+    cellOf[i] = c;
+  }
   const rnd = seeded(20260101);
   const draws: Record<string, number[]> = Object.fromEntries(keys.map((k) => [k, []]));
-  const sample: [string, string][] = new Array(pairs.length);
+  const tally = new Int32Array(cells.length);
   for (let b = 0; b < BOOTSTRAP_RESAMPLES; b++) {
-    for (let i = 0; i < pairs.length; i++) sample[i] = pairs[Math.floor(rnd() * pairs.length)];
+    tally.fill(0);
+    for (let i = 0; i < n; i++) tally[cellOf[Math.floor(rnd() * n)]]++;
+    const drawn: [string, string][] = [];
+    const times: number[] = [];
+    for (let c = 0; c < cells.length; c++)
+      if (tally[c]) {
+        drawn.push(cells[c]);
+        times.push(tally[c]);
+      }
     for (const k of keys) {
-      const v = stats[k]!(sample);
+      const v = stats[k]!(drawn, times);
       if (v !== null && Number.isFinite(v)) draws[k].push(v);
     }
   }
@@ -379,8 +439,20 @@ export function wilsonCI(share: number | null, n: number): [number, number] | nu
 const numPairs = (p: [string, string][]) => p.map(([x, y]) => [Number(x), Number(y)] as const);
 const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null);
 export const withinTolerance = (p: [string, string][], tol: number) => mean(numPairs(p).map(([x, y]) => (Math.abs(x - y) <= tol + 1e-9 ? 1 : 0)));
-export const meanDifference = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => y - x));
-export const meanAbsoluteError = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => Math.abs(x - y)));
+/** The mean of f over the pairs, each counted `times[i]` times (the bootstrap's resamples, see `PairCounts`). */
+const countedMean = (p: [string, string][], times: PairCounts, f: (x: number, y: number) => number): number | null => {
+  let sum = 0;
+  let n = 0;
+  for (let i = 0; i < p.length; i++) {
+    sum += times[i] * f(Number(p[i][0]), Number(p[i][1]));
+    n += times[i];
+  }
+  return n ? sum / n : null;
+};
+export const meanDifference = (p: [string, string][], times?: PairCounts) =>
+  times ? countedMean(p, times, (x, y) => y - x) : mean(numPairs(p).map(([x, y]) => y - x));
+export const meanAbsoluteError = (p: [string, string][], times?: PairCounts) =>
+  times ? countedMean(p, times, (x, y) => Math.abs(x - y)) : mean(numPairs(p).map(([x, y]) => Math.abs(x - y)));
 export const largeDifference = (p: [string, string][]) => mean(numPairs(p).map(([x, y]) => (Math.abs(x - y) >= 2 - 1e-9 ? 1 : 0)));
 export const oppositeDirection = (p: [string, string][], mid: number) =>
   mean(numPairs(p).map(([x, y]) => ((x < mid && y > mid) || (x > mid && y < mid) ? 1 : 0)));
@@ -569,16 +641,16 @@ export function agreement(
   const unbounded = numeric && !scaleSeen && !range && !allowedNums.length;
   // Bootstrap intervals for the coefficients and differences; shares get Wilson intervals (see `wilsonCI`).
   const stats = {
-    cohenKappa: (p: [string, string][]) => cohenKappa(p),
+    cohenKappa: (p: [string, string][], times?: PairCounts) => cohenKappa(p, 'none', [], times),
     ...(numeric
       ? {
-          weightedKappa: (p: [string, string][]) => cohenKappa(p, 'quadratic', scale),
-          weightedKappaLinear: (p: [string, string][]) => cohenKappa(p, 'linear', scale),
-          ...(unbounded ? {} : { gwetAC2Linear: (p: [string, string][]) => gwetAC2Linear(p, scale) }),
+          weightedKappa: (p: [string, string][], times?: PairCounts) => cohenKappa(p, 'quadratic', scale, times),
+          weightedKappaLinear: (p: [string, string][], times?: PairCounts) => cohenKappa(p, 'linear', scale, times),
+          ...(unbounded ? {} : { gwetAC2Linear: (p: [string, string][], times?: PairCounts) => gwetAC2Linear(p, scale, times) }),
         }
       : {}),
-    krippendorffAlpha: (p: [string, string][]) => krippendorffAlpha(p, alphaLevel),
-    ...(unbounded ? {} : { gwetAC1: (p: [string, string][]) => gwetAC1(p, ac1Scale, ac1Numeric) }),
+    krippendorffAlpha: (p: [string, string][], times?: PairCounts) => krippendorffAlpha(p, alphaLevel, times),
+    ...(unbounded ? {} : { gwetAC1: (p: [string, string][], times?: PairCounts) => gwetAC1(p, ac1Scale, ac1Numeric, times) }),
     ...(numeric ? { meanDifference, mae: meanAbsoluteError } : {}),
   };
   const n = pairs.length;
