@@ -22,7 +22,7 @@ export interface Price {
 
 /** Where the built-in prices come from, per provider. */
 export const PRICE_SOURCES: Record<ProviderId, { url: string; checked: string; note?: string }> = {
-  anthropic: { url: 'https://platform.claude.com/docs/en/about-claude/pricing', checked: 'October 18, 2026' },
+  anthropic: { url: 'https://platform.claude.com/docs/en/about-claude/pricing', checked: 'November 9, 2026' },
   openai: {
     url: 'https://openai.com/api/pricing/',
     checked: 'October 2026',
@@ -33,6 +33,8 @@ export const PRICES_AS_OF = 'October 2026';
 
 /** Built-in prices; a model id matches the longest key it starts with (so dated ids work). */
 const BUILT_IN: Record<string, Price> = {
+  'claude-fable-5-2': { input: 8, output: 40, cacheRead: 0.2 },
+  'claude-mythos-5-2': { input: 8, output: 40, cacheRead: 0.2 },
   'claude-fable-5-1': { input: 10, output: 50, cacheRead: 0.25 },
   'claude-mythos-5-1': { input: 10, output: 50, cacheRead: 0.25 },
   'claude-fable-5': { input: 10, output: 50 },
@@ -44,7 +46,7 @@ const BUILT_IN: Record<string, Price> = {
   'claude-opus-4-0': { input: 15, output: 75 },
   'claude-opus-4-1': { input: 15, output: 75 },
   'claude-opus-4-2025': { input: 15, output: 75 },
-  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.2 },
+  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.1 },
   'claude-sonnet-5': { input: 2, output: 10 },
   'claude-sonnet-4': { input: 3, output: 15 },
   'claude-haiku-5-5': { input: 0.1, output: 0.5, long: { over: 100_000, input: 0.5, output: 2.5 } },

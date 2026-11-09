@@ -12,6 +12,9 @@ describe('pricing', () => {
     expect(builtInPrice('claude-opus-5-5-20261001')?.input).toBe(4);
     expect(builtInPrice('claude-opus-5-1')?.input).toBe(5);
     expect(builtInPrice('claude-fable-5-1')?.cacheRead).toBe(0.25);
+    expect(builtInPrice('claude-fable-5-2')).toEqual({ input: 8, output: 40, cacheRead: 0.2 });
+    expect(builtInPrice('claude-mythos-5-2')?.output).toBe(40);
+    expect(builtInPrice('claude-sonnet-5-5')?.cacheRead).toBe(0.1);
     expect(builtInPrice('claude-fable-5')?.cacheRead).toBeUndefined();
     expect(builtInPrice('some-other-model')).toBeUndefined();
   });
