@@ -195,6 +195,41 @@ export function tCritical95(df: number): number {
   );
 }
 
+/**
+ * Ordinary least-squares line of y on x (as scipy.stats.linregress or R's lm(y ~ x)): the slope with its 95% t
+ * interval (n − 2 degrees of freedom; assumes independent points with similar spread). Null below 10 points or
+ * when every x is the same.
+ */
+export function linearTrend(points: [number, number][]): { n: number; slope: number; ci: [number, number]; xMin: number; xMax: number } | null {
+  const n = points.length;
+  if (n < 10) return null;
+  let mx = 0;
+  let my = 0;
+  for (const [x, y] of points) {
+    mx += x;
+    my += y;
+  }
+  mx /= n;
+  my /= n;
+  let sxx = 0;
+  let sxy = 0;
+  let xMin = Infinity;
+  let xMax = -Infinity;
+  for (const [x, y] of points) {
+    sxx += (x - mx) ** 2;
+    sxy += (x - mx) * (y - my);
+    xMin = Math.min(xMin, x);
+    xMax = Math.max(xMax, x);
+  }
+  if (!(sxx > 0)) return null;
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  let sse = 0;
+  for (const [x, y] of points) sse += (y - intercept - slope * x) ** 2;
+  const half = tCritical95(n - 2) * Math.sqrt(sse / (n - 2) / sxx);
+  return { n, slope, ci: [slope - half, slope + half], xMin, xMax };
+}
+
 /** Mean, SD (n − 1), median, min, max and the 95% t interval of the mean (none below 10 values). */
 export function describe(xs: number[]): Pick<FieldSummary, 'mean' | 'sd' | 'median' | 'ci' | 'min' | 'max'> {
   const n = xs.length;

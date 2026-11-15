@@ -13,6 +13,7 @@ export interface ReportJob {
   results: Result[];
   tolerance: number;
   groupBy: string;
+  trendBy: string;
 }
 
 /** How far it has got (e.g. "field 2 of 5"), then the finished workbook or what went wrong. */
@@ -36,9 +37,9 @@ self.onmessage = async (e: MessageEvent<ReportJob | AgreementJob>) => {
     }
     return;
   }
-  const { runA, runB, docs, runs, results, tolerance, groupBy } = e.data;
+  const { runA, runB, docs, runs, results, tolerance, groupBy, trendBy } = e.data;
   try {
-    send({ blob: await buildComparisonReport(runA, runB, docs, runs, results, tolerance, groupBy, (progress) => send({ progress })) });
+    send({ blob: await buildComparisonReport(runA, runB, docs, runs, results, tolerance, groupBy, (progress) => send({ progress }), trendBy) });
   } catch (err) {
     send({ error: err instanceof Error ? err.message : String(err) });
   }

@@ -4,7 +4,8 @@ import { logPagesForRun } from '../db';
 import { fixed, fmtStat } from '../metrics';
 import { combineFields, comparableFields, fieldValue, scoreKeep } from '../compare';
 import { agreement, BOOTSTRAP_RESAMPLES, type Agreement, type CiStat } from '../metrics';
-import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY } from '../prompt';
+import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from '../prompt';
+import { linearTrend } from '../summary';
 import { buildDocViews, offScaleLeftOut, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, runOrder, type RetriedRequests } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
 import { words } from '../subject';
@@ -1167,6 +1168,8 @@ export async function buildComparisonReport(
   groupBy = '',
   /** Told how far the slow part (the bootstrap intervals) has got, e.g. "field 2 of 5". */
   onProgress?: (note: string) => void,
+  /** Optional metadata column of numbers (e.g. year): adds a sheet with the slope of the difference on it. */
+  trendBy = '',
 ): Promise<Blob> {
   const ExcelJS = (await import('exceljs')).default;
   const wb = new ExcelJS.Workbook();
@@ -1338,6 +1341,41 @@ export async function buildComparisonReport(
   );
   if (groupBy) addSheet(wb, sheetName(wb, `By ${groupBy}`), byGroup.map(({ g, field, rest }) => ({ field, [groupCol]: g || '(none)', ...rest })));
 
+  // Drift between the runs over a column of numbers (e.g. year): per numeric field, the least-squares slope of the
+  // difference (second − first) on that column, over the pairs the Summary counts that have a number there.
+  const trend = trendBy
+    ? compared.flatMap(({ f, items, all }) => {
+        if (all.meanDifference === null) return [];
+        const points: [number, number][] = [];
+        let noNumber = 0;
+        for (const { doc, x, y } of items) {
+          if (all.leftOut.n > 0 && !all.confusion[x]?.[y]) continue;
+          const t = toNumber(doc.meta[trendBy] ?? '');
+          if (Number.isFinite(t)) points.push([t, Number(y) - Number(x)]);
+          else noNumber++;
+        }
+        const fit = linearTrend(points);
+        // (6 decimals: per year, a slope that matters can be 0.002.)
+        const r6 = (v: number | null | undefined) => (v === null || v === undefined ? null : Math.round(v * 1e6) / 1e6);
+        return [
+          {
+            field: f.label,
+            n_compared: points.length,
+            ...(noNumber ? { [`n_without_a_number_in_${trendBy}`]: noNumber } : {}),
+            [`${trendBy}_from`]: fit?.xMin ?? null,
+            [`${trendBy}_to`]: fit?.xMax ?? null,
+            slope_per_unit: r6(fit?.slope),
+            slope_per_unit_ci_low: r6(fit?.ci[0]),
+            slope_per_unit_ci_high: r6(fit?.ci[1]),
+            slope_per_10_units: r6(fit && fit.slope * 10),
+            slope_per_10_units_ci_low: r6(fit && fit.ci[0] * 10),
+            slope_per_10_units_ci_high: r6(fit && fit.ci[1] * 10),
+          },
+        ];
+      })
+    : [];
+  if (trendBy && trend.length) addSheet(wb, sheetName(wb, `Trend by ${trendBy}`), trend);
+
   // The run's texts still in the study, as in the Notes, and those of them with a result (usable or failed).
   const present = new Set(docs.map((d) => d.id));
   const removedSince = (r: Run) => r.docIds.filter((id) => !present.has(id)).length;
@@ -1391,6 +1429,15 @@ export async function buildComparisonReport(
     { note: 'Review sheet: every compared score, opposite directions first, then the largest differences. Each score is in one category there, so opposite-direction rows are not also listed as “2+ points” (the Summary’s 2+ share includes them). To draw at random within a category (e.g. 30 opposite-direction cases), sort by category and then by "random", and take the first rows; the numbers never change, so the draw is reproducible. The judgment and note columns are for your own labels.' },
     ...(review.some((r) => rank[r.row.category] === 5) ? [{ note: 'Review sheet, last rows: scores left out of the statistics (“not a number”, e.g. NA, “not on the scale”, or “not a category”, e.g. a 0.5 median against a yes/no field), with the values as the runs gave them.' }] : []),
     ...(groupBy ? [{ note: `"By ${groupBy}" sheet: the same figures per ${groupBy}; exploratory, as small groups give wide intervals.` }] : []),
+    ...(trendBy && trend.length
+      ? [
+          {
+            note: `"Trend by ${trendBy}" sheet: per field, the ordinary least-squares slope of the difference (second minus first) on ${trendBy}, over the ${w.many} compared that have a number in ${trendBy}, with its 95% t interval (as scipy.stats.linregress or R's lm; it assumes ${w.many} independent of each other with similar spread). slope_per_unit: change in the mean difference per 1 of ${trendBy} (e.g. per year); slope_per_10_units: per 10 (e.g. per decade). An interval that excludes 0 means the runs drift apart over ${trendBy}: at least one of them scores differently along ${trendBy} than the other. An interval around 0 does not show that neither drifts: both could drift alike. Empty when fewer than 10 ${w.many} have a number.`,
+          },
+        ]
+      : trendBy
+        ? [{ note: `No "Trend by ${trendBy}" sheet: no field holds numbers in both runs.` }]
+        : []),
   ]);
   const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });

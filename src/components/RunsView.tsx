@@ -761,6 +761,18 @@ function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
       }),
     [metaCols, docs],
   );
+  const [trendBy, setTrendBy] = useState('');
+  // Columns of numbers (e.g. year) the difference between two runs can be traced over: at least 90% of the filled
+  // cells are numbers, with more than one value.
+  const trendColumns = useMemo(
+    () =>
+      metaCols.filter((c) => {
+        const filled = docs.map((d) => (d.meta[c] ?? '').trim()).filter(Boolean);
+        const nums = filled.map(toNumber).filter(Number.isFinite);
+        return nums.length >= 10 && nums.length >= filled.length * 0.9 && new Set(nums).size > 1;
+      }),
+    [metaCols, docs],
+  );
   const downloadReport = async () => {
     const ra = runOf(srcA);
     const rb = runOf(decode(b));
@@ -780,8 +792,8 @@ function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
     // The report doesn't use the texts, so they aren't sent. Without workers, it is built right here.
     // (Every result as stored now, not the panel's view of them, which may be up to a second behind during a run.)
     const all = getState().results;
-    const direct = () => buildComparisonReport(ra, rb, docs, runs, all, tolerance, groupBy, setBackgroundProgress);
-    const job: ReportJob = { runA: ra, runB: rb, docs: docs.map((d) => ({ ...d, text: '' })), runs, results: all.filter((r) => r.runId === ra.id || r.runId === rb.id), tolerance, groupBy };
+    const direct = () => buildComparisonReport(ra, rb, docs, runs, all, tolerance, groupBy, setBackgroundProgress, trendBy);
+    const job: ReportJob = { runA: ra, runB: rb, docs: docs.map((d) => ({ ...d, text: '' })), runs, results: all.filter((r) => r.runId === ra.id || r.runId === rb.id), tolerance, groupBy, trendBy };
     const build = () =>
       new Promise<Blob>((resolve, reject) => {
         const fallback = () => direct().then(resolve, reject);
@@ -913,6 +925,22 @@ function AgreementPanel({ docs, results }: { docs: Doc[]; results: Result[] }) {
               {groupColumns.map((c) => (
                 <option key={c} value={c}>
                   Break down by {c}
+                </option>
+              ))}
+            </select>
+          )}
+          {srcA?.kind === 'run' && srcB?.kind === 'run' && a !== b && trendColumns.length > 0 && (
+            <select
+              className="select small"
+              style={{ width: 'auto' }}
+              value={trendBy}
+              onChange={(e) => setTrendBy(e.target.value)}
+              title="Adds a sheet with the slope of the difference between the runs over a column of numbers, with a 95% interval: do they drift apart over time?"
+            >
+              <option value="">No trend</option>
+              {trendColumns.map((c) => (
+                <option key={c} value={c}>
+                  Trend over {c}
                 </option>
               ))}
             </select>
