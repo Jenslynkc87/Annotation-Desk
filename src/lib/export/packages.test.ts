@@ -206,6 +206,6 @@ describe('request and response logs in the supplementary package', () => {
 
     const readme = await read('README.md');
     expect(readme).not.toMatch(/Annotation Desk|made with old/);
-    expect(readme).toContain('| Failed attempts replaced by Retry failed | 1 (their tokens are included in the token totals; their logs are kept) |');
+    expect(readme).toContain('| Failed attempts sent again | 1 (their tokens are included in the token totals) |');
   });
 });

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import * as dbApi from './db';
 import { buildBackup, importBackup } from './export/backup';
 import { buildComparisonReport, buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from './export/packages';
-import { runSummaryRows } from './export/tables';
+import { retryNotes, runSummaryRows } from './export/tables';
 import { getState, selectStudy } from './store';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type ResultLog, type Run, type Study } from './types';
 import { retriedRequests } from './view';
@@ -74,10 +74,11 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     const run = legacy();
     const results = legacyResults(run);
     const { meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(meta.requests.retried).toBe(3);
-    expect(meta.requests.retried_note).toContain('recorded for Retry failed only the number of requests planned (60)');
-    expect(meta.tokens.note).toContain('token counts (which may be too low)');
-    expect(readme).toContain('The app version used for the run recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, at least 3 were sent; it also did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries.');
+    // The public package gives the lower bound and a flag, without notes on what the app recorded (Nov 16, 2026).
+    expect(meta.requests.retried).toBe('at least 3');
+    expect(meta.requests.retried_note).toBeUndefined();
+    expect(meta.tokens.may_be_incomplete).toBe(true);
+    expect(readme).not.toContain('app version');
     const [row] = runSummaryRows([run], results);
     expect(row.requests_retried).toBe(3);
     expect(String(row.notes)).toContain('counted from the stored answers, at least 3 were sent');
@@ -93,10 +94,10 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     // Every request answered again; three of them replaced the old retry's answers (attempt 2).
     const results = docs.flatMap((d, i) => [1, 2, 3].map((rep) => mkResult(run, d, rep, { stance: 'for' }, { requestedAt: '2026-10-23T10:20:07.300Z', ...(i === 0 ? { attempt: 2, replacedUsage: usage } : {}) })));
     const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(meta.requests).toMatchObject({ retried: 60, replaced_by_retries: 3 });
+    expect(meta.requests).toMatchObject({ retried: 'at least 60', replaced_by_retries: 3 });
     // (The old retry's own answers were all replaced, before their request times were kept on the results (round
     // four, G22): its number is not known, only the total's lower bound.)
-    expect(meta.requests.retried_note).toBe(
+    expect(retryNotes(run, retriedRequests(run, results)).requests).toBe(
       'The app version used for the run recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, the number sent is not known (no stored answer dates from it); with the run’s other retry, at least 60 in all.',
     );
   });
@@ -115,7 +116,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs: docs.slice(0, 1), runs: [{ ...run, docIds: ['d0'] }], results }, { ...run, docIds: ['d0'] });
     expect(meta.requests.retried_note).toBeUndefined();
     // (Their earlier, failed attempts were overwritten by that version: the tokens may be too low.)
-    expect(meta.tokens.note).toBeDefined();
+    expect(meta.tokens.may_be_incomplete).toBe(true);
     // (A batch retry of that version is counted from its answers too (round four, G0/G2): one of its batches may never
     // have gone up.)
     const batch = mkRun('b2', 2, [], stancePrompt, { mode: 'batch', retries: [{ at: retryAt, requests: 5, asBatch: true }] }, 1, '0.1.0');
@@ -156,7 +157,7 @@ describe('exports during Retry failed (F84, F91)', () => {
     expect(meta.run.finished_at).toBeNull();
     expect(meta.run.retry_in_progress).toBe(true);
     expect(meta.requests.retried).toBe(2);
-    expect(readme).toContain('(Retry failed was still sending requests): they describe the results so far.');
+    expect(readme).toContain('(failed requests were still being sent again): they describe the results so far.');
     const book = await workbook(await buildExcel(d, run, { text: false, rationale: false }));
     expect(book('Settings').find((r) => r.setting === 'Finished')!.value).toBe('not finished when exported (Retry failed was still sending; the results so far)');
     const all = book('All runs')[0];
@@ -184,8 +185,9 @@ describe('runs that share a number (F85)', () => {
     expect(readme).toContain('its name in the tables’ `run` column (e.g. 2-20261001-100000Z)');
     // The supplementary package of one of them, and the comparison report.
     const supp = await supplementary(d, b);
-    expect(supp.readme).toContain('(run #2-20261001-103000Z)');
-    expect([...new Set(csvRows(await supp.read('results_by_replicate.csv')).map((r) => r.run))]).toEqual(['2-20261001-103000Z']);
+    // (The public package names no run: one package, one run.)
+    expect(supp.readme).not.toContain('run #');
+    expect(csvRows(await supp.read('results_by_replicate.csv'))[0].run).toBeUndefined();
     const report = await workbook(await buildComparisonReport(a, b, docs, [a, b, c], results, 1));
     expect(report('Runs').find((r) => r.setting === 'run')).toMatchObject({ first: '#2-20261001-100000Z', second: '#2-20261001-103000Z' });
   });
@@ -350,7 +352,7 @@ describe('an interrupted retry (lead, round three)', () => {
     const results = docs.map((d, i) => mkResult(run, d, 1, { stance: 'for' }, i < 4 ? { requestedAt: '2026-10-23T10:19:01.000Z', attempt: 2, replacedUsage: usage } : {}));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 4, interrupted: true, lowerBound: false });
     const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(meta.requests.retried_note).toContain(`up to ${DEFAULT_RUN_OPTIONS.concurrency} more may have been sent`);
+    expect(meta.requests.retried).toBe('at least 4');
     const [row] = runSummaryRows([run], results);
     expect(String(row.notes)).toContain('was interrupted');
   });

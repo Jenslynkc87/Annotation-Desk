@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { endBackground, setBackgroundProgress, startBackground, useBackground, type BackgroundKind, type BuildChoices } from '../lib/background';
 import { buildBackup } from '../lib/export/backup';
-import { agreementData, agreementHere, buildExcel, buildResearchRepo, buildSupplementary, type AgreementFor, type ExportData } from '../lib/export/packages';
+import { agreementData, agreementHere, buildExcel, buildResearchRepo, buildSupplementary, publicMetaColumns, type AgreementFor, type ExportData } from '../lib/export/packages';
 import { labelPairs } from '../lib/export/tables';
 import type { AgreementJob, AgreementMessage } from '../lib/report.worker';
 import { batchChecksDone, currentStudy, getState, isBusy, toast, useStore, withRemoved } from '../lib/store';
@@ -77,6 +77,16 @@ const DELETING = 'Wait until the delete under way has finished.';
  *  supplementary package with logs); the Excel workbook and the package without logs show the results so far. */
 const readsAsItGoes = (kind: BackgroundKind, picked: BuildChoices) => kind === 'backup' || kind === 'research' || (kind === 'supp' && !!picked.supp?.includeLogs);
 
+const LEFT_OUT = 'annotation-desk-public-left-out-';
+function readLeftOut(studyId: string): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(LEFT_OUT + studyId) ?? '[]');
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 export function ExportView() {
   const runs = useStore((s) => s.runs);
   const results = useStore((s) => s.results);
@@ -107,6 +117,22 @@ export function ExportView() {
   }, [run, runId]);
   const [supp, setSupp] = useState(choices.supp ?? { includeTexts: false, includeRationales: true, includeLogs: false });
   const [researchLogs, setResearchLogs] = useState(choices.researchLogs ?? true);
+  // The metadata columns left out of the public package, remembered per study in this browser (a column added later is
+  // included until it is unticked).
+  // (Not a file column that only repeats doc_id: the package always leaves that out.)
+  const allMeta = useMemo(() => publicMetaColumns(docs), [docs]);
+  const [leftOut, setLeftOut] = useState<string[]>(() => readLeftOut(study.id));
+  useEffect(() => setLeftOut(readLeftOut(study.id)), [study.id]);
+  const toggleColumn = (c: string) => {
+    const next = leftOut.includes(c) ? leftOut.filter((x) => x !== c) : [...leftOut, c];
+    setLeftOut(next);
+    try {
+      localStorage.setItem(LEFT_OUT + study.id, JSON.stringify(next));
+    } catch {
+      /* not remembered: the choice still applies to this download */
+    }
+  };
+  const shownMeta = choices.supp?.metaColumns ?? allMeta.filter((c) => !leftOut.includes(c));
 
   const go = async (kind: BackgroundKind, label: string, fn: () => Promise<void>, picked: BuildChoices = {}) => {
     // A download that reads the stored results and logs as it goes waits for a run or Retry failed being sent, so it
@@ -291,13 +317,16 @@ export function ExportView() {
               <div className="hint">Off by default: check copyright and privacy before sharing {w.many} publicly.</div>
             </span>
           </label>
-          <label className="check">
-            <input type="checkbox" checked={supp.includeRationales} onChange={(e) => setSupp({ ...supp, includeRationales: e.target.checked })} {...lock('supp')} />
-            <span>
-              Include the model’s rationale
-              <div className="hint">The separate rationale field. Fields of your codebook (e.g. explanations) are annotations and always included.</div>
-            </span>
-          </label>
+          {/* (Only for a run that asked for the separate rationale: Short rationale on, structured output.) */}
+          {run && run.snapshot.prompt.outputMode === 'structured' && run.snapshot.prompt.includeRationale && (
+            <label className="check">
+              <input type="checkbox" checked={supp.includeRationales} onChange={(e) => setSupp({ ...supp, includeRationales: e.target.checked })} {...lock('supp')} />
+              <span>
+                Include the model’s rationale
+                <div className="hint">The separate rationale field. Fields of your codebook (e.g. explanations) are annotations and always included.</div>
+              </span>
+            </label>
+          )}
           <label className="check">
             <input type="checkbox" checked={supp.includeLogs} onChange={(e) => setSupp({ ...supp, includeLogs: e.target.checked })} {...lock('supp')} />
             <span>
@@ -305,6 +334,22 @@ export function ExportView() {
               <div className="hint">These contain the {w.many}.</div>
             </span>
           </label>
+          {allMeta.length > 0 && (
+            <details className="more">
+              <summary>
+                Metadata columns: {shownMeta.length} of {allMeta.length} included
+              </summary>
+              <div className="more-body">
+                <div className="hint">In results.csv and data/corpus.csv.</div>
+                {allMeta.map((c) => (
+                  <label className="check" key={c}>
+                    <input type="checkbox" checked={shownMeta.includes(c)} onChange={() => toggleColumn(c)} {...lock('supp')} />
+                    <span>{c}</span>
+                  </label>
+                ))}
+              </div>
+            </details>
+          )}
           <button
             className="btn primary export-btn"
             disabled={!run || !!busy || (sending && supp.includeLogs)}
@@ -315,10 +360,10 @@ export function ExportView() {
                 `supplementary package of run #${runName(run!, runs)}`,
                 async () => {
                   const d = exportData();
-                  const { blob, name } = await buildSupplementary(d, d.runs.find((x) => x.id === run!.id) ?? run!, { ...supp, onProgress: showStep, agreement: agreementInWorker });
+                  const { blob, name } = await buildSupplementary(d, d.runs.find((x) => x.id === run!.id) ?? run!, { ...supp, metaColumns: shownMeta, onProgress: showStep, agreement: agreementInWorker });
                   download(name, blob);
                 },
-                { runId: run!.id, supp },
+                { runId: run!.id, supp: { ...supp, metaColumns: shownMeta } },
               )
             }
           >

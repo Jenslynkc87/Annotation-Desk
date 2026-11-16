@@ -77,7 +77,8 @@ describe('exports name neither the app nor its build (Nov 16, 2026)', () => {
       for (const [name, text] of files) expect([name, TRACE_ALL.test(text)]).toEqual([name, false]);
       const meta = JSON.parse([...files].find(([n]) => n.endsWith('metadata.json'))![1]);
       expect(meta.software).toBeUndefined();
-      expect(meta.study_notes).toContain('(sampling method 3)');
+      // (No study notes in the public package: Nov 16, 2026.)
+      expect(meta.study_notes).toBeUndefined();
     }
   });
 
@@ -132,7 +133,7 @@ describe('the public package has no methods text, and no empty rationale column 
     const { blob } = await buildSupplementary({ study, docs, runs: [run], results: rs }, run, { includeTexts: true, includeRationales, includeLogs: false });
     const files = await zipTexts(blob);
     const read = (suffix: string) => [...files].find(([n]) => n.endsWith(suffix))![1];
-    const header = (suffix: string) => read(suffix).replace(/^﻿/, '').split('\n')[0].split(',');
+    const header = (suffix: string) => read(suffix).replace(/^﻿/, '').split(/\r?\n/)[0].split(',');
     return { read, header };
   };
 
@@ -170,5 +171,61 @@ describe('the public package has no methods text, and no empty rationale column 
     const all = [...withOne].find(([n]) => n.endsWith('results_all_runs_long.csv'))![1];
     expect(all).toContain('Why.');
     expect(all).not.toContain('stale');
+  });
+});
+
+describe('a lean public package (Nov 16, 2026)', () => {
+  const docsWithMeta: Doc[] = docs.map((d, i) => ({ ...d, source: `art_${i}.md`, meta: { ...d.meta, seq: String(i), journal: 'AQ' } }));
+  const build = async (opts: { includeTexts: boolean; includeLogs: boolean; metaColumns?: string[] }, run: Run = runs[0], rs: Result[] = results.filter((r) => r.runId === run.id)) => {
+    await stored();
+    const { blob } = await buildSupplementary({ study, docs: docsWithMeta, runs, results: rs }, run, { includeRationales: true, ...opts });
+    const files = await zipTexts(blob);
+    const read = (suffix: string) => [...files].find(([n]) => n.endsWith(suffix))?.[1];
+    const header = (suffix: string) => read(suffix)!.replace(/^﻿/, '').split(/\r?\n/)[0].split(',');
+    return { files, read, header, meta: JSON.parse(read('metadata.json')!) };
+  };
+
+  it('results_by_replicate.csv: no column with one value for the whole run, none empty throughout; response_id kept', async () => {
+    const { header } = await build({ includeTexts: false, includeLogs: false });
+    expect(header('results_by_replicate.csv')).toEqual([
+      'model_reported', 'doc_id', 'replicate', 'status', 'tone', 'tone_explanation', 'stop_reason', 'input_tokens', 'output_tokens', 'requested_at', 'completed_at', 'response_id',
+    ]);
+  });
+
+  it('results.csv: no file column repeating doc_id, no n_ok or n_error; the metadata columns chosen', async () => {
+    const all = await build({ includeTexts: false, includeLogs: false });
+    expect(all.header('results.csv')).toEqual(['doc_id', 'tone', 'tone_explanation', 'tone_gold', 'seq', 'journal']);
+    const some = await build({ includeTexts: true, includeLogs: false, metaColumns: ['journal'] });
+    expect(some.header('results.csv')).toEqual(['doc_id', 'tone', 'tone_explanation', 'journal', 'text']);
+    // data/corpus.csv: the same columns, and no source repeating the file name.
+    expect(some.header('corpus.csv')).toEqual(['doc_id', 'text', 'n_characters', 'journal']);
+  });
+
+  it('n_ok only when a text has fewer annotations than planned', async () => {
+    const three = { ...runs[0], snapshot: { ...runs[0].snapshot, options: { ...DEFAULT_RUN_OPTIONS, replicates: 3 } } };
+    const rs = docs.flatMap((d) => [1, 2, 3].map((rep) => ({ ...results[0], id: `${three.id}:${d.id}:${rep}`, docId: d.id, replicate: rep })));
+    expect((await build({ includeTexts: false, includeLogs: false }, three, rs)).header('results.csv')).not.toContain('n_ok');
+    const fewer = await build({ includeTexts: false, includeLogs: false }, three, rs.slice(1));
+    expect(fewer.header('results.csv')).toContain('n_ok');
+    expect(fewer.header('results.csv')).not.toContain('n_error');
+  });
+
+  it('metadata.json: no notes, label or ids; counters only when not 0', async () => {
+    const { meta } = await build({ includeTexts: false, includeLogs: false });
+    expect(meta.study_notes).toBeUndefined();
+    expect(Object.keys(meta.run).sort()).toEqual(['finished_at', 'mode', 'number', 'started_at']);
+    expect(Object.keys(meta.corpus).sort()).toEqual(['n_texts_in_run', 'n_texts_with_results', 'n_texts_with_usable_labels']);
+    expect(Object.keys(meta.requests).sort()).toEqual(['failed', 'first_requested_at', 'last_completed_at', 'ok', 'total']);
+  });
+
+  it('no codebook.json, no CSV note; with logs but no texts, the README says the logs hold them', async () => {
+    const { files, read } = await build({ includeTexts: false, includeLogs: true });
+    expect([...files.keys()].some((n) => n.endsWith('codebook.json'))).toBe(false);
+    const readme = read('README.md')!;
+    expect(readme).not.toContain('codebook.json');
+    expect(readme).not.toContain('analysis software');
+    expect(readme).toContain('not included as a separate file, but `logs/requests.jsonl` holds every request with its full text');
+    expect(readme).not.toContain('are not included in this package');
+    expect((await build({ includeTexts: false, includeLogs: false })).read('README.md')).toContain('are not included in this package');
   });
 });

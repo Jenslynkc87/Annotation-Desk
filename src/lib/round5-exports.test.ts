@@ -224,18 +224,18 @@ describe('logs and Cancel (H20)', () => {
     const supp = await unzip((await buildSupplementary(d, stopped, opts)).blob);
     const row = (await supp.read('README.md')).split('\n').find((l) => l.startsWith('| `logs/requests.jsonl`'))!;
     expect(row).toBe(
-      '| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response stored; requests under way when a run or a Retry failed was stopped (Cancel, a result that could not be saved, or the page closing) may have been sent but have no line; a request that Retry failed sent again has a line for each stored attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error |',
+      '| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response stored; requests under way when the run, or a resend of failed requests, was stopped (cancelled, a result that could not be saved, or the page closing) may have been sent but have no line; a request sent again after failing has a line for each stored attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error |',
     );
     // A run nothing stopped: as before.
     const other = await unzip((await buildSupplementary(d, plain, opts)).blob);
     expect((await other.read('README.md')).split('\n').find((l) => l.startsWith('| `logs/requests.jsonl`'))).toBe('| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response |');
     const research = await unzip((await buildResearchRepo(d, { includeLogs: true })).blob);
     expect(await research.read('README.md')).toContain(
-      '| `runs/run-NN/requests.jsonl`, `responses.jsonl` | Every request body sent and raw API response stored; requests under way when a run or a Retry failed was stopped (Cancel, a result that could not be saved, or the page closing) may have been sent but have no line; a request that Retry failed sent again has a line for each stored attempt',
+      '| `runs/run-NN/requests.jsonl`, `responses.jsonl` | Every request body sent and raw API response stored; requests under way when the run, or a resend of failed requests, was stopped (cancelled, a result that could not be saved, or the page closing) may have been sent but have no line; a request sent again after failing has a line for each stored attempt',
     );
     // An immediate run stopped by Cancel, without retries.
     const cancelled = await unzip((await buildSupplementary({ ...d, runs: [{ ...plain, status: 'cancelled' }] }, { ...plain, status: 'cancelled' }, opts)).blob);
-    expect(await cancelled.read('README.md')).toContain('Every request body and full API response stored; requests under way when a run');
+    expect(await cancelled.read('README.md')).toContain('Every request body and full API response stored; requests under way when the run');
   });
 
   const logsRow = async (d: ExportData, run: Run) =>
@@ -252,13 +252,13 @@ describe('logs and Cancel (H20)', () => {
       mkResult(run, d, { stance: 'for' }, { requestedAt: T1, completedAt: T1, ...(i === 0 ? { attempt: 2, replacedUsage: usage, replacedAt: [run.createdAt] } : {}) }),
     );
     const d: ExportData = { study: mkStudy(), docs, runs: [run], results };
-    expect(await logsRow(d, run)).toContain('Every request body and full API response stored; requests under way when a run or a Retry failed was stopped');
+    expect(await logsRow(d, run)).toContain('Every request body and full API response stored; requests under way when the run, or a resend of failed requests, was stopped');
     const research = await unzip((await buildResearchRepo(d, { includeLogs: true })).blob);
     expect(await research.read('README.md')).toContain('Every request body sent and raw API response stored; requests under way');
     // A retry that only replaced stored failed answers: nothing was stopped, nothing is missing.
     const whole = docs.map((d, i) => mkResult(run, d, { stance: 'for' }, i === 0 ? { attempt: 2, replacedUsage: usage, replacedAt: [run.createdAt], requestedAt: T1 } : {}));
     expect(await logsRow({ ...d, results: whole }, run)).toBe(
-      '| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response; a request that Retry failed sent again has a line for each attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error |',
+      '| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response; a request sent again after failing has a line for each attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error |',
     );
   });
 
@@ -267,7 +267,7 @@ describe('logs and Cancel (H20)', () => {
     const run = mkRun('h20l', 1, docs.map((d) => d.id), { retries: [{ at: T1, requests: 1 }] }, '0.1.0');
     const results = docs.map((d, i) => mkResult(run, d, { stance: 'for' }, i === 1 ? { requestedAt: T1, completedAt: T1 } : {}));
     expect(await logsRow({ study: mkStudy(), docs, runs: [run], results }, run)).toBe(
-      '| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response stored; a version before October 22, 2026 did not keep the failed attempts its Retry failed replaced: they have no line |',
+      '| `logs/requests.jsonl`, `responses.jsonl` | Every request body and full API response stored; some failed attempts that were sent again were not kept: they have no line |',
     );
   });
 });

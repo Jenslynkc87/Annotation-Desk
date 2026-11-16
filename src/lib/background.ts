@@ -12,7 +12,7 @@ export type BackgroundKind = 'excel' | 'research' | 'supp' | 'backup' | 'report'
 /** What the Export tab's build was started with, shown again when the tab is opened during it. */
 export interface BuildChoices {
   runId?: string;
-  supp?: { includeTexts: boolean; includeRationales: boolean; includeLogs: boolean };
+  supp?: { includeTexts: boolean; includeRationales: boolean; includeLogs: boolean; metaColumns?: string[] };
   researchLogs?: boolean;
 }
 

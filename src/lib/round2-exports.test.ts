@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import * as dbApi from './db';
 import { buildComparisonReport, buildExcel, buildResearchRepo, buildSupplementary, requestAsSent, type ExportData } from './export/packages';
+import { resultsWide } from './export/tables';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type ResultLog, type Run, type Study } from './types';
 
 (globalThis as Record<string, unknown>).__APP_VERSION__ = 'test';
@@ -85,7 +86,10 @@ describe('supplementary package: failed requests, texts never sent, prose answer
     expect(readme).toContain('| Requests (ok / failed) | 9 / 0 (1 ok answer gave no scores and was left out) |');
     const csv = (await read('results/results.csv')).replace(/^﻿/, '').trim().split('\n');
     const head = csv[0].split(',');
-    expect(csv[1].split(',')[head.indexOf('n_ok')]).toBe('3');
+    // (The public results.csv has n_ok only when a text has fewer annotations than planned: Nov 16, 2026. The full
+    // table counts the ok answers.)
+    expect(head).not.toContain('n_ok');
+    expect(resultsWide(run, docs, [run], results, { text: false, rationale: false })[0].n_ok).toBe(3);
   });
 
   it('categorical labels with replicates: a tied vote is kept as "a | b" and counts as a disagreement (N115)', async () => {

@@ -187,7 +187,7 @@ describe('an Oct 18–20 batch retry next to a published-build retry counted as 
 
     const { blob } = await buildSupplementary({ study, docs, runs: [run], results }, run, { includeTexts: false, includeRationales: false, includeLogs: false });
     const { read } = await unzip(blob);
-    expect(JSON.parse(await read('metadata.json')).requests).toMatchObject({ retried: 6, retried_note: expect.stringContaining('planned (2)') });
+    expect(JSON.parse(await read('metadata.json')).requests).toMatchObject({ retried: 'at least 6' });
   });
 });
 

@@ -85,8 +85,8 @@ describe('a published-version batch retry with a group never uploaded (G0, G2)',
     const results = docs.map((d, i) => (i < 4 ? mkResult(run, d, 1, { stance: 'for' }, { requestedAt: t1 }) : mkResult(run, d, 1, null, { requestedAt: t0 })));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 4, lowerBound: true, planned: 6, legacySent: 4, tokensIncomplete: true, asBatch: 'all' });
     const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(meta.requests.retried).toBe(4);
-    expect(meta.requests.retried_note).toContain('recorded for Retry failed only the number of requests planned (6), not the number sent: counted from the stored answers, at least 4 were sent');
+    expect(meta.requests.retried).toBe('at least 4');
+    expect(meta.requests.retried_note).toBeUndefined();
     const [row] = runSummaryRows([run], results);
     expect(row.requests_retried).toBe(4);
   });
@@ -172,7 +172,7 @@ describe('supplementary package: texts with only some annotations (G26)', () => 
     // 5 texts complete; the 6th has 1 of 3 annotations, and it failed.
     const results = [...docs.slice(0, 5).flatMap((d) => [1, 2, 3].map((rep) => mkResult(run, d, rep, { stance: 'for' }))), mkResult(run, docs[5], 1, null)];
     const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(meta.corpus.n_texts_partly_annotated).toBe(0);
+    expect(meta.corpus.n_texts_partly_annotated).toBeUndefined();
   });
 
   it('nor a plain-text text whose only answer gave no scores', async () => {
@@ -181,7 +181,7 @@ describe('supplementary package: texts with only some annotations (G26)', () => 
     const json = (x: number) => ({ response: JSON.stringify({ tone: x, explanation: 'e' }) });
     const results = [...docs.slice(0, 2).flatMap((d) => [1, 2, 3].map((rep) => mkResult(run, d, rep, json(rep - 1)))), mkResult(run, docs[2], 1, { response: 'In prose.' })];
     const { meta } = await supplementary({ study: mkStudy(plainPrompt), docs, runs: [run], results }, run);
-    expect(meta.corpus.n_texts_partly_annotated).toBe(0);
+    expect(meta.corpus.n_texts_partly_annotated).toBeUndefined();
   });
 
   it('a labelled text with fewer answers still is', async () => {
@@ -209,18 +209,19 @@ describe('runs that share a number (G27, G36)', () => {
     expect(runNameFromTables(b, runs)).toBe(runName(b, runs));
   });
 
-  it('metadata.json gives the run’s name and id; the README and the script say which run it is', async () => {
+  it('the public package gives the run’s number only: no name, id or label, in metadata.json, the README or the script', async () => {
     const results = runs.flatMap((r) => docs.map((d) => mkResult(r, d, 1, { stance: 'for' })));
     const { meta, readme, read } = await supplementary({ study: mkStudy(stancePrompt), docs, runs, results }, b);
-    expect(meta.run).toMatchObject({ number: 2, name: '2-20261001-103000Z', id: 'bbbbbbbb-2222' });
-    expect(readme).toContain('(run #2-20261001-103000Z, "pilot")');
-    expect(readme).toContain('this one is named by its number and when it started (UTC; `run.started_at` in metadata.json)');
-    expect(await read('scripts/annotate.py')).toContain('#2-20261001-103000Z (pilot), started');
-    // A run with a number of its own: unchanged.
-    const own = await supplementary({ study: mkStudy(stancePrompt), docs, runs, results }, c);
-    expect(own.meta.run).toMatchObject({ number: 3, name: '3' });
-    expect(own.readme).not.toContain('when it started');
-    expect(fillScript(SCRIPT_TEMPLATE, scriptValues(mkStudy(stancePrompt), c, 'now'))).toContain('#3, started');
+    // (No name, id or label in the public package since Nov 16, 2026.)
+    expect(meta.run).toMatchObject({ number: 2 });
+    expect(meta.run.id).toBeUndefined();
+    expect(meta.run.label).toBeUndefined();
+    expect(readme).not.toContain('pilot');
+    expect(readme).not.toContain('when it started');
+    const script = await read('scripts/annotate.py');
+    expect(script).toContain('Run:    started 2026-10-01T10:30:00.000Z; exported');
+    expect(script).not.toContain('pilot');
+    expect(fillScript(SCRIPT_TEMPLATE, scriptValues(mkStudy(stancePrompt), c, 'now'))).toContain('Run:    started');
   });
 });
 
@@ -281,7 +282,8 @@ describe('a plain-text run’s package (G39)', () => {
     const run = mkRun('g39s', 1, ['d0'], { ...stancePrompt, includeRationale: true });
     const { meta, has, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results: [mkResult(run, docs[0], 1, { stance: 'for' })] }, run);
     expect(meta.prompt.rationale_requested).toBe(true);
-    expect(has('prompt/codebook.json') && has('prompt/output_schema.json')).toBe(true);
+    // (codebook.json: in the research zip only, since Nov 16, 2026.)
+    expect(has('prompt/codebook.md') && has('prompt/output_schema.json') && !has('prompt/codebook.json')).toBe(true);
     expect(readme).toContain('JSON schema the responses had to follow');
   });
 });
@@ -296,8 +298,7 @@ describe('a retry stopped while requests were under way (F93)', () => {
     expect(retriedRequests(run, results)).toMatchObject({ requests: 6, unanswered: 4, lowerBound: false });
     const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests.retried).toBe(6);
-    expect(meta.requests.retried_note).toContain('4 requests sent by Retry failed were stopped (Cancel, or a result that could not be saved) before their answers were stored');
-    expect(meta.tokens.note).toContain('their token use (if any) is not in the token counts');
+    expect(meta.tokens.may_be_incomplete).toBe(true);
     const [row] = runSummaryRows([run], results);
     expect(String(row.notes)).toContain('4 requests sent by Retry failed were stopped');
   });
@@ -347,7 +348,7 @@ describe('review: published-version retries and stopped requests', () => {
     expect(retriedRequests(run, results)).toMatchObject({ requests: 3, lowerBound: false, tokensIncomplete: false });
     const { meta } = await supplementary({ study, docs, runs: [run], results }, run);
     expect(meta.requests.retried_note).toBeUndefined();
-    expect(meta.tokens.note).toBeUndefined();
+    expect(meta.tokens.may_be_incomplete).toBeUndefined();
     expect(meta.requests.replaced_by_retries).toBe(3);
   });
 

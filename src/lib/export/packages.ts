@@ -19,6 +19,7 @@ import {
   cachingLabel,
   codebookMarkdown,
   corpusRows,
+  metaColumns,
   dropRedundantId,
   labelPairs,
   labelValue,
@@ -534,14 +535,15 @@ async function jsonlBlob(items: unknown[]): Promise<Blob> {
  * still holds the editor's, which were not sent): codebook.md says so, and output_schema.json and codebook.json are
  * left out.
  */
-async function promptFiles(zip: ZipFolder, run: Run) {
+async function promptFiles(zip: ZipFolder, run: Run, withCodebookJson = true) {
   const p = run.snapshot.prompt;
   await zip.file('prompt.txt', effectiveTemplate(p.userTemplate, p.subject));
   if (p.system.trim()) await zip.file('system_prompt.txt', p.system);
   await zip.file('codebook.md', codebookMarkdown(run));
   if (p.outputMode !== 'structured') return;
   await zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
-  await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
+  // (The app's own record of the fields: in the research zip only. The public package has codebook.md and the schema.)
+  if (withCodebookJson) await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
 }
 
 async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[]) {
@@ -624,6 +626,8 @@ export interface SupplementaryOptions {
   includeTexts: boolean;
   includeRationales: boolean;
   includeLogs: boolean;
+  /** The metadata columns to include in results.csv and data/corpus.csv (all when not given). */
+  metaColumns?: string[];
   /** Told each step as it starts: the path of each file before it is made, or "Computing agreement". */
   onProgress?: OnProgress;
   /** How the agreement figures are computed (by default here). */
@@ -641,19 +645,64 @@ export async function buildSupplementary(data: ExportData, run: Run, opts: Suppl
   const runDocs = d.docs.filter((x) => rs.some((r) => r.docId === x.id));
 
   const meta = supplementaryMetadata(d, run, exportedAt);
-  await root.file('metadata.json', JSON.stringify(meta, null, 2));
-  await promptFiles(root.folder('prompt'), run);
+  await root.file('metadata.json', JSON.stringify(publicMetadata(meta), null, 2));
+  await promptFiles(root.folder('prompt'), run, false);
   const res = root.folder('results');
-  await res.file('results.csv', () => toCsvBlobPaced(resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales })));
-  await res.file('results_by_replicate.csv', () => toCsvBlobPaced(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs)));
+  // Lean tables for a public archive (Nov 16, 2026): only the metadata columns chosen, no bookkeeping columns, no
+  // column repeating one value that metadata.json gives once, none that is empty throughout.
+  const keepMeta = publicMetaColumns(runDocs, opts.metaColumns);
+  await res.file('results.csv', () => toCsvBlobPaced(publicWide(run, resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales, meta: keepMeta }))));
+  await res.file('results_by_replicate.csv', () => toCsvBlobPaced(publicLong(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs))));
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
   const [agr] = await agreement();
   if (agr.length) await res.file('agreement.csv', () => toCsvBlobPaced(agreementRows(agr, runName(run, d.runs))));
-  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(corpusRows(runDocs, true)));
+  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(publicCorpus(corpusRows(runDocs, true, keepMeta), runDocs)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
   await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
   await root.file('README.md', () => supplementaryReadme(d, run, meta, agr, opts));
   return { blob: zip.blob(), name: `${name}.zip` };
+}
+
+/** A file name without its extension ("art_1.md" → "art_1"). */
+const stem = (name: string) => name.replace(/\.[^./\\]+$/, '');
+
+/**
+ * The metadata columns of the public tables: those chosen (all by default), less a `file` column that only repeats
+ * doc_id with an extension (doc_id is the file name without it).
+ */
+export function publicMetaColumns(docs: Doc[], chosen?: string[]): string[] {
+  const all = metaColumns(docs);
+  const picked = chosen ? all.filter((c) => chosen.includes(c)) : all;
+  const fileRepeatsId = docs.some((x) => x.meta.file) && docs.every((x) => !x.meta.file || x.meta.file === x.docId || stem(x.meta.file) === x.docId);
+  return fileRepeatsId ? picked.filter((c) => c !== 'file') : picked;
+}
+
+/** results.csv of the public package: no n_error, and n_ok only where a text has fewer annotations than planned. */
+function publicWide(run: Run, rows: Row[]): Row[] {
+  const reps = run.snapshot.options.replicates;
+  const fewer = reps > 1 && rows.some((r) => Number(r.n_ok) < reps);
+  return rows.map((r) => {
+    const { n_error: _e, n_ok, ...rest } = r;
+    return fewer ? { ...rest, n_ok } : rest;
+  });
+}
+
+/** One value on every row of a one-run table: metadata.json gives it once. (A field with such a name is answer_….) */
+const RUN_CONSTANTS = ['study', 'run', 'run_label', 'prompt_version', 'prompt_hash', 'provider', 'model_requested', 'latency_ms'];
+/** Left out when no row has a value (no error, no cache use, no reasoning tokens). */
+const BLANK_UNLESS_USED = ['parse_error', 'error', 'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens'];
+
+/** results_by_replicate.csv of the public package (response_id is kept: it names each answer at the provider). */
+function publicLong(rows: Row[]): Row[] {
+  const unused = BLANK_UNLESS_USED.filter((c) => rows.every((r) => r[c] === '' || r[c] === 0 || r[c] === null || r[c] === undefined));
+  const drop = new Set([...RUN_CONSTANTS, ...unused]);
+  return rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !drop.has(k))));
+}
+
+/** data/corpus.csv of the public package: no `source` column when it only repeats the file name or doc_id. */
+function publicCorpus(rows: Row[], docs: Doc[]): Row[] {
+  const repeats = docs.every((x) => !x.source || x.source === x.meta.file || stem(x.source) === x.docId || x.source === x.docId);
+  return repeats ? rows.map(({ source: _s, ...rest }) => rest) : rows;
 }
 
 function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
@@ -765,9 +814,9 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       ...(offScale ? { scores_off_scale_left_out_when_combined: offScale } : {}),
       // Requests of the partly annotated texts with no result (not sent, or no answer recorded).
       ...(reps > 1 ? { without_result_for_partly_annotated_texts: partly.reduce((s, id) => s + reps - perText.get(id)!, 0) } : {}),
-      // Requests "Retry failed" sent again (at least this many when retried_note says so).
-      retried: retry.requests,
-      ...(notes.requests ? { retried_note: notes.requests } : {}),
+      // Requests "Retry failed" sent again: a lower bound for retries that recorded only the number planned, or that
+      // the page closing interrupted.
+      retried: retry.lowerBound || retry.interrupted ? `at least ${retry.requests}` : retry.requests,
       // Failed attempts that "Retry failed" replaced: not in the totals above, but in the tokens and the logs.
       replaced_by_retries: replaced?.requests ?? 0,
       first_requested_at: started[0] ?? null,
@@ -779,9 +828,30 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
       reasoning: sum('reasoningTokens'),
       cache_read: sum('cacheReadTokens'),
       cache_write: sum('cacheWriteTokens'),
-      ...(notes.tokens ? { note: notes.tokens } : {}),
+      // (Failed attempts a retry replaced, or requests under way when a run was stopped, whose tokens weren't kept.)
+      ...(notes.tokens ? { may_be_incomplete: true } : {}),
     },
   };
+}
+
+/**
+ * metadata.json as published: no study notes, run label or internal ids (the run's and the provider's batch), and
+ * counters only when they are not 0 (the totals always).
+ */
+function publicMetadata(meta: ReturnType<typeof supplementaryMetadata>) {
+  const { study_notes: _notes, run, corpus, requests, ...rest } = meta;
+  const { id: _id, name: _name, label: _label, batch_id: _batch, status_when_exported, ...runRest } = run;
+  const nonZero = <T extends Record<string, unknown>>(o: T, always: string[]) =>
+    Object.fromEntries(Object.entries(o).filter(([k, v]) => always.includes(k) || (v !== 0 && v !== null && v !== undefined)));
+  const tied = corpus.n_texts_with_tied_votes ? nonZero(corpus.n_texts_with_tied_votes, []) : {};
+  const lean: Record<string, unknown> = {
+    ...rest,
+    run: { ...runRest, ...(status_when_exported !== 'completed' ? { status_when_exported } : {}) },
+    corpus: { ...nonZero({ ...corpus, n_texts_with_tied_votes: undefined }, ['n_texts_in_run', 'n_texts_with_usable_labels']), ...(Object.keys(tied).length ? { n_texts_with_tied_votes: tied } : {}) },
+    requests: nonZero(requests, ['total', 'ok', 'failed', 'first_requested_at', 'last_completed_at']),
+  };
+  // (In the order of the full record: run, model, prompt, … as before.)
+  return Object.fromEntries(Object.keys(meta).filter((k) => k in lean).map((k) => [k, lean[k]]));
 }
 
 /** Did a majority vote tie (two or more values with the most votes)? Counted as aggregate() does ("Essay" = "essay"). */
@@ -799,8 +869,8 @@ function isTie(values: string[]): boolean {
  * 2026 overwrote the failed attempt a retry replaced.
  */
 const LOG_GAPS = [
-  'requests under way when a run or a Retry failed was stopped (Cancel, a result that could not be saved, or the page closing) may have been sent but have no line',
-  'a version before October 22, 2026 did not keep the failed attempts its Retry failed replaced: they have no line',
+  'requests under way when the run, or a resend of failed requests, was stopped (cancelled, a result that could not be saved, or the page closing) may have been sent but have no line',
+  'some failed attempts that were sent again were not kept: they have no line',
 ];
 function logGaps(run: Run, results: Result[], retry: RetriedRequests): string[] {
   // (Retries of a version that overwrote the attempt they replaced look the same as a first answer: not those.)
@@ -820,22 +890,17 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   const withoutScores = meta.requests.answers_without_scores ?? 0;
   const removed = meta.corpus.n_texts_removed_from_study_since;
   const retry = retriedRequests(run, d.results.filter((r) => r.runId === run.id));
-  // Retries by a version that recorded only the number planned, or didn't keep the attempts a retry replaced.
-  const notes = retryNotes(run, retry);
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
-    `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported on ${meta.exported_at.slice(0, 10)}.` +
-      // (Runs that share a number: given twice by an earlier version open in two tabs.)
-      (sharesNumber(run, d.runs) ? ` Another run of the study has the same number (#${run.number}), given twice by an earlier version open in two tabs: this one is named by its number and when it started (UTC; \`run.started_at\` in metadata.json).` : ''),
+    `Supplementary materials for the LLM-based annotation, exported on ${meta.exported_at.slice(0, 10)}.`,
     '',
     ...(runInProgress(run)
       ? [
-          `**This run was not finished when these materials were exported** (${run.status === 'submitted' ? 'its batch was still being processed' : retryInProgress(run) ? 'Retry failed was still sending requests' : 'it was still running'}): they describe the results so far.`,
+          `**This run was not finished when these materials were exported** (${run.status === 'submitted' ? 'its batch was still being processed' : retryInProgress(run) ? 'failed requests were still being sent again' : 'it was still running'}): they describe the results so far.`,
           '',
         ]
       : []),
-    ...(notes.both ? [notes.both, ''] : []),
     '## Summary',
     '',
     '| | |',
@@ -849,7 +914,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| Annotations per ${w.one} | ${meta.options.replicates_per_text} |`,
     `| Requests (ok / failed) | ${meta.requests.ok} / ${meta.requests.failed}${withoutScores ? ` (${withoutScores} ok answer${withoutScores === 1 ? '' : 's'} gave no scores and ${withoutScores === 1 ? 'was' : 'were'} left out)` : ''} |`,
     ...(meta.requests.replaced_by_retries > 0
-      ? [`| Failed attempts replaced by Retry failed | ${meta.requests.replaced_by_retries} (their tokens are included in the token totals; their logs are kept) |`]
+      ? [`| Failed attempts sent again | ${meta.requests.replaced_by_retries} (their tokens are included in the token totals) |`]
       : []),
     `| Annotation period | ${meta.requests.first_requested_at ?? '—'} to ${meta.requests.last_completed_at ?? '—'} |`,
     `| Prompt version / hash | v${meta.prompt.version} / \`${meta.prompt.sha256_prefix}\` |`,
@@ -903,7 +968,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| \`prompt/prompt.txt\` | The prompt sent with each ${w.one}; \`{{text}}\` marks where ${w.one === 'entry' ? 'the entry’s details were' : 'the text was'} inserted |`,
     ...(run.snapshot.prompt.system.trim() ? ['| `prompt/system_prompt.txt` | System prompt sent with every request |'] : []),
     ...(run.snapshot.prompt.outputMode === 'structured'
-      ? ['| `prompt/output_schema.json` | JSON schema the responses had to follow |', '| `prompt/codebook.md`, `codebook.json` | Annotation fields, types and allowed values |']
+      ? ['| `prompt/output_schema.json` | JSON schema the responses had to follow |', '| `prompt/codebook.md` | Annotation fields, types and allowed values |']
       : ['| `prompt/codebook.md` | Says that the model returned free text: there were no fields and no output schema |']),
     `| \`results/results.csv\` | One row per ${w.one}${opts.includeTexts ? ` (with ${w.one === 'entry' ? 'its details' : 'text'})` : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
     `| \`results/results_by_replicate.csv\` | One row per request, with status, tokens and timing${removed ? `; also the requests for the ${items(removed)} removed from the study since, marked “(deleted …)”` : ''} |`,
@@ -913,15 +978,13 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   if (opts.includeLogs) {
     const gaps = logGaps(run, d.results, retry);
     lines.push(
-      `| \`logs/requests.jsonl\`, \`responses.jsonl\` | Every request body and full API response${gaps.length ? ` stored; ${gaps.join('; ')}` : ''}${meta.requests.replaced_by_retries > 0 ? `; a request that Retry failed sent again has a line for each ${gaps.length ? 'stored ' : ''}attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error` : ''} |`,
+      `| \`logs/requests.jsonl\`, \`responses.jsonl\` | Every request body and full API response${gaps.length ? ` stored; ${gaps.join('; ')}` : ''}${meta.requests.replaced_by_retries > 0 ? `; a request sent again after failing has a line for each ${gaps.length ? 'stored ' : ''}attempt (same doc_id and replicate; attempt 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error` : ''} |`,
     );
   }
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
     '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
     '| `scripts/requirements.txt` | Python package the script needs (install with `pip install -r requirements.txt`) |',
-    '',
-    CSV_NOTE,
     '',
     '## Reproducing',
     '',
@@ -935,7 +998,14 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     'Hosted models may be updated or retired and generation is not fully deterministic, so a re-run may not reproduce every label exactly.',
     '',
   );
-  if (!opts.includeTexts) lines.push(`The annotated ${w.many} are not included in this package (e.g. for copyright or privacy reasons).`, '');
+  // (With the logs, the texts are in every request there.)
+  if (!opts.includeTexts)
+    lines.push(
+      opts.includeLogs
+        ? `The annotated ${w.many} are not included as a separate file, but \`logs/requests.jsonl\` holds every request with its ${w.one === 'entry' ? 'entry' : 'full text'}.`
+        : `The annotated ${w.many} are not included in this package (e.g. for copyright or privacy reasons).`,
+      '',
+    );
   return lines.join('\n');
 }
 
@@ -959,7 +1029,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
     const gaps = LOG_GAPS.filter((g) => all.includes(g));
     rows.push([
       '`runs/run-NN/requests.jsonl`, `responses.jsonl`',
-      `${gaps.length ? `Every request body sent and raw API response stored; ${gaps.join('; ')}` : 'Every request body sent and every raw API response'}; a request that Retry failed sent again has a line for each ${gaps.length ? 'stored ' : ''}attempt (same doc_id and replicate; \`attempt\` 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error`,
+      `${gaps.length ? `Every request body sent and raw API response stored; ${gaps.join('; ')}` : 'Every request body sent and every raw API response'}; a request sent again after failing has a line for each ${gaps.length ? 'stored ' : ''}attempt (same doc_id and replicate; \`attempt\` 1, 2, …), and the response line of an earlier, replaced attempt also gives its status, error and parse_error`,
     ]);
   }
   rows.push(

@@ -70,8 +70,8 @@ export function metaColumns(docs: Doc[]): string[] {
   return [...new Set(docs.flatMap((d) => Object.keys(d.meta)))];
 }
 
-export function corpusRows(docs: Doc[], includeText: boolean): Row[] {
-  const cols = metaColumns(docs);
+export function corpusRows(docs: Doc[], includeText: boolean, meta?: string[]): Row[] {
+  const cols = meta ?? metaColumns(docs);
   // A metadata column with the same name as one of ours (e.g. "source") gets a prefix instead of overwriting it.
   const own = new Set(['doc_id', 'text', 'n_characters', 'source']);
   // Texts removed from the study but kept for the runs that used them: marked with the date (a column only then).
@@ -235,7 +235,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
 }
 
 /** One row per text for a single run: metadata + aggregated annotations. Every row has the same columns. */
-export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Result[], opts: { text: boolean; rationale: boolean }): Row[] {
+export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Result[], opts: { text: boolean; rationale: boolean; meta?: string[] }): Row[] {
   const views = buildDocViews(docs, allRuns, results, run.id);
   const fields = outputFields(run.snapshot.prompt);
   const p = run.snapshot.prompt;
@@ -256,7 +256,7 @@ export function resultsWide(run: Run, docs: Doc[], allRuns: Run[], results: Resu
     ...(withRationale ? ['rationale'] : []),
   ];
   const taken = new Set(['doc_id', 'text', 'n_ok', 'n_error', ...annotationCols]);
-  const cols = metaColumns(docs).map((c) => [c, taken.has(c) ? `meta_${c}` : c] as const);
+  const cols = (opts.meta ?? metaColumns(docs)).map((c) => [c, taken.has(c) ? `meta_${c}` : c] as const);
   const rows: Row[] = [];
   for (const d of shown) {
     const v = views.get(d.id)!;
