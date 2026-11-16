@@ -307,7 +307,7 @@ export function ExportView() {
             <h2>Supplementary repository</h2>
           </div>
           <p className="hint">
-            What a journal or OSF/Zenodo deposit needs for the chosen run: metadata, prompt and codebook, results overview, agreement
+            What a journal or OSF/Zenodo deposit needs for the chosen run: metadata, prompt and output schema, results overview, agreement
             and a reproducible Python script (with a template marking every inserted value).
           </p>
           <label className="check">

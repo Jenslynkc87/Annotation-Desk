@@ -137,7 +137,7 @@ describe('README agreement notes (N117, N118, R5, R25)', () => {
     const { readme } = await supplementary({ study: mkStudy(scalePrompt('race')), docs, runs: [run], results }, run);
     // Model vs race_gold: 12 labelled, one never answered, one 9 left out.
     expect(readme).toMatch(/\| race \| model \| race_gold \| 10 \(of 12; 1 not on the scale\) \|/);
-    expect(readme).toContain('pairs with a value that doesn’t fit the field: not a number, or outside the scale (the codebook’s), e.g. a word or 99 (“not on the scale”). Their number is n_left_out_not_on_scale in agreement.csv.');
+    expect(readme).toContain('pairs with a value that doesn’t fit the field: not a number, or outside the scale (the field’s allowed values), e.g. a word or 99 (“not on the scale”). Their number is n_left_out_not_on_scale in agreement.csv.');
     expect(readme).toContain('on this run’s texts, as the model rows are, also those without a usable model answer');
     expect(readme).toContain('1 text of this run with labels has no result (not sent, or no answer came back): its labels count as labelled and in the human–human rows, but it is not in this package.');
   });
@@ -252,7 +252,7 @@ describe('review of the round-two export fixes', () => {
     const { readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(readme).not.toMatch(/ha(s|ve) no result/);
     expect(readme).toMatch(/\| stance \| model \| stance_gold \| 5 \(of 6; 1 not a category\) \|/);
-    expect(readme).toContain(', or not one of the codebook’s categories (“not a category”).');
+    expect(readme).toContain(', or not one of the field’s allowed categories (“not a category”).');
     // The same run with labels on a text it never sent: that one is mentioned (model and human–human rows).
     docs[15].meta = { ...docs[15].meta, stance_gold: 'for', stance_coder2: 'for' };
     const again = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);

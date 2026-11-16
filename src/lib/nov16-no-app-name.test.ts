@@ -6,6 +6,7 @@ import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import * as dbApi from './db';
 import { buildBackup, importBackup } from './export/backup';
+import { codebookMarkdown } from './export/tables';
 import { buildComparisonReport, buildExcel, buildResearchRepo, buildSupplementary } from './export/packages';
 import { matchLabels, resultsTable } from './import/labels';
 import type { ParsedTable } from './import/parse';
@@ -203,10 +204,12 @@ describe('a lean public package (Nov 16, 2026)', () => {
     expect(more.read('README.md')).not.toContain('(the annotations are in');
   });
 
-  it('metadata.json names the output schema instead of repeating it; codebook.md has no column-name column when it only repeats the field', async () => {
+  it('metadata.json names the output schema instead of repeating it; no codebook.md (research zip: no column-name column when it only repeats the field)', async () => {
     const { meta, read, files } = await build({ includeTexts: false, includeLogs: false });
     expect(JSON.stringify(meta)).not.toContain('"properties"');
-    expect(read('codebook.md')!.split('\n').find((l) => l.startsWith('| Field'))).toBe('| Field | Type | Allowed values | Description |');
+    expect([...files.keys()].some((n) => n.includes('codebook'))).toBe(false);
+    expect(read('README.md')).not.toContain('codebook');
+    expect(codebookMarkdown(runs[0]).split('\n').find((l) => l.startsWith('| Field'))).toBe('| Field | Type | Allowed values | Description |');
     // The template script is kept (the owner asked for it); neither script mentions a site.
     expect([...files.keys()].some((n) => n.endsWith('annotate_template.py'))).toBe(true);
     expect(read('README.md')).toContain('annotate_template.py');

@@ -535,15 +535,16 @@ async function jsonlBlob(items: unknown[]): Promise<Blob> {
  * still holds the editor's, which were not sent): codebook.md says so, and output_schema.json and codebook.json are
  * left out.
  */
-async function promptFiles(zip: ZipFolder, run: Run, withCodebookJson = true) {
+async function promptFiles(zip: ZipFolder, run: Run, withCodebook = true) {
   const p = run.snapshot.prompt;
   await zip.file('prompt.txt', effectiveTemplate(p.userTemplate, p.subject));
   if (p.system.trim()) await zip.file('system_prompt.txt', p.system);
-  await zip.file('codebook.md', codebookMarkdown(run));
+  // (codebook.md and codebook.json: in the research zip only. The public package has the prompt and the schema, which
+  // say the same; the owner's study codebook is a document of its own, so a file of that name would mislead. Nov 16, 2026.)
+  if (withCodebook) await zip.file('codebook.md', codebookMarkdown(run));
   if (p.outputMode !== 'structured') return;
   await zip.file('output_schema.json', JSON.stringify(run.snapshot.outputSchema ?? buildOutputSchema(p), null, 2));
-  // (The app's own record of the fields: in the research zip only. The public package has codebook.md and the schema.)
-  if (withCodebookJson) await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
+  if (withCodebook) await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
 }
 
 async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[]) {
@@ -991,7 +992,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     const humanRows = agr.some((a) => a.source !== 'model');
     lines.push(
       '',
-      `Brackets: 95% intervals: Wilson intervals for % agreement, bootstrap intervals (${BOOTSTRAP_RESAMPLES.toLocaleString('en-US')} resamples of ${w.many}) for the coefficients. “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column (a missing-value marker such as NA counts as no value). Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number, or outside the scale (${run.snapshot.prompt.outputMode === 'text' && run.scoreScale ? `the scale set for the scores, ${run.scoreScale.min} to ${run.scoreScale.max}` : run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers whose values all lie within −10…10, a rating scale: more than 3 points, or half the range of the model’s scores if more, beyond that range and the labels near it; with larger numbers, e.g. percentages or years, no number is left out' : 'the codebook’s'}), e.g. a word or 99 (“not on the scale”)${agr.some((a) => notCategory(a.stats)) ? ', or not one of the codebook’s categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
+      `Brackets: 95% intervals: Wilson intervals for % agreement, bootstrap intervals (${BOOTSTRAP_RESAMPLES.toLocaleString('en-US')} resamples of ${w.many}) for the coefficients. “Of labelled”: this run’s ${w.many} with a value in the “Compared with” column (a missing-value marker such as NA counts as no value). Not compared: ${w.many} without a usable value under Annotations (no usable model answer, or no label in that column), and pairs with a value that doesn’t fit the field: not a number, or outside the scale (${run.snapshot.prompt.outputMode === 'text' && run.scoreScale ? `the scale set for the scores, ${run.scoreScale.min} to ${run.scoreScale.max}` : run.snapshot.prompt.outputMode === 'text' ? 'for scores in plain-text answers whose values all lie within −10…10, a rating scale: more than 3 points, or half the range of the model’s scores if more, beyond that range and the labels near it; with larger numbers, e.g. percentages or years, no number is left out' : 'the field’s allowed values'}), e.g. a word or 99 (“not on the scale”)${agr.some((a) => notCategory(a.stats)) ? ', or not one of the field’s allowed categories (“not a category”)' : ''}. Their number is n_left_out_not_on_scale in agreement.csv.` +
         (humanRows
           ? ` Rows with a column name under Annotations compare two human label columns (human–human baseline) on this run’s ${w.many}, as the model rows are, also those without a usable model answer.`
           : '') +
@@ -1010,8 +1011,8 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     `| \`prompt/prompt.txt\` | The prompt sent with each ${w.one}; \`{{text}}\` marks where ${w.one === 'entry' ? 'the entry’s details were' : 'the text was'} inserted |`,
     ...(run.snapshot.prompt.system.trim() ? ['| `prompt/system_prompt.txt` | System prompt sent with every request |'] : []),
     ...(run.snapshot.prompt.outputMode === 'structured'
-      ? ['| `prompt/output_schema.json` | JSON schema the responses had to follow |', '| `prompt/codebook.md` | Annotation fields, types and allowed values |']
-      : ['| `prompt/codebook.md` | Says that the model returned free text: there were no fields and no output schema |']),
+      ? ['| `prompt/output_schema.json` | JSON schema the responses had to follow: each field, its type and allowed values |']
+      : []),
     `| \`results/results.csv\` | One row per ${w.one}${opts.includeTexts ? ` (with ${w.one === 'entry' ? 'its details' : 'text'})` : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
     `| \`results/results_by_replicate.csv\` | One row per request, with status, tokens and timing${answersOnce(run, d.results.filter((r) => r.runId === run.id), d.docs) ? ' (the annotations are in `results.csv`)' : ''}${removed ? `; also the requests for the ${items(removed)} removed from the study since, marked “(deleted …)”` : ''} |`,
   );

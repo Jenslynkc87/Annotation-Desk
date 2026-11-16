@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import * as dbApi from './db';
 import { buildBackup, importBackup } from './export/backup';
 import { buildComparisonReport, buildExcel, buildResearchRepo, buildSupplementary, type ExportData } from './export/packages';
-import { retryNotes, runSummaryRows } from './export/tables';
+import { codebookMarkdown, retryNotes, runSummaryRows } from './export/tables';
 import { getState, selectStudy } from './store';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type ResultLog, type Run, type Study } from './types';
 import { retriedRequests } from './view';
@@ -219,7 +219,8 @@ describe('codebook and logs (F89, F90)', () => {
     const docs = mkDocs(1);
     const run = mkRun('r1', 1, ['d0'], prompt);
     const { read } = await supplementary({ study: mkStudy(prompt), docs, runs: [run], results: [mkResult(run, docs[0], 1, { status: 'open' })] }, run);
-    expect(await read('prompt/codebook.md')).toContain('| status | answer_status | category | open, closed |');
+    // (codebook.md: research zip only since Nov 16, 2026.)
+    expect(codebookMarkdown(run)).toContain('| status | answer_status | category | open, closed |');
     expect(Object.keys(csvRows(await read('results.csv'))[0]).map((k) => k.trim())).toContain('answer_status');
     // (results_by_replicate.csv keeps its own status column; with one annotation per text, the answers are in results.csv only.)
     expect(Object.keys(csvRows(await read('results_by_replicate.csv'))[0])).toEqual(expect.arrayContaining(['status']));

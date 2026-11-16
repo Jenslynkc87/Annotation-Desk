@@ -266,10 +266,11 @@ describe('a plain-text run’s package (G39)', () => {
     expect(meta.prompt).toMatchObject({ output_mode: 'text', rationale_requested: false });
     expect(has('prompt/codebook.json')).toBe(false);
     expect(has('prompt/output_schema.json')).toBe(false);
-    expect(await read('prompt/codebook.md')).toContain('free-text response (no structured fields)');
+    // (No codebook.md in the public package since Nov 16, 2026: the research zip keeps it.)
+    expect(has('prompt/codebook.md')).toBe(false);
+    expect(await read('prompt/prompt.txt')).toBeTruthy();
     expect(readme).not.toContain('JSON schema the responses had to follow');
-    expect(readme).not.toContain('`codebook.json`');
-    expect(readme).toContain('| `prompt/codebook.md` | Says that the model returned free text: there were no fields and no output schema |');
+    expect(readme).not.toContain('codebook');
     // The research zip's prompt folder too.
     const { blob } = await buildResearchRepo(d, { includeLogs: false });
     const files = Object.keys((await JSZip.loadAsync(await blob.arrayBuffer())).files);
@@ -277,13 +278,14 @@ describe('a plain-text run’s package (G39)', () => {
     expect(files.some((f) => f.endsWith('prompts/v1/codebook.json') || f.endsWith('prompts/v1/output_schema.json'))).toBe(false);
   });
 
-  it('a structured run keeps its schema and codebook files', async () => {
+  it('a structured run keeps its schema file (codebook files: research zip only)', async () => {
     const docs = mkDocs(1);
     const run = mkRun('g39s', 1, ['d0'], { ...stancePrompt, includeRationale: true });
     const { meta, has, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results: [mkResult(run, docs[0], 1, { stance: 'for' })] }, run);
     expect(meta.prompt.rationale_requested).toBe(true);
-    // (codebook.json: in the research zip only, since Nov 16, 2026.)
-    expect(has('prompt/codebook.md') && has('prompt/output_schema.json') && !has('prompt/codebook.json')).toBe(true);
+    // (codebook.md and codebook.json: in the research zip only, since Nov 16, 2026.)
+    expect(has('prompt/output_schema.json') && !has('prompt/codebook.md') && !has('prompt/codebook.json')).toBe(true);
+    expect(readme).not.toContain('codebook');
     expect(readme).toContain('JSON schema the responses had to follow');
   });
 });
