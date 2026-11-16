@@ -70,8 +70,8 @@ Study:  {{STUDY_NAME}}
 Run:    {{RUN_DESCRIPTION}}{{FALLBACK_NOTE}}
 
 This script reproduces the requests sent in the run above: the same model,
-prompt, output schema and request settings. Values marked with {{...}} in
-annotate_template.py are inserted from the study.
+prompt, output schema and request settings, set under STUDY CONFIGURATION
+below.
 
 Usage
 -----
@@ -88,7 +88,7 @@ interrupted run, pass a CSV of the remaining texts and a new --out.
 
 Note: hosted models can change or be retired, and sampling is not fully
 deterministic, so re-running may not reproduce every label exactly. The
-original run's logs are the authoritative record.
+original run's results are the record of what the model returned.
 """
 
 import argparse
@@ -258,7 +258,7 @@ def as_text(v):
 
 
 def trim(s):
-    """Strip whitespace as the original run did (JavaScript's trim; Python's strip() keeps a byte-order mark, U+FEFF)."""
+    """Strip whitespace as the original run did, including a byte-order mark (U+FEFF), which Python's strip() keeps."""
     return s.strip(" \\t\\n\\v\\f\\r\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a"
                    "\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff")
 
@@ -275,7 +275,7 @@ def read_json(s):
 def parse_output(text):
     # As in the original run: a whole answer in a \`\`\`json fence is read without the fence.
     fenced = re.match(r"^\`\`\`(?:json)?\\s*([\\s\\S]*?)\\s*\`\`\`$", trim(text))
-    # trim() also inside the fence: JavaScript's \\s includes the byte-order mark, Python's doesn't.
+    # trim() also inside the fence, as the original run did (Python's \\s leaves out the byte-order mark).
     cleaned = trim(fenced.group(1)) if fenced else trim(text)
     if OUTPUT_SCHEMA is None:
         # As in the original run: an answer containing JSON ({"...) that can't be read counts as failed.
@@ -336,7 +336,7 @@ def make_client():
         return anthropic.Anthropic(max_retries=4)
     import openai
 
-    # 30 minutes rather than the SDK's 10, as on the site: a request that times out is sent again (and paid again).
+    # 30 minutes rather than the SDK's 10, as in the original run: a request that times out is sent again (and paid again).
     return openai.OpenAI(max_retries=4, timeout=1800)
 
 
@@ -392,7 +392,6 @@ def main():
                     text, summary, model, stop, usage, raw = call_model(client, body)
                     record["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
                     values, parse_error = parse_output(text)
-                    record.update({column_of.get(k, k): v for k, v in values.items()})
                     record.update(usage)
                     # As in the original run: a cut-off, refused, empty or unreadable answer counts as failed. A cut-off,
                     # refused or empty one is reported once, as such, not also as unreadable JSON.
@@ -401,7 +400,13 @@ def main():
                     problem = ("Empty response" if empty else "Incomplete answer") + f" (stop reason: {stop or 'none'})"
                     if incomplete or empty:
                         parse_error = ""
-                    record.update(status="error" if incomplete or empty or parse_error else "ok", parse_error=parse_error,
+                    failed = incomplete or empty or bool(parse_error)
+                    # As in the original results: a failed answer's values are left blank (the answer is in the log),
+                    # except a free-text answer.
+                    if failed:
+                        values = {"response": values["response"]} if OUTPUT_SCHEMA is None and "response" in values else {}
+                    record.update({column_of.get(k, k): v for k, v in values.items()})
+                    record.update(status="error" if failed else "ok", parse_error=parse_error,
                                   error=problem if incomplete or empty else "",
                                   model_reported=model, stop_reason=stop)
                     log.write(json.dumps({"doc_id": doc_id, "replicate": rep, "completed_at": record["completed_at"],

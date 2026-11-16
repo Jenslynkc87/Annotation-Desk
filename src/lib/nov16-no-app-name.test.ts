@@ -154,11 +154,12 @@ describe('the public package has no methods text, and no empty rationale column 
     const asked = { ...runs[0], snapshot: { ...runs[0].snapshot, prompt: { ...prompt, includeRationale: true } } };
     const rs = results.filter((r) => r.runId === asked.id).map((r) => ({ ...r, rationale: 'Short reason.' }));
     const { header, read } = await supp(asked, rs);
-    expect(header('results_by_replicate.csv')).toContain('rationale');
+    // (With one annotation per text, the answers, rationale too, are in results.csv only.)
     expect(header('results.csv')).toContain('rationale');
-    expect(read('results_by_replicate.csv')).toContain('Short reason.');
+    expect(read('results.csv')).toContain('Short reason.');
+    expect(header('results_by_replicate.csv')).not.toContain('rationale');
     // Unticked: left out.
-    expect((await supp(asked, rs, false)).header('results_by_replicate.csv')).not.toContain('rationale');
+    expect((await supp(asked, rs, false)).header('results.csv')).not.toContain('rationale');
   });
 
   it('the research zip’s table of all runs has the column only when some run asked for one, blank for the others', async () => {
@@ -188,10 +189,28 @@ describe('a lean public package (Nov 16, 2026)', () => {
   };
 
   it('results_by_replicate.csv: no column with one value for the whole run, none empty throughout; response_id kept', async () => {
-    const { header } = await build({ includeTexts: false, includeLogs: false });
-    expect(header('results_by_replicate.csv')).toEqual([
-      'model_reported', 'doc_id', 'replicate', 'status', 'tone', 'tone_explanation', 'stop_reason', 'input_tokens', 'output_tokens', 'requested_at', 'completed_at', 'response_id',
+    const { header, read } = await build({ includeTexts: false, includeLogs: false });
+    // One annotation per text: no replicate column, and the answers are in results.csv only (the README says so).
+    expect(header('results_by_replicate.csv')).toEqual(['doc_id', 'status', 'stop_reason', 'input_tokens', 'output_tokens', 'requested_at', 'completed_at', 'response_id']);
+    expect(read('README.md')).toContain('(the annotations are in `results.csv`)');
+    // Three annotations per text: the answers per request, and the replicate.
+    const three = { ...runs[0], snapshot: { ...runs[0].snapshot, options: { ...DEFAULT_RUN_OPTIONS, replicates: 3 } } };
+    const rs = docs.flatMap((d) => [1, 2, 3].map((rep) => ({ ...results[0], id: `${three.id}:${d.id}:${rep}`, docId: d.id, replicate: rep })));
+    const more = await build({ includeTexts: false, includeLogs: false }, three, rs);
+    expect(more.header('results_by_replicate.csv')).toEqual([
+      'doc_id', 'replicate', 'status', 'tone', 'tone_explanation', 'stop_reason', 'input_tokens', 'output_tokens', 'requested_at', 'completed_at', 'response_id',
     ]);
+    expect(more.read('README.md')).not.toContain('(the annotations are in');
+  });
+
+  it('metadata.json names the output schema instead of repeating it; codebook.md has no column-name column when it only repeats the field', async () => {
+    const { meta, read, files } = await build({ includeTexts: false, includeLogs: false });
+    expect(JSON.stringify(meta)).not.toContain('"properties"');
+    expect(read('codebook.md')!.split('\n').find((l) => l.startsWith('| Field'))).toBe('| Field | Type | Allowed values | Description |');
+    // No template script; annotate.py names neither a site nor a template.
+    expect([...files.keys()].some((n) => n.endsWith('annotate_template.py'))).toBe(false);
+    expect(read('README.md')).not.toContain('annotate_template');
+    expect(read('annotate.py')).not.toMatch(/the site|annotate_template|JavaScript/);
   });
 
   it('results.csv: no file column repeating doc_id, no n_ok or n_error; the metadata columns chosen', async () => {

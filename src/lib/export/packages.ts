@@ -546,8 +546,9 @@ async function promptFiles(zip: ZipFolder, run: Run, withCodebookJson = true) {
   if (withCodebookJson) await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
 }
 
-async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[]) {
-  await zip.file('annotate_template.py', SCRIPT_TEMPLATE);
+async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[], withTemplate = true) {
+  // (The template with {{PLACEHOLDERS}}, for reuse in another study: in the research zip only.)
+  if (withTemplate) await zip.file('annotate_template.py', SCRIPT_TEMPLATE);
   await zip.file('annotate.py', fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, exportedAt, runs)));
   await zip.file('requirements.txt', requirementsTxt(run));
 }
@@ -651,14 +652,19 @@ export async function buildSupplementary(data: ExportData, run: Run, opts: Suppl
   // Lean tables for a public archive (Nov 16, 2026): only the metadata columns chosen, no bookkeeping columns, no
   // column repeating one value that metadata.json gives once, none that is empty throughout.
   const keepMeta = publicMetaColumns(runDocs, opts.metaColumns);
-  await res.file('results.csv', () => toCsvBlobPaced(publicWide(run, resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales, meta: keepMeta }))));
-  await res.file('results_by_replicate.csv', () => toCsvBlobPaced(publicLong(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs))));
+  const wide = publicWide(run, resultsWide(run, runDocs, d.runs, d.results, { text: opts.includeTexts, rationale: opts.includeRationales, meta: keepMeta }));
+  await res.file('results.csv', () => toCsvBlobPaced(wide));
+  // (results.csv's answer columns: not its doc_id, text, counts or metadata.)
+  const metaNames = new Set(keepMeta.flatMap((c) => [c, `meta_${c}`]));
+  const answers = Object.keys(wide[0] ?? {}).filter((c) => !['doc_id', 'text', 'n_ok', 'n_error'].includes(c) && !metaNames.has(c));
+  const once = answersOnce(run, rs, runDocs);
+  await res.file('results_by_replicate.csv', () => toCsvBlobPaced(publicLong(resultsLong(d.study, [run], runDocs, rs, { rationale: opts.includeRationales, reasoning: false }, d.runs), run, once ? answers : [])));
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
   const [agr] = await agreement();
   if (agr.length) await res.file('agreement.csv', () => toCsvBlobPaced(agreementRows(agr, runName(run, d.runs))));
   if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(publicCorpus(corpusRows(runDocs, true, keepMeta), runDocs)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
-  await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
+  await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs, false);
   await root.file('README.md', () => supplementaryReadme(d, run, meta, agr, opts));
   return { blob: zip.blob(), name: `${name}.zip` };
 }
@@ -694,6 +700,14 @@ function dropBlankColumns(rows: Row[]): Row[] {
   return rows.map((r) => Object.fromEntries(keep.map((k) => [k, r[k]])));
 }
 
+/** Whether the public results_by_replicate.csv can leave the answers to results.csv: one annotation per text, and
+ *  every request's text in results.csv (`shown`; not so for texts deleted from the study since). */
+function answersOnce(run: Run, rs: Result[], shown: Doc[]): boolean {
+  if (run.snapshot.options.replicates !== 1) return false;
+  const ids = new Set(shown.map((x) => x.id));
+  return rs.every((r) => ids.has(r.docId));
+}
+
 /** One value on every row of a one-run table: metadata.json (the workbook: Settings) gives it once. (A field with such a name is answer_….) */
 const RUN_CONSTANTS = ['study', 'run', 'run_label', 'prompt_version', 'prompt_hash', 'provider', 'model_requested', 'latency_ms'];
 /** Left out when no row has a value (no error, no cache use, no reasoning tokens). */
@@ -701,9 +715,16 @@ const BLANK_UNLESS_USED = ['reasoning_summary', 'parse_error', 'error', 'reasoni
 
 /** results_by_replicate.csv of the public package, and the workbook's By replicate sheet, whose Settings sheet gives the
  *  run's constants (response_id is kept: it names each answer at the provider). */
-function publicLong(rows: Row[]): Row[] {
+function publicLong(rows: Row[], run?: Run, answersInResults: string[] = []): Row[] {
   const unused = BLANK_UNLESS_USED.filter((c) => rows.every((r) => r[c] === '' || r[c] === 0 || r[c] === null || r[c] === undefined));
   const drop = new Set([...RUN_CONSTANTS, ...unused]);
+  // Public package: the model reported one name throughout, which metadata.json gives. (Kept in the workbook, whose
+  // Settings sheet names only the model requested.)
+  if (run && rows.length && rows.every((r) => r.model_reported === rows[0].model_reported)) drop.add('model_reported');
+  // Public package, one annotation per text: no replicate column, and the answers only once, in results.csv
+  // (`answersInResults`, see answersOnce).
+  if (run?.snapshot.options.replicates === 1) drop.add('replicate');
+  for (const c of answersInResults) drop.add(c);
   return rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !drop.has(k))));
 }
 
@@ -854,12 +875,25 @@ function publicMetadata(meta: ReturnType<typeof supplementaryMetadata>) {
   const tied = corpus.n_texts_with_tied_votes ? nonZero(corpus.n_texts_with_tied_votes, []) : {};
   const lean: Record<string, unknown> = {
     ...rest,
+    request_settings: schemaByName(rest.request_settings),
     run: { ...runRest, ...(status_when_exported !== 'completed' ? { status_when_exported } : {}) },
     corpus: { ...nonZero({ ...corpus, n_texts_with_tied_votes: undefined }, ['n_texts_in_run', 'n_texts_with_usable_labels']), ...(Object.keys(tied).length ? { n_texts_with_tied_votes: tied } : {}) },
     requests: nonZero(requests, ['total', 'ok', 'failed', 'first_requested_at', 'last_completed_at']),
   };
   // (In the order of the full record: run, model, prompt, … as before.)
   return Object.fromEntries(Object.keys(meta).filter((k) => k in lean).map((k) => [k, lean[k]]));
+}
+
+/** The request settings with the output schema named, not repeated: prompt/output_schema.json holds it (Anthropic
+ *  output_config.format.schema, OpenAI text.format.schema). */
+function schemaByName(settings: unknown): unknown {
+  if (!settings || typeof settings !== 'object') return settings;
+  const copy = JSON.parse(JSON.stringify(settings)) as Record<string, Record<string, Record<string, unknown>> | undefined>;
+  for (const k of ['output_config', 'text']) {
+    const format = copy[k]?.format;
+    if (format && typeof format === 'object' && format.schema) format.schema = 'see prompt/output_schema.json';
+  }
+  return copy;
 }
 
 /** Did a majority vote tie (two or more values with the most votes)? Counted as aggregate() does ("Essay" = "essay"). */
@@ -979,7 +1013,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
       ? ['| `prompt/output_schema.json` | JSON schema the responses had to follow |', '| `prompt/codebook.md` | Annotation fields, types and allowed values |']
       : ['| `prompt/codebook.md` | Says that the model returned free text: there were no fields and no output schema |']),
     `| \`results/results.csv\` | One row per ${w.one}${opts.includeTexts ? ` (with ${w.one === 'entry' ? 'its details' : 'text'})` : ''}: metadata and annotations${run.snapshot.options.replicates > 1 ? ' (aggregated across replicates)' : ''} |`,
-    `| \`results/results_by_replicate.csv\` | One row per request, with status, tokens and timing${removed ? `; also the requests for the ${items(removed)} removed from the study since, marked “(deleted …)”` : ''} |`,
+    `| \`results/results_by_replicate.csv\` | One row per request, with status, tokens and timing${answersOnce(run, d.results.filter((r) => r.runId === run.id), d.docs) ? ' (the annotations are in `results.csv`)' : ''}${removed ? `; also the requests for the ${items(removed)} removed from the study since, marked “(deleted …)”` : ''} |`,
   );
   if (agr.length) lines.push('| `results/agreement.csv` | Agreement statistics |');
   if (opts.includeTexts) lines.push(`| \`data/corpus.csv\` | The annotated ${w.many} and their metadata |`);
@@ -991,7 +1025,6 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   }
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
-    '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
     '| `scripts/requirements.txt` | Python package the script needs (install with `pip install -r requirements.txt`) |',
     '',
     '## Reproducing',

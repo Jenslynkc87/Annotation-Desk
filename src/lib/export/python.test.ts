@@ -226,8 +226,10 @@ describe('exported script', () => {
       expect(rows.map((r) => [r.status, r.parse_error, r.error])).toEqual(cases.map((c) => c[1]));
       for (const [i, [[answer, stop]]] of cases.entries()) {
         const parsed = parseModelOutput(answer, prompt);
-        // The labels are read as the app reads them (also from answers that count as failed).
-        for (const [k, v] of Object.entries(parsed.values)) expect(rows[i][k]).toBe(v);
+        // The labels are read as the app reads them. A failed answer's values are left blank, as in the app's
+        // per-request tables (a free-text answer is kept); the answer itself is in the log.
+        const failed = rows[i].status === 'error';
+        for (const [k, v] of Object.entries(parsed.values)) expect(rows[i][k] ?? '').toBe(failed && k !== 'response' ? '' : v);
         if (answer.trim() && ['end_turn', 'stop_sequence', 'completed'].includes(stop)) expect(rows[i].parse_error).toBe(parsed.parseError ?? '');
       }
       // results.csv has a byte-order mark, as the app's CSVs do, so Excel reads æøå correctly.

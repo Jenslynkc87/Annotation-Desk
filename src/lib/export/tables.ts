@@ -687,11 +687,19 @@ export function cachingLabel(run: Run): string {
 export function codebookMarkdown(run: Run): string {
   const p = run.snapshot.prompt;
   if (p.outputMode !== 'structured') return '# Codebook\n\nThe model was asked for a free-text response (no structured fields).\n';
-  const lines = ['# Codebook', '', 'Fields the model was required to return (enforced with a JSON schema; see `output_schema.json`).', '', '| Field | Column name | Type | Allowed values | Description |', '|---|---|---|---|---|'];
   const esc = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-  if (p.includeRationale) lines.push('| Rationale | rationale | free text | | Brief justification, generated before the labels |');
-  // (A field named like one of the tables' own columns, e.g. status, is exported as answer_status.)
-  for (const v of p.variables) lines.push(`| ${esc(v.label?.trim() || v.name)} | ${answerColumn(v.name)} | ${v.type} | ${esc(v.values.filter((x) => x.trim()).join(', '))} | ${esc(v.description)} |`);
+  // [field, column name, type, allowed values, description]. (A field named like one of the tables' own columns, e.g.
+  // status, is exported as answer_status.)
+  const rows: string[][] = [
+    ...(p.includeRationale ? [['rationale', 'rationale', 'free text', '', 'Brief justification, generated before the labels']] : []),
+    ...p.variables.map((v) => [esc(v.label?.trim() || v.name), answerColumn(v.name), v.type, esc(v.values.filter((x) => x.trim()).join(', ')), esc(v.description)]),
+  ];
+  // The column name only where some field's differs from its name.
+  const named = rows.some((r) => r[0] !== r[1]);
+  const shown = rows.map((r) => (named ? r : [r[0], ...r.slice(2)]));
+  const head = named ? ['Field', 'Column name', 'Type', 'Allowed values', 'Description'] : ['Field', 'Type', 'Allowed values', 'Description'];
+  const line = (cells: string[]) => `| ${cells.join(' | ')} |`;
+  const lines = ['# Codebook', '', 'Fields the model was required to return (enforced with a JSON schema; see `output_schema.json`).', '', line(head), line(head.map(() => '---')), ...shown.map(line)];
   return lines.join('\n') + '\n';
 }
 
