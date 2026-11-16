@@ -207,10 +207,10 @@ describe('a lean public package (Nov 16, 2026)', () => {
     const { meta, read, files } = await build({ includeTexts: false, includeLogs: false });
     expect(JSON.stringify(meta)).not.toContain('"properties"');
     expect(read('codebook.md')!.split('\n').find((l) => l.startsWith('| Field'))).toBe('| Field | Type | Allowed values | Description |');
-    // No template script; annotate.py names neither a site nor a template.
-    expect([...files.keys()].some((n) => n.endsWith('annotate_template.py'))).toBe(false);
-    expect(read('README.md')).not.toContain('annotate_template');
-    expect(read('annotate.py')).not.toMatch(/the site|annotate_template|JavaScript/);
+    // The template script is kept (the owner asked for it); neither script mentions a site.
+    expect([...files.keys()].some((n) => n.endsWith('annotate_template.py'))).toBe(true);
+    expect(read('README.md')).toContain('annotate_template.py');
+    for (const f of ['annotate.py', 'annotate_template.py']) expect(read(f)).not.toMatch(/the site|JavaScript/);
   });
 
   it('results.csv: no file column repeating doc_id, no n_ok or n_error; the metadata columns chosen', async () => {

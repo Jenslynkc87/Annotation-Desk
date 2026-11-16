@@ -546,9 +546,9 @@ async function promptFiles(zip: ZipFolder, run: Run, withCodebookJson = true) {
   if (withCodebookJson) await zip.file('codebook.json', JSON.stringify({ outputMode: p.outputMode, includeRationale: p.includeRationale, variables: p.variables }, null, 2));
 }
 
-async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[], withTemplate = true) {
-  // (The template with {{PLACEHOLDERS}}, for reuse in another study: in the research zip only.)
-  if (withTemplate) await zip.file('annotate_template.py', SCRIPT_TEMPLATE);
+async function scriptFiles(zip: ZipFolder, study: Study, run: Run, exportedAt: string, runs: Run[]) {
+  // (The template with {{PLACEHOLDERS}} goes into the public package too: the owner asked for it, Oct 2026.)
+  await zip.file('annotate_template.py', SCRIPT_TEMPLATE);
   await zip.file('annotate.py', fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, exportedAt, runs)));
   await zip.file('requirements.txt', requirementsTxt(run));
 }
@@ -664,7 +664,7 @@ export async function buildSupplementary(data: ExportData, run: Run, opts: Suppl
   if (agr.length) await res.file('agreement.csv', () => toCsvBlobPaced(agreementRows(agr, runName(run, d.runs))));
   if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(publicCorpus(corpusRows(runDocs, true, keepMeta), runDocs)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
-  await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs, false);
+  await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
   await root.file('README.md', () => supplementaryReadme(d, run, meta, agr, opts));
   return { blob: zip.blob(), name: `${name}.zip` };
 }
@@ -1025,6 +1025,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   }
   lines.push(
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
+    '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
     '| `scripts/requirements.txt` | Python package the script needs (install with `pip install -r requirements.txt`) |',
     '',
     '## Reproducing',

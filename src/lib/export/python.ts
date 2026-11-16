@@ -70,8 +70,8 @@ Study:  {{STUDY_NAME}}
 Run:    {{RUN_DESCRIPTION}}{{FALLBACK_NOTE}}
 
 This script reproduces the requests sent in the run above: the same model,
-prompt, output schema and request settings, set under STUDY CONFIGURATION
-below.
+prompt, output schema and request settings. Values marked with {{...}} in
+annotate_template.py are inserted from the study.
 
 Usage
 -----
