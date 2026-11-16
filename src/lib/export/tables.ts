@@ -185,6 +185,9 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
   const isText = (r: Result) => runById.get(r.runId)?.snapshot.prompt.outputMode === 'text';
   const textRun = runs.find((run) => run.snapshot.prompt.outputMode === 'text');
   const jsonKeys = textRun ? jsonKeyOrder(textRun, sorted.filter(isText).map((r) => r.values[TEXT_RESPONSE_KEY])) : [];
+  // A rationale column only when a run asked for one (Short rationale on, structured output): never an empty column.
+  const asked = (run: Run) => run.snapshot.prompt.outputMode === 'structured' && run.snapshot.prompt.includeRationale;
+  const withRationale = opts.rationale && runs.some(asked);
   for (const r of sorted) {
     const run = runById.get(r.runId);
     if (!run) continue;
@@ -210,7 +213,7 @@ export function resultsLong(study: Study, runs: Run[], docs: Doc[], results: Res
       row[fieldColumn(run, f)] = !keep ? '' : isNumericVar(run, f) ? numify(r.values[f]) : (r.values[f] ?? '');
     }
     if (isText(r)) Object.assign(row, jsonColumns(jsonKeys, usable ? r.values[TEXT_RESPONSE_KEY] : undefined));
-    if (opts.rationale) row.rationale = usable ? r.rationale : '';
+    if (withRationale) row.rationale = usable && asked(run) ? r.rationale : '';
     if (opts.reasoning) row.reasoning_summary = r.reasoningSummary;
     Object.assign(row, {
       parse_error: r.parseError ?? '',

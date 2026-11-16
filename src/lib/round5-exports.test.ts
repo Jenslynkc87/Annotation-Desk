@@ -128,7 +128,6 @@ describe('a batch Retry failed of the October 18–20 builds (H11)', () => {
     const { blob } = await buildSupplementary({ study: mkStudy(), docs, runs: [run], results }, run, { includeTexts: false, includeRationales: false, includeLogs: false });
     const { read } = await unzip(blob);
     const readme = await read('README.md');
-    expect(readme).toContain('5 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch.');
     expect(readme).not.toContain('not known');
     expect(JSON.parse(await read('metadata.json')).requests.retried).toBe(5);
   });
@@ -273,35 +272,3 @@ describe('logs and Cancel (H20)', () => {
   });
 });
 
-describe('methods text: retry notes in one parenthesis (H28)', () => {
-  const docs = mkDocs(8);
-  const methodsOf = async (run: Run) => {
-    const results = docs.map((d, i) => mkResult(run, d, i < 6 ? { stance: 'for' } : null));
-    const { read } = await unzip((await buildSupplementary({ study: mkStudy(), docs, runs: [run], results }, run, { includeTexts: false, includeRationales: false, includeLogs: false })).blob);
-    return (await read('README.md')).split('\n').find((l) => l.startsWith('> '))!.slice(2);
-  };
-
-  it('an interrupted retry and one stopped by Cancel', async () => {
-    const run = mkRun('h28', 1, docs.map((d) => d.id), {
-      retries: [
-        { at: '2026-10-01T10:30:00.000Z', requests: 6, counted: 'sent', unanswered: 4 },
-        { at: '2026-10-01T10:40:00.000Z', requests: 12, counted: 'sent', interrupted: true },
-      ],
-    });
-    const methods = await methodsOf(run);
-    expect(methods).toContain(
-      'At least 18 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings (a retry was interrupted by the page closing: requests under way then got no recorded answer and are not counted; another retry was stopped while 4 of them were under way: they got no recorded answer); after this,',
-    );
-    expect(methods).not.toContain(') (');
-  });
-
-  it('two retries stopped by Cancel', async () => {
-    const run = mkRun('h28b', 1, docs.map((d) => d.id), {
-      retries: [
-        { at: '2026-10-01T10:30:00.000Z', requests: 6, counted: 'sent', unanswered: 4 },
-        { at: '2026-10-01T10:40:00.000Z', requests: 5, counted: 'sent', unanswered: 3 },
-      ],
-    });
-    expect(await methodsOf(run)).toContain('were sent again with identical settings (2 retries were stopped while 7 of them were under way: they got no recorded answer); after this,');
-  });
-});

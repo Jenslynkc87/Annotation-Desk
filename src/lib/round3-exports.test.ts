@@ -1,4 +1,4 @@
-// Third review round: exports, methods text and backup (verification of October 23, 2026).
+// Third review round: exports text and backup (verification of October 23, 2026).
 import 'fake-indexeddb/auto';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
@@ -40,9 +40,9 @@ async function supplementary(d: ExportData, run: Run, includeLogs = false) {
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
   const readme = await read('README.md');
-  const methods = readme.split('\n').find((l) => l.startsWith('> '))!.slice(2);
+  expect(readme).not.toContain('Methods text');
   const meta = JSON.parse(await read('metadata.json'));
-  return { zip, read, readme, methods, meta };
+  return { zip, read, readme, meta };
 }
 
 async function workbook(blob: Blob) {
@@ -73,11 +73,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
   it('reports the requests counted from the stored answers, as a lower bound, and says why', async () => {
     const run = legacy();
     const results = legacyResults(run);
-    const { methods, meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).not.toContain('60 requests');
-    expect(methods).toContain(
-      'At least 3 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings (counted from the stored answers: the app version used for the run recorded only the number planned for the retry made with it, 60); after this, 3 of 3 requests did not return a usable annotation',
-    );
+    const { meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests.retried).toBe(3);
     expect(meta.requests.retried_note).toContain('recorded for Retry failed only the number of requests planned (60)');
     expect(meta.tokens.note).toContain('token counts (which may be too low)');
@@ -96,9 +92,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     run.error = null;
     // Every request answered again; three of them replaced the old retry's answers (attempt 2).
     const results = docs.flatMap((d, i) => [1, 2, 3].map((rep) => mkResult(run, d, rep, { stance: 'for' }, { requestedAt: '2026-10-23T10:20:07.300Z', ...(i === 0 ? { attempt: 2, replacedUsage: usage } : {}) })));
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('At least 60 requests without a usable answer');
-    expect(methods).not.toContain('120 requests');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests).toMatchObject({ retried: 60, replaced_by_retries: 3 });
     // (The old retry's own answers were all replaced, before their request times were kept on the results (round
     // four, G22): its number is not known, only the total's lower bound.)
@@ -118,9 +112,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     run.error = null;
     run.retries = [{ at: retryAt, requests: 3 }];
     const results = legacyResults(run).map((r) => ({ ...r, status: 'ok' as const, values: { stance: 'for' }, error: null, stopReason: 'end_turn', rawText: '{}' }));
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs: docs.slice(0, 1), runs: [{ ...run, docIds: ['d0'] }], results }, { ...run, docIds: ['d0'] });
-    expect(methods).toContain('3 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings.');
-    expect(methods).not.toContain('At least');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs: docs.slice(0, 1), runs: [{ ...run, docIds: ['d0'] }], results }, { ...run, docIds: ['d0'] });
     expect(meta.requests.retried_note).toBeUndefined();
     // (Their earlier, failed attempts were overwritten by that version: the tokens may be too low.)
     expect(meta.tokens.note).toBeDefined();
@@ -133,31 +125,14 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
   });
 });
 
-describe('methods text: order and gaps (F46, F71, F93)', () => {
-  it('the retry comes before the failures that are left after it (F46)', async () => {
-    const docs = mkDocs(40);
-    const at = '2026-10-02T09:00:00.000Z';
-    const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { retries: [{ at, requests: 30, counted: 'sent' }] });
-    const results = docs.map((d, i) => mkResult(run, d, 1, i < 26 ? null : { stance: 'for' }));
-    const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain(
-      '30 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings; after this, 26 of 40 requests did not return a usable annotation',
-    );
-    expect(methods).not.toContain('then sent');
-    expect(methods.indexOf('sent again')).toBeLessThan(methods.indexOf('did not return'));
-  });
+describe('supplementary package: retries and gaps (F46, F71, F93)', () => {
 
   it('a cancelled run with replicates: texts with only some of their annotations are reported (F71, F93)', async () => {
     const docs = mkDocs(10);
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled' }, 3);
     // 5 texts complete, the 6th with 1 of 3, the rest never sent.
     const results = [...docs.slice(0, 5).flatMap((d) => [1, 2, 3].map((rep) => mkResult(run, d, rep, { stance: 'for' }))), mkResult(run, docs[5], 1, { stance: 'for' })];
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).not.toContain('Each text was annotated 3 times');
-    expect(methods).toContain(
-      'Each text was to be annotated 3 times, but for 1 text, 2 of its annotations have no answer recorded (not sent, or the run stopped before an answer arrived), so its labels combine fewer answers;',
-    );
-    expect(methods).toContain('4 texts in the run have no answer recorded (not sent, or the run stopped before an answer arrived; the run was cancelled).');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.corpus.n_texts_partly_annotated).toBe(1);
     expect(meta.requests.without_result_for_partly_annotated_texts).toBe(2);
   });
@@ -175,14 +150,13 @@ describe('exports during Retry failed (F84, F91)', () => {
       i < 2 ? mkResult(run, d, 1, { stance: 'for' }, { requestedAt: '2026-10-02T09:00:01.000Z', attempt: 2, replacedUsage: { ...usage, inputTokens: 100 } }) : mkResult(run, d, 1, null),
     );
     const d: ExportData = { study: mkStudy(stancePrompt), docs, runs: [run], results };
-    const { meta, readme, methods } = await supplementary(d, run);
+    const { meta, readme } = await supplementary(d, run);
     expect(meta.requests.replaced_by_retries).toBe(2);
     expect(meta.tokens.input).toBe(4 * 10 + 2 * 100);
     expect(meta.run.finished_at).toBeNull();
     expect(meta.run.retry_in_progress).toBe(true);
     expect(meta.requests.retried).toBe(2);
     expect(readme).toContain('(Retry failed was still sending requests): they describe the results so far.');
-    expect(methods).toContain('2 requests without a usable answer');
     const book = await workbook(await buildExcel(d, run, { text: false, rationale: false }));
     expect(book('Settings').find((r) => r.setting === 'Finished')!.value).toBe('not finished when exported (Retry failed was still sending; the results so far)');
     const all = book('All runs')[0];
@@ -324,16 +298,12 @@ describe('review of the round-three export fixes', () => {
     // One answer of the retry is in; two requests still fail so far.
     let run = running(0);
     let results = docs.map((d, i) => (i === 0 ? mkResult(run, d, 1, { stance: 'for' }, { requestedAt: '2026-10-02T09:00:01.000Z', attempt: 2 }) : i === 3 ? mkResult(run, d, 1, { stance: 'for' }) : mkResult(run, d, 1, null)));
-    let { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('1 request without a usable answer (failed, or not sent before the run was stopped) was sent again with identical settings, and the retry was still under way when this was exported; so far, 2 of 4 requests did not return a usable annotation');
-    expect(methods).not.toContain('after this');
+    let { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.run.retry_in_progress).toBe(true);
     // No answer to the retry yet.
     run = running(0);
     results = docs.map((d, i) => (i === 3 ? mkResult(run, d, 1, { stance: 'for' }) : mkResult(run, d, 1, null)));
-    ({ methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run));
-    expect(methods).toContain('Requests without a usable answer (failed, or not sent before the run was stopped) were being sent again with identical settings when this was exported; so far, 3 of 4 requests');
-    expect(methods).not.toContain('0 requests');
+    await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
   });
 
   it('a retry batch not back yet: the same, and Excel gives no finish time', async () => {
@@ -341,22 +311,11 @@ describe('review of the round-three export fixes', () => {
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { mode: 'batch', status: 'submitted', finishedAt: null, retries: [{ at: '2026-10-02T09:00:00.000Z', requests: 2, asBatch: true, counted: 'sent' }] });
     const results = docs.map((d, i) => mkResult(run, d, 1, i < 2 ? null : { stance: 'for' }));
     const d: ExportData = { study: mkStudy(stancePrompt), docs, runs: [run], results };
-    const { methods, meta, readme } = await supplementary(d, run);
-    expect(methods).toContain('2 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch, and the retry was still under way when this was exported; so far, 2 of 4 requests did not return');
+    const { meta, readme } = await supplementary(d, run);
     expect(meta.run).toMatchObject({ finished_at: null, retry_in_progress: true });
     expect(readme).toContain('(its batch was still being processed)');
     const book = await workbook(await buildExcel(d, run, { text: false, rationale: false }));
     expect(book('Settings').find((r) => r.setting === 'Finished')!.value).toBe('not finished when exported (the results so far)');
-  });
-
-  it('texts with only some of their annotations, in a run that was not stopped: no claim that it stopped (F71)', async () => {
-    const docs = mkDocs(3);
-    const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { mode: 'batch' }, 3);
-    // The batch came back without one request's result.
-    const results = docs.flatMap((d, i) => [1, 2, 3].filter((rep) => !(i === 2 && rep === 3)).map((rep) => mkResult(run, d, rep, { stance: 'for' })));
-    const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('Each text was to be annotated 3 times, but for 1 text, 1 of its annotations has no result, so its labels combine fewer answers;');
-    expect(methods).not.toContain('the run stopped');
   });
 
   it('runs that share a number: their own results_long.csv names them as runs.csv does, and their rows are not mixed (F85)', async () => {
@@ -390,9 +349,7 @@ describe('an interrupted retry (lead, round three)', () => {
     const run = mkRun('i1', 1, docs.map((d) => d.id), stancePrompt, { retries: [{ at: retryAt, requests: 4, counted: 'sent', interrupted: true }] });
     const results = docs.map((d, i) => mkResult(run, d, 1, { stance: 'for' }, i < 4 ? { requestedAt: '2026-10-23T10:19:01.000Z', attempt: 2, replacedUsage: usage } : {}));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 4, interrupted: true, lowerBound: false });
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('At least 4 requests without a usable answer');
-    expect(methods).toContain('a retry was interrupted by the page closing');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests.retried_note).toContain(`up to ${DEFAULT_RUN_OPTIONS.concurrency} more may have been sent`);
     const [row] = runSummaryRows([run], results);
     expect(String(row.notes)).toContain('was interrupted');

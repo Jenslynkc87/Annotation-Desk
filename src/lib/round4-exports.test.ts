@@ -43,9 +43,9 @@ async function supplementary(d: ExportData, run: Run, includeLogs = false) {
   const has = (suffix: string) => Object.keys(zip.files).some((k) => k.endsWith(suffix));
   const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
   const readme = await read('README.md');
-  const methods = readme.split('\n').find((l) => l.startsWith('> '))!.slice(2);
+  expect(readme).not.toContain('Methods text');
   const meta = JSON.parse(await read('metadata.json'));
-  return { zip, has, read, readme, methods, meta };
+  return { zip, has, read, readme, meta };
 }
 
 async function workbook(blob: Blob) {
@@ -84,10 +84,7 @@ describe('a published-version batch retry with a group never uploaded (G0, G2)',
     // d0–d3 re-sent in the batch that went up (their answers take its upload time); d4, d5 still failed from before.
     const results = docs.map((d, i) => (i < 4 ? mkResult(run, d, 1, { stance: 'for' }, { requestedAt: t1 }) : mkResult(run, d, 1, null, { requestedAt: t0 })));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 4, lowerBound: true, planned: 6, legacySent: 4, tokensIncomplete: true, asBatch: 'all' });
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain(
-      'At least 4 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch (counted from the stored answers: the app version used for the run recorded only the number planned for the retry made with it, 6)',
-    );
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests.retried).toBe(4);
     expect(meta.requests.retried_note).toContain('recorded for Retry failed only the number of requests planned (6), not the number sent: counted from the stored answers, at least 4 were sent');
     const [row] = runSummaryRows([run], results);
@@ -98,9 +95,7 @@ describe('a published-version batch retry with a group never uploaded (G0, G2)',
     const run = legacyBatch();
     const results = docs.map((d) => mkResult(run, d, 1, { stance: 'for' }, { requestedAt: t1 }));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 6, lowerBound: false, planned: 6 });
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('6 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch.');
-    expect(methods).not.toContain('At least');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests.retried_note).toBeUndefined();
   });
 
@@ -109,11 +104,7 @@ describe('a published-version batch retry with a group never uploaded (G0, G2)',
     run.batch!.parts![1].status = 'submitted';
     const results = docs.map((d) => mkResult(run, d, 1, null, { requestedAt: t0 }));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 0, lowerBound: true, planned: 6 });
-    const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain(
-      'Requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch (how many is not known: the app version used for the run recorded only the number planned for the retry made with it, 6, and no stored answer dates from it), and the retry was still under way when this was exported',
-    );
-    expect(methods).not.toContain('6 requests without');
+    await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
   });
 });
 
@@ -140,9 +131,7 @@ describe('a published-version retry whose answers a later retry replaced (G22)',
     expect(results[0]).toMatchObject({ attempt: 2, replacedAt: ['2026-10-20T10:00:01.000Z'] });
     expect(retryCounts(run, results).map((c) => c.requests)).toEqual([3, 3]);
     expect(retriedRequests(run, results)).toMatchObject({ requests: 6, lowerBound: false });
-    const { methods, meta } = await supplementary({ study, docs, runs: [run], results }, run);
-    expect(methods).toContain('6 requests without a usable answer');
-    expect(methods).not.toContain('At least');
+    const { meta } = await supplementary({ study, docs, runs: [run], results }, run);
     expect(meta.requests.retried_note).toBeUndefined();
   });
 
@@ -176,17 +165,14 @@ describe('responses.jsonl: a replaced attempt that could not be read (G23)', () 
   });
 });
 
-describe('methods text: texts with only some annotations (G26)', () => {
+describe('supplementary package: texts with only some annotations (G26)', () => {
   it('a text whose only answer failed is not described as labelled with fewer answers', async () => {
     const docs = mkDocs(6);
     const run = mkRun('g26', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled' }, 3);
     // 5 texts complete; the 6th has 1 of 3 annotations, and it failed.
     const results = [...docs.slice(0, 5).flatMap((d) => [1, 2, 3].map((rep) => mkResult(run, d, rep, { stance: 'for' }))), mkResult(run, docs[5], 1, null)];
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.corpus.n_texts_partly_annotated).toBe(0);
-    expect(methods).toContain('Each text was annotated 3 times');
-    expect(methods).not.toContain('labels combine fewer answers');
-    expect(methods).toContain('leaving 1 text without a label');
   });
 
   it('nor a plain-text text whose only answer gave no scores', async () => {
@@ -194,18 +180,16 @@ describe('methods text: texts with only some annotations (G26)', () => {
     const run = mkRun('g26b', 1, docs.map((d) => d.id), plainPrompt, { status: 'cancelled' }, 3);
     const json = (x: number) => ({ response: JSON.stringify({ tone: x, explanation: 'e' }) });
     const results = [...docs.slice(0, 2).flatMap((d) => [1, 2, 3].map((rep) => mkResult(run, d, rep, json(rep - 1)))), mkResult(run, docs[2], 1, { response: 'In prose.' })];
-    const { methods, meta } = await supplementary({ study: mkStudy(plainPrompt), docs, runs: [run], results }, run);
+    const { meta } = await supplementary({ study: mkStudy(plainPrompt), docs, runs: [run], results }, run);
     expect(meta.corpus.n_texts_partly_annotated).toBe(0);
-    expect(methods).not.toContain('labels combine fewer answers');
   });
 
   it('a labelled text with fewer answers still is', async () => {
     const docs = mkDocs(2);
     const run = mkRun('g26c', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled' }, 3);
     const results = [...[1, 2, 3].map((rep) => mkResult(run, docs[0], rep, { stance: 'for' })), mkResult(run, docs[1], 1, { stance: 'for' }), mkResult(run, docs[1], 2, null)];
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.corpus.n_texts_partly_annotated).toBe(1);
-    expect(methods).toContain('for 1 text, 1 of its annotations has no answer recorded');
   });
 });
 
@@ -310,23 +294,12 @@ describe('a retry stopped while requests were under way (F93)', () => {
     const run = mkRun('f93', 1, docs.map((d) => d.id), stancePrompt, { retries: [{ at, requests: 6, counted: 'sent', unanswered: 4 }] });
     const results = docs.map((d, i) => (i < 2 ? mkResult(run, d, 1, { stance: 'for' }, { requestedAt: '2026-10-02T09:00:01.000Z', attempt: 2, replacedUsage: usage }) : mkResult(run, d, 1, null)));
     expect(retriedRequests(run, results)).toMatchObject({ requests: 6, unanswered: 4, lowerBound: false });
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain(
-      '6 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings (a retry was stopped while 4 of them were under way: they got no recorded answer); after this, 6 of 8 requests did not return',
-    );
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.requests.retried).toBe(6);
     expect(meta.requests.retried_note).toContain('4 requests sent by Retry failed were stopped (Cancel, or a result that could not be saved) before their answers were stored');
     expect(meta.tokens.note).toContain('their token use (if any) is not in the token counts');
     const [row] = runSummaryRows([run], results);
     expect(String(row.notes)).toContain('4 requests sent by Retry failed were stopped');
-  });
-
-  it('a retry interrupted by the page closing before any answer is still mentioned', async () => {
-    const docs = mkDocs(2);
-    const run = mkRun('f93b', 1, docs.map((d) => d.id), stancePrompt, { retries: [{ at: '2026-10-02T09:00:00.000Z', requests: 0, counted: 'sent', interrupted: true }] });
-    const results = docs.map((d) => mkResult(run, d, 1, null));
-    const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('Requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings (a retry was interrupted by the page closing');
   });
 });
 
@@ -372,8 +345,7 @@ describe('review: published-version retries and stopped requests', () => {
       results.push(now);
     }
     expect(retriedRequests(run, results)).toMatchObject({ requests: 3, lowerBound: false, tokensIncomplete: false });
-    const { methods, meta } = await supplementary({ study, docs, runs: [run], results }, run);
-    expect(methods).toContain('3 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch.');
+    const { meta } = await supplementary({ study, docs, runs: [run], results }, run);
     expect(meta.requests.retried_note).toBeUndefined();
     expect(meta.tokens.note).toBeUndefined();
     expect(meta.requests.replaced_by_retries).toBe(3);

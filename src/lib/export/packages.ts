@@ -7,7 +7,7 @@ import { agreement, BOOTSTRAP_RESAMPLES, type Agreement, type CiStat } from '../
 import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY } from '../prompt';
 import { buildDocViews, offScaleLeftOut, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, runOrder, type RetriedRequests } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
-import { isEntries, words } from '../subject';
+import { words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
 import { dateStamp, nowIso, slug, yieldToPage } from '../util';
 import { buildBackup } from './backup';
@@ -792,144 +792,6 @@ function isTie(values: string[]): boolean {
   return [...counts.values()].filter((c) => c === max).length > 1;
 }
 
-function methodsParagraph(run: Run, meta: ReturnType<typeof supplementaryMetadata>, retry: RetriedRequests): string {
-  const m = run.snapshot.model;
-  const { total, failed } = meta.requests;
-  const c = meta.corpus;
-  const noScores = c.n_texts_answer_without_scores ?? 0;
-  const withoutScores = meta.requests.answers_without_scores ?? 0;
-  const offScale = meta.requests.scores_off_scale_left_out_when_combined ?? 0;
-  const removed = c.n_texts_removed_from_study_since;
-  const cached = meta.tokens.cache_read + meta.tokens.cache_write > 0;
-  const reps = run.snapshot.options.replicates;
-  const dates = [meta.requests.first_requested_at, meta.requests.last_completed_at].filter(Boolean).map((x) => x!.slice(0, 10));
-  const period = dates.length ? (dates.length < 2 || dates[0] === dates[1] ? `on ${dates[0]}` : `between ${dates[0]} and ${dates[1]}`) : '';
-  const effortName = m.provider === 'anthropic' ? 'effort' : 'reasoning effort';
-  const settings = [
-    m.effort ? `${effortName} "${m.effort}"` : `the provider's default ${effortName} (not set explicitly)`,
-    m.temperature !== null ? `temperature ${m.temperature}` : null,
-    `a maximum of ${m.maxOutputTokens.toLocaleString('en-US')} output tokens`,
-  ].filter((x): x is string => !!x);
-  const w = words(run.snapshot.prompt);
-  const settingsText = settings.length > 1 ? `${settings.slice(0, -1).join(', ')} and ${settings[settings.length - 1]}` : settings[0];
-  const n = (k: number) => k.toLocaleString('en-US');
-  const items = (k: number) => `${n(k)} ${k === 1 ? w.one : w.many}`;
-  const was = (k: number) => (k === 1 ? 'was' : 'were');
-  const have = (k: number) => (k === 1 ? 'has' : 'have');
-  const inProgress = runInProgress(run);
-  // A tied majority vote keeps both labels ("a | b"): it matches no single label, so it counts as a disagreement.
-  const tied = Object.entries(c.n_texts_with_tied_votes ?? {}).filter(([, k]) => k > 0);
-  const label = (name: string) => run.snapshot.prompt.variables.find((v) => v.name === name)?.label?.trim() || name;
-  const ties = c.n_texts_with_tied_votes
-    ? ` A tied vote is kept as both labels (e.g. “a | b”) and counts as a disagreement in the agreement figures${tied.length ? ` (${tied.map(([f, k], i) => `${i ? n(k) : items(k)} for ${label(f)}`).join(', ')})` : '; no vote was tied'}.`
-    : '';
-  // Texts with results for only some of their annotations (e.g. the run stopped part way through them): their labels
-  // combine fewer answers. Only an immediate run that stopped can have sent requests without recording an answer.
-  const partly = c.n_texts_partly_annotated ?? 0;
-  const missing = meta.requests.without_result_for_partly_annotated_texts ?? 0;
-  // A run left "running" by a closed or reloaded page is stored as cancelled, with an error saying it was interrupted.
-  const stopped = run.status === 'cancelled' ? (/^Interrupted\b/.test(run.error ?? '') ? 'interrupted' : 'cancelled') : run.status === 'failed' ? 'stopped' : '';
-  const noAnswer = inProgress
-    ? 'no result yet'
-    : stopped && run.mode !== 'batch'
-      ? 'no answer recorded (not sent, or the run stopped before an answer arrived)'
-      : 'no result';
-  const annotated = partly
-    ? `Each ${w.one} was to be annotated ${reps} times, but for ${items(partly)}, ${n(missing)} of ${partly === 1 ? 'its' : 'their'} annotations ${have(missing)} ${noAnswer}, so ${partly === 1 ? 'its labels combine' : 'their labels combine'} fewer answers`
-    : `Each ${w.one} was annotated ${reps} times`;
-  // The run's texts without a label, by cause; the total once at the end when there is more than one cause.
-  const allFailed = c.n_texts_all_requests_failed;
-  const notSent = c.n_texts_without_results;
-  const unlabelled = c.n_texts_in_run - c.n_texts_with_usable_labels;
-  // (Requests under way when an immediate run stopped may have been sent: no answer was recorded for them.)
-  const notSentText = inProgress
-    ? `${items(notSent)} in the run had no result yet (the run was not finished when this was exported).`
-    : stopped
-      ? run.mode === 'batch'
-        ? `${items(notSent)} in the run ${have(notSent)} no result (the run was ${stopped}).`
-        : `${items(notSent)} in the run ${have(notSent)} no answer recorded (not sent, or the run stopped before an answer arrived; the run was ${stopped}).`
-      : `No answer was received for ${items(notSent)} in the run.`;
-  const causes = [allFailed, noScores, notSent].filter((k) => k > 0).length;
-  const failedText = failed
-    ? `${n(failed)} of ${n(total)} request${total === 1 ? '' : 's'} did not return a usable annotation (an API error, a refusal or an answer that could not be read) and ${was(failed)} excluded${allFailed ? `, leaving ${items(allFailed)} without a label` : ''}`
-    : '';
-  // "Retry failed" first, then what failed after it (the counts above are those after every retry; with a retry still
-  // under way, those so far). Retries by versions that recorded only the number planned: the requests counted from
-  // the stored answers, a lower bound.
-  const k = retry.requests;
-  const retrying = retryUnderWay(run);
-  const retriedAs =
-    run.mode !== 'batch' ? '' : retry.asBatch === 'all' ? ' in a new batch' : retry.asBatch === 'none' ? ' as individual requests' : ', individually or in a new batch';
-  const howMany = !retry.lowerBound && !retry.interrupted ? `${n(k)} request${k === 1 ? '' : 's'}` : k ? `At least ${n(k)} request${k === 1 ? '' : 's'}` : 'Requests';
-  // Each retry's count by its kind: from the stored answers (a version that recorded only the number planned), or the
-  // number recorded (an Oct 18–20 batch retry, whose answers are dated at the run's start).
-  const nu = retry.undated;
-  const which = nu ? (retry.legacy === 1 ? 'one of the retries' : `${n(retry.legacy)} of the retries`) : retry.legacy === 1 ? 'the retry' : 'the retries';
-  const planned = `the app version used for the run recorded only the number planned for ${which} made with it, ${n(retry.planned)}`;
-  const them = retry.legacy === 1 ? 'it' : 'them';
-  const undated = nu
-    ? `${nu === 1 ? 'another retry is counted as the number it recorded' : `${n(nu)} other retries are counted as the numbers they recorded`}, ${n(retry.undatedRequests)}, since that version dated ${nu === 1 ? 'its' : 'their'} answers at the run’s start`
-    : '';
-  const u = retry.unanswered;
-  const [ni, ns] = [retry.retriesInterrupted, retry.retriesStopped];
-  // One parenthesis for every note, joined by semicolons.
-  const notes = [
-    retry.lowerBound
-      ? retry.legacySent
-        ? `counted from the stored answers: ${planned}`
-        : k
-          ? `${planned}, and no stored answer dates from ${them}, so none of ${retry.legacy === 1 ? 'its' : 'their'} requests are counted`
-          : `how many is not known: ${planned}, and no stored answer dates from ${them}`
-      : '',
-    retry.lowerBound ? undated : '',
-    ni ? `${ni === 1 ? 'a retry was' : `${n(ni)} retries were`} interrupted by the page closing: requests under way then got no recorded answer and are not counted` : '',
-    // (Cancel, or a result that could not be saved: sent, so counted, but with no answer.)
-    u
-      ? `${ns === 1 ? (ni ? 'another retry was' : 'a retry was') : `${n(ns)} ${ni ? 'other ' : ''}retries were`} stopped while ${n(u)} of them ${u === 1 ? 'was' : 'were'} under way: ${u === 1 ? 'it' : 'they'} got no recorded answer`
-      : '',
-  ].filter(Boolean);
-  const legacyNote = notes.length ? ` (${notes.join('; ')})` : '';
-  const retryText =
-    retrying && !k && !retry.lowerBound && !retry.interrupted
-      ? `Requests without a usable answer (failed, or not sent before the run was stopped) were being sent again with identical settings${retriedAs} when this was exported`
-      : k || retry.lowerBound || retry.interrupted
-        ? `${howMany} without a usable answer (failed, or not sent before the run was stopped) ${k === 1 ? 'was' : 'were'} sent again with identical settings${retriedAs}${legacyNote}${retrying ? ', and the retry was still under way when this was exported' : ''}`
-        : '';
-  return [
-    `${w.Many} (N = ${meta.corpus.n_texts_with_usable_labels.toLocaleString('en-US')}) were annotated with ${m.model} (${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API${meta.model.reported_by_api.length ? `; model version reported by the API: ${meta.model.reported_by_api.join(', ')}` : ''}) ${period}, using ${settingsText}.`,
-    isEntries(run.snapshot.prompt)
-      ? 'No source texts were supplied: the model answered from its own knowledge, given a few identifying details for each entry (see the prompt and the list of entries).'
-      : '',
-    run.snapshot.prompt.outputMode === 'structured'
-      ? `The model was required to return the fields listed in the codebook as JSON conforming to a schema (structured outputs)${run.snapshot.prompt.includeRationale ? ', preceded by a brief rationale' : ''}.`
-      : 'The model returned free-text responses.',
-    reps > 1
-      ? run.snapshot.prompt.outputMode === 'structured'
-        ? `${annotated}; categorical labels were aggregated by majority vote, ordinal labels by the median and numeric labels by the mean.${ties}`
-        : `${annotated}; numbers in the answers were combined by the median, other values by majority vote.`
-      : '',
-    retryText ? `${retryText}${failedText ? `; ${retrying ? 'so far' : 'after this'}, ${failedText}` : ''}.` : failedText ? `${failedText}.` : '',
-    // Answers without scores: with several per text, left out when combining (n of the ok answers); a text with no
-    // answer that has scores is excluded.
-    reps > 1 && withoutScores
-      ? `${n(withoutScores)} of the ${n(meta.requests.ok)} answers gave no scores (e.g. ${withoutScores === 1 ? 'it was' : 'they were'} written in prose) and ${was(withoutScores)} left out when the answers were combined${noScores ? `; ${items(noScores)} had no answer with scores and ${was(noScores)} excluded` : ''}.`
-      : noScores
-        ? `${items(noScores)} ${was(noScores)} answered without scores (e.g. in prose) and ${was(noScores)} excluded.`
-        : '',
-    offScale
-      ? `${n(offScale)} score${offScale === 1 ? '' : 's'} off the scale (e.g. a code such as 9 for “can’t tell”) ${was(offScale)} left out when the answers were combined, like a missing value, where another answer for the same ${w.one} was on the scale.`
-      : '',
-    notSent ? notSentText : '',
-    causes > 1 ? `Altogether, ${n(unlabelled)} of the ${items(c.n_texts_in_run)} in the run have no label.` : '',
-    removed
-      ? `${n(removed)} annotated ${removed === 1 ? w.one : w.many} ${was(removed)} later removed from the study; ${removed === 1 ? 'it is' : 'they are'} not included in N or the agreement figures (${removed === 1 ? 'its' : 'their'} requests remain in the request and token totals and in the per-request results).`
-      : '',
-    `Requests were sent ${run.mode === 'batch' ? 'through the provider\'s batch API' : 'individually'}${cached ? ' with prompt caching' : ''}. The full prompt, request settings and an executable script are provided in the supplementary material.`,
-  ]
-    .filter(Boolean)
-    .join(' ');
-}
-
 /**
  * Why requests sent may have no line in a run's logs (none: complete). Those under way when an immediate run or a retry
  * was stopped (Cancel, a result that could not be saved, the page closing) got no result, so no log, also once a later
@@ -1033,12 +895,6 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     );
   }
   lines.push(
-    '## Methods text (draft)',
-    '',
-    '> ' + methodsParagraph(run, meta, retry),
-    '',
-    'Edit as needed; check every detail against `metadata.json`.',
-    '',
     '## Files',
     '',
     '| File | Contents |',

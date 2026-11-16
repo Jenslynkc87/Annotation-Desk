@@ -187,11 +187,6 @@ describe('an Oct 18–20 batch retry next to a published-build retry counted as 
 
     const { blob } = await buildSupplementary({ study, docs, runs: [run], results }, run, { includeTexts: false, includeRationales: false, includeLogs: false });
     const { read } = await unzip(blob);
-    const methods = (await read('README.md')).split('\n').find((l) => l.startsWith('> '))!;
-    expect(methods).toContain(
-      'At least 6 requests without a usable answer (failed, or not sent before the run was stopped) were sent again with identical settings in a new batch (the app version used for the run recorded only the number planned for one of the retries made with it, 2, and no stored answer dates from it, so none of its requests are counted; another retry is counted as the number it recorded, 6, since that version dated its answers at the run’s start)',
-    );
-    expect(methods).not.toContain('counted from the stored answers');
     expect(JSON.parse(await read('metadata.json')).requests).toMatchObject({ retried: 6, retried_note: expect.stringContaining('planned (2)') });
   });
 });

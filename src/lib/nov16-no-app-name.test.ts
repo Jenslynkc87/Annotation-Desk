@@ -17,6 +17,7 @@ const TRACE = /annotation[ _-]?desk|c0ffee1|2026-11-09\)/i;
 const usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
 const prompt: PromptSpec = {
   ...DEFAULT_PROMPT,
+  includeRationale: false,
   variables: [
     { name: 'tone', type: 'ordinal', values: ['-3', '-2', '-1', '0', '1', '2', '3'], description: '' },
     { name: 'tone_explanation', type: 'text', values: [], description: '' },
@@ -123,5 +124,51 @@ describe('exports name neither the app nor its build (Nov 16, 2026)', () => {
       model: { ...DEFAULT_MODEL_SETTINGS, provider: 'openai', model: 'gpt-4.1' }, options: { ...DEFAULT_RUN_OPTIONS, caching: true }, system: '', outputSchema: null, promptHash: 'abc',
     });
     expect(base.prompt_cache_key).toBe('prompt-abc');
+  });
+});
+
+describe('the public package has no methods text, and no empty rationale column (Nov 16, 2026)', () => {
+  const supp = async (run: Run, rs: Result[], includeRationales = true) => {
+    const { blob } = await buildSupplementary({ study, docs, runs: [run], results: rs }, run, { includeTexts: true, includeRationales, includeLogs: false });
+    const files = await zipTexts(blob);
+    const read = (suffix: string) => [...files].find(([n]) => n.endsWith(suffix))![1];
+    const header = (suffix: string) => read(suffix).replace(/^﻿/, '').split('\n')[0].split(',');
+    return { read, header };
+  };
+
+  it('no draft methods paragraph in the README', async () => {
+    const { read } = await supp(runs[0], results);
+    expect(read('README.md')).not.toMatch(/Methods text|Edit as needed|were annotated with/);
+  });
+
+  it('no rationale column when the run asked for none, even with “include rationales” ticked', async () => {
+    const { header } = await supp(runs[0], results);
+    expect(header('results_by_replicate.csv')).not.toContain('rationale');
+    expect(header('results.csv')).not.toContain('rationale');
+  });
+
+  it('a run that asked for a rationale keeps its column', async () => {
+    const asked = { ...runs[0], snapshot: { ...runs[0].snapshot, prompt: { ...prompt, includeRationale: true } } };
+    const rs = results.filter((r) => r.runId === asked.id).map((r) => ({ ...r, rationale: 'Short reason.' }));
+    const { header, read } = await supp(asked, rs);
+    expect(header('results_by_replicate.csv')).toContain('rationale');
+    expect(header('results.csv')).toContain('rationale');
+    expect(read('results_by_replicate.csv')).toContain('Short reason.');
+    // Unticked: left out.
+    expect((await supp(asked, rs, false)).header('results_by_replicate.csv')).not.toContain('rationale');
+  });
+
+  it('the research zip’s table of all runs has the column only when some run asked for one, blank for the others', async () => {
+    const asked = { ...runs[1], snapshot: { ...runs[1].snapshot, prompt: { ...prompt, includeRationale: true } } };
+    const rs = results.map((r) => (r.runId === asked.id ? { ...r, rationale: 'Why.' } : { ...r, rationale: 'stale' }));
+    await stored();
+    const without = await zipTexts((await buildResearchRepo({ study, docs, runs, results }, { includeLogs: false })).blob);
+    const head = (files: Map<string, string>, suffix: string) => [...files].find(([n]) => n.endsWith(suffix))![1].replace(/^﻿/, '').split('\n')[0];
+    expect(head(without, 'results_all_runs_long.csv')).not.toContain('rationale');
+    const withOne = await zipTexts((await buildResearchRepo({ study, docs, runs: [runs[0], asked, runs[2]], results: rs }, { includeLogs: false })).blob);
+    expect(head(withOne, 'results_all_runs_long.csv')).toContain('rationale');
+    const all = [...withOne].find(([n]) => n.endsWith('results_all_runs_long.csv'))![1];
+    expect(all).toContain('Why.');
+    expect(all).not.toContain('stale');
   });
 });

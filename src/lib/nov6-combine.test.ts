@@ -113,9 +113,8 @@ describe('plain-text codes off a fixed scale are left out of the median, as “N
     };
     const some = await supp([[1, 2, 9], [2, 5, 2], [9, 9, 9], ...rest]);
     expect(some.meta.requests.scores_off_scale_left_out_when_combined).toBe(2);
-    expect(some.readme).toContain(
-      '2 scores off the scale (e.g. a code such as 9 for “can’t tell”) were left out when the answers were combined, like a missing value, where another answer for the same text was on the scale.',
-    );
+    // (In metadata.json only: the package has no methods text since November 16, 2026.)
+    expect(some.readme).not.toContain('Methods text');
     const none = await supp(rest);
     expect(none.meta.requests.scores_off_scale_left_out_when_combined).toBeUndefined();
     expect(none.readme).not.toContain('off the scale');

@@ -1,4 +1,4 @@
-// Second review round: exports, methods text, README notes and the comparison report.
+// Second review round: exports text, README notes and the comparison report.
 import 'fake-indexeddb/auto';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
@@ -40,9 +40,9 @@ async function supplementary(d: ExportData, run: Run, includeLogs = false) {
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   const read = (suffix: string) => zip.file(Object.keys(zip.files).find((k) => k.endsWith(suffix))!)!.async('string');
   const readme = await read('README.md');
-  const methods = readme.split('\n').find((l) => l.startsWith('> '))!.slice(2);
+  expect(readme).not.toContain('Methods text');
   const meta = JSON.parse(await read('metadata.json'));
-  return { zip, read, readme, methods, meta };
+  return { zip, read, readme, meta };
 }
 
 async function workbook(blob: Blob) {
@@ -55,36 +55,21 @@ async function workbook(blob: Blob) {
   };
 }
 
-describe('methods text: failed requests, texts never sent, prose answers, ties, removed texts', () => {
+describe('supplementary package: failed requests, texts never sent, prose answers, ties, removed texts', () => {
   it('a cancelled run: failed requests and texts never sent are reported apart (N49, N110)', async () => {
     const docs = mkDocs(100);
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled', finishedAt: '2026-10-01T10:30:00Z' });
     // 36 texts were sent before the run was cancelled; one of those requests failed.
     const results = docs.slice(0, 36).map((d, i) => mkResult(run, d, 1, i === 35 ? null : { stance: 'for' }));
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('1 of 36 requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and was excluded, leaving 1 text without a label.');
-    expect(methods).toContain('64 texts in the run have no answer recorded (not sent, or the run stopped before an answer arrived; the run was cancelled).');
-    expect(methods).toContain('Altogether, 65 of the 100 texts in the run have no label.');
-    expect(methods).not.toContain('leaving 65');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.corpus).toMatchObject({ n_texts_in_run: 100, n_texts_with_results: 36, n_texts_with_usable_labels: 35, n_texts_all_requests_failed: 1, n_texts_without_results: 64 });
-  });
-
-  it('one failed replicate leaves no text without a label, and is "was excluded" (N49)', async () => {
-    const docs = mkDocs(4);
-    const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, {}, 3);
-    const results = docs.flatMap((d, i) => [1, 2, 3].map((rep) => mkResult(run, d, rep, i === 0 && rep === 2 ? null : { stance: 'for' })));
-    const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('1 of 12 requests did not return a usable annotation (an API error, a refusal or an answer that could not be read) and was excluded.');
-    expect(methods).not.toMatch(/leaving|not sent|Altogether/);
   });
 
   it('texts removed from the study since: the sentence says where their requests still are (N47, N76)', async () => {
     const docs = mkDocs(4);
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt);
     const results = docs.map((d) => mkResult(run, d, 1, { stance: 'for' }));
-    const { methods, readme, read } = await supplementary({ study: mkStudy(stancePrompt), docs: docs.slice(1), runs: [run], results }, run);
-    expect(methods).not.toContain('not included in N or the results');
-    expect(methods).toContain('1 annotated text was later removed from the study; it is not included in N or the agreement figures (its requests remain in the request and token totals and in the per-request results).');
+    const { readme, read } = await supplementary({ study: mkStudy(stancePrompt), docs: docs.slice(1), runs: [run], results }, run);
     expect(readme).toMatch(/results_by_replicate\.csv` \| One row per request, with status, tokens and timing; also the requests for the 1 text removed from the study since, marked “\(deleted …\)” \|/);
     // Paid requests stay on record.
     expect((await read('results_by_replicate.csv')).trim().split('\n')).toHaveLength(5);
@@ -95,9 +80,8 @@ describe('methods text: failed requests, texts never sent, prose answers, ties, 
     const run = mkRun('r1', 1, docs.map((d) => d.id), textPrompt, {}, 3);
     const json = (race: number) => ({ response: JSON.stringify({ race, race_explanation: 'because' }) });
     const results = docs.flatMap((d, i) => [1, 2, 3].map((rep) => mkResult(run, d, rep, i === 0 && rep === 3 ? { response: 'I would rather explain this in words.' } : json(rep))));
-    const { methods, meta, readme, read } = await supplementary({ study: mkStudy(textPrompt), docs, runs: [run], results }, run);
+    const { meta, readme, read } = await supplementary({ study: mkStudy(textPrompt), docs, runs: [run], results }, run);
     expect(meta.requests).toMatchObject({ ok: 9, failed: 0, answers_without_scores: 1 });
-    expect(methods).toContain('1 of the 9 answers gave no scores (e.g. it was written in prose) and was left out when the answers were combined.');
     expect(readme).toContain('| Requests (ok / failed) | 9 / 0 (1 ok answer gave no scores and was left out) |');
     const csv = (await read('results/results.csv')).replace(/^﻿/, '').trim().split('\n');
     const head = csv[0].split(',');
@@ -109,8 +93,7 @@ describe('methods text: failed requests, texts never sent, prose answers, ties, 
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, {}, 2);
     const votes = [['for', 'against'], ['for', 'for'], ['against', 'against']];
     const results = docs.flatMap((d, i) => votes[i].map((v, j) => mkResult(run, d, j + 1, { stance: v })));
-    const { methods, meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('A tied vote is kept as both labels (e.g. “a | b”) and counts as a disagreement in the agreement figures (1 text for stance).');
+    const { meta } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.corpus.n_texts_with_tied_votes).toEqual({ stance: 1 });
   });
 
@@ -119,9 +102,8 @@ describe('methods text: failed requests, texts never sent, prose answers, ties, 
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt);
     // A day-one answer from the refusal fallback's model, now a failed result.
     const results = [mkResult(run, docs[0], 1, { stance: 'for' }), mkResult(run, docs[1], 1, null, { modelReported: 'claude-opus-4-8' })];
-    const { methods, meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
+    const { meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.model.reported_by_api).toEqual([DEFAULT_MODEL_SETTINGS.model]);
-    expect(methods).not.toContain('claude-opus-4-8');
     expect(readme).not.toContain('claude-opus-4-8');
     const other = mkRun('r2', 2, docs.map((d) => d.id), stancePrompt);
     const both = [...results, ...docs.map((d) => mkResult(other, d, 1, { stance: 'for' }))];
@@ -129,14 +111,13 @@ describe('methods text: failed requests, texts never sent, prose answers, ties, 
     expect(runs('Runs').find((r) => r.setting === 'model_reported_by_api')!.first).toBe(DEFAULT_MODEL_SETTINGS.model);
   });
 
-  it('a run that is not finished says so in the README, metadata and methods text (N120)', async () => {
+  it('a run that is not finished says so in the README and metadata (N120)', async () => {
     const docs = mkDocs(30);
     const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { status: 'running', finishedAt: null });
     const results = docs.slice(0, 4).map((d) => mkResult(run, d, 1, { stance: 'for' }));
-    const { methods, meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
+    const { meta, readme } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
     expect(meta.run.status_when_exported).toBe('running');
     expect(readme).toContain('**This run was not finished when these materials were exported** (it was still running): they describe the results so far.');
-    expect(methods).toContain('26 texts in the run had no result yet (the run was not finished when this was exported).');
     const settings = (await workbook(await buildExcel({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run, { text: false, rationale: false })))('Settings');
     expect(settings.find((r) => r.setting === 'Finished')!.value).toBe('not finished when exported (the results so far)');
   });
@@ -258,17 +239,6 @@ describe('request log: the request as sent (N54, N80)', () => {
 });
 
 describe('review of the round-two export fixes', () => {
-  it('a run interrupted by closing the page is not called cancelled in the methods text', async () => {
-    const docs = mkDocs(10);
-    const error = 'Interrupted: the run stopped without being saved as finished (the page was closed or reloaded, or the browser’s storage was full). Completed results were kept.';
-    const run = mkRun('r1', 1, docs.map((d) => d.id), stancePrompt, { status: 'cancelled', error });
-    const results = docs.slice(0, 6).map((d) => mkResult(run, d, 1, { stance: 'for' }));
-    const { methods } = await supplementary({ study: mkStudy(stancePrompt), docs, runs: [run], results }, run);
-    expect(methods).toContain('4 texts in the run have no answer recorded (not sent, or the run stopped before an answer arrived; the run was interrupted).');
-    // Cancelled by the owner: still "cancelled".
-    const cancelled = { ...run, error: null };
-    expect((await supplementary({ study: mkStudy(stancePrompt), docs, runs: [cancelled], results }, cancelled)).methods).toContain('the run was cancelled).');
-  });
 
   it('README: texts never sent are mentioned only when they have labels; a category label left out is "not a category"', async () => {
     // Labels on the first 6 texts only (a validation sample); the run was cancelled after 8 of 20.
