@@ -302,3 +302,20 @@ describe('a lean results table can’t be added as human labels (Nov 16, 2026)',
     expect(judge(sheet(['tone', 'era'], (c, i) => (c === 'tone' && i === 4 ? '3' : meta(c, i)))).columns).toEqual([]);
   });
 });
+
+describe('the public README says how a text’s annotations are combined (Nov 16, 2026)', () => {
+  it('one factual line with several annotations per text, none with one', async () => {
+    await stored();
+    const readme = async (run: Run, rs: Result[]) => {
+      const { blob } = await buildSupplementary({ study, docs, runs: [run], results: rs }, run, { includeTexts: false, includeRationales: false, includeLogs: false });
+      const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+      return zip.file(Object.keys(zip.files).find((n) => n.endsWith('README.md'))!)!.async('string');
+    };
+    const three = { ...runs[0], snapshot: { ...runs[0].snapshot, options: { ...DEFAULT_RUN_OPTIONS, replicates: 3 } } };
+    const rs = docs.flatMap((d) => [1, 2, 3].map((rep) => ({ ...results[0], id: `${three.id}:${d.id}:${rep}`, docId: d.id, replicate: rep })));
+    expect(await readme(three, rs)).toContain(
+      'Each text’s 3 annotations are combined in `results.csv` (failed ones left out): scales by the median (with an even number of annotations, the midpoint of the middle two, e.g. 1.5); each explanation is the one from the annotation closest to the combined values.',
+    );
+    expect(await readme(runs[0], results.filter((r) => r.runId === runs[0].id))).not.toContain('are combined');
+  });
+});

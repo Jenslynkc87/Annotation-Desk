@@ -1028,6 +1028,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
     '| `scripts/annotate.py` | Python script reproducing the requests (values inserted) |',
     '| `scripts/annotate_template.py` | The same script with `{{PLACEHOLDERS}}` marking every study-specific value |',
     '| `scripts/requirements.txt` | Python package the script needs (install with `pip install -r requirements.txt`) |',
+    ...combiningNote(run).flatMap((l) => ['', l]),
     '',
     '## Reproducing',
     '',
@@ -1050,6 +1051,31 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
       '',
     );
   return lines.join('\n');
+}
+
+/**
+ * How results.csv combines a text's annotations, as `buildDocViews` does: one factual line documenting its columns
+ * (none with one annotation per text). Kept in the public package (owner, Nov 16, 2026): it documents a column, it is
+ * not text for the paper.
+ */
+export function combiningNote(run: Run): string[] {
+  const reps = run.snapshot.options.replicates;
+  if (reps <= 1) return [];
+  const p = run.snapshot.prompt;
+  const parts: string[] = [];
+  if (p.outputMode === 'structured') {
+    const types = new Set(p.variables.filter((v) => !(v.type === 'text' && isExplanationKey(v.name))).map((v) => v.type));
+    if (types.has('ordinal')) parts.push('scales by the median (with an even number of annotations, the midpoint of the middle two, e.g. 1.5)');
+    if (types.has('number')) parts.push('numbers by the mean');
+    if (types.has('category') || types.has('boolean') || types.has('text')) parts.push('other fields by majority vote, a tie kept as “a | b”');
+    if (p.variables.some((v) => v.type === 'text' && isExplanationKey(v.name)) || p.includeRationale)
+      parts.push(`each explanation${p.includeRationale ? ' and the rationale' : ''} is the one from the annotation closest to the combined values`);
+  } else {
+    parts.push(
+      'JSON answers value by value: scores by the median (with an even number, the midpoint of the middle two), other values by majority vote, a tie kept as “a | b”; each explanation is the one from the annotation closest to the combined values',
+    );
+  }
+  return [`Each ${words(p).one}’s ${reps} annotations are combined in \`results.csv\` (failed ones left out): ${parts.join('; ')}.`];
 }
 
 function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefined, folders: Map<string, string>, opts: ResearchOptions): string {
