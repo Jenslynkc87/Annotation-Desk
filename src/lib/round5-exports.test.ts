@@ -122,7 +122,7 @@ describe('a batch Retry failed of the October 18–20 builds (H11)', () => {
     const [row] = runSummaryRows([run], results);
     expect(row.requests_retried).toBe(5);
     expect(row.notes).toBe(
-      'Annotation Desk 0.1.0, used for the run, dated the answers of a batch sent by Retry failed at the run’s start, so the requests that retry sent are taken as the number it recorded (5); it also did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries.',
+      'The app version used for the run dated the answers of a batch sent by Retry failed at the run’s start, so the requests that retry sent are taken as the number it recorded (5); it also did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries.',
     );
     expect(retryNotes(run, retry).requests).not.toContain('not known');
     const { blob } = await buildSupplementary({ study: mkStudy(), docs, runs: [run], results }, run, { includeTexts: false, includeRationales: false, includeLogs: false });
@@ -137,7 +137,7 @@ describe('a batch Retry failed of the October 18–20 builds (H11)', () => {
     const run = oct19({ retries: [{ at: '2026-10-19T11:00:00.000Z', requests: 5, asBatch: true }, { at: '2026-10-19T12:00:00.000Z', requests: 2, asBatch: true }] });
     const results = docs.map((d) => mkResult(run, d, { stance: 'for' }, { requestedAt: t0, completedAt: t0 }));
     expect(retryNotes(run, retriedRequests(run, results)).requests).toBe(
-      'Annotation Desk 0.1.0, used for the run, dated the answers of a batch sent by Retry failed at the run’s start, so the requests those retries sent are taken as the numbers it recorded (7 in all).',
+      'The app version used for the run dated the answers of a batch sent by Retry failed at the run’s start, so the requests those retries sent are taken as the numbers it recorded (7 in all).',
     );
   });
 

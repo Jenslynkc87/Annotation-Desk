@@ -62,7 +62,7 @@ const toasts = () => store.getState().toasts.map((t) => t.text);
 const w = { one: 'text', many: 'texts' };
 const D = '2026-10-24';
 const note = (value: string, rest: string, seed: number, size = '10 of 400') =>
-  `Sample sample = ${value} (${D}): ${size} texts drawn at random${rest}; seed ${seed} (Annotation Desk sampling method 3).`;
+  `Sample sample = ${value} (${D}): ${size} texts drawn at random${rest}; seed ${seed} (sampling method 3).`;
 
 describe('a redraw names (and keeps the notes of) only the draws that depend on it (M6)', () => {
   it('a note in the count form depends only on values drawn before it', () => {

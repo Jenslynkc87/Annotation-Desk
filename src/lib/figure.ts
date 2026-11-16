@@ -967,7 +967,6 @@ interface CsvMeta {
   run: string;
   model: string;
   promptVersion?: number | string;
-  appVersion: string;
   subset?: string;
 }
 function csvHead(meta: CsvMeta): Row {
@@ -998,7 +997,7 @@ function shareColumns(s: FieldSummary, prefix = ''): Row {
  */
 export function summaryCsvRows(rows: FigureRow[], meta: CsvMeta & { field?: string; groupColumn?: string }): Row[] {
   // (A group column named like one of the table's own columns is prefixed: group_n, group_field.)
-  const group = meta.groupColumn ? (FRONT.includes(meta.groupColumn) || /^(n|share|field|period|scale|ci95)_/.test(meta.groupColumn) || meta.groupColumn === 'app_version' ? `group_${meta.groupColumn}` : meta.groupColumn) : '';
+  const group = meta.groupColumn ? (FRONT.includes(meta.groupColumn) || /^(n|share|field|period|scale|ci95)_/.test(meta.groupColumn) ? `group_${meta.groupColumn}` : meta.groupColumn) : '';
   const columns = rows.flatMap(({ s }) => s.bins.map((b) => ({ col: binColumn(s, b), value: b.from === undefined && s.kind !== 'categories' ? b.value : undefined })));
   return rows.map(({ name, s, from, to }) => {
     const out: Row = csvHead(meta);
@@ -1031,7 +1030,6 @@ export function summaryCsvRows(rows: FigureRow[], meta: CsvMeta & { field?: stri
       if (group || inRange) out[c.col] = 0;
     }
     for (const b of s.bins) out[binColumn(s, b)] = b.n;
-    out.app_version = meta.appVersion;
     return out;
   });
 }
@@ -1055,14 +1053,13 @@ export function binCsvRows(s: FieldSummary, meta: CsvMeta): Row[] {
     // (A combined half point between two points of the scale, or a plain-text value beside the points seen.)
     not_a_scale_point: b.extra && s.kind === 'scale' ? 'yes' : '',
     ...field,
-    app_version: meta.appVersion,
   }));
 }
 
 /**
  * The rows with their columns in a fixed order: the description and figures first (`FRONT`, a split's group column
  * after the field), then the texts at each value (a scale's values in numeric order, categories in the field's order),
- * the app version last; columns empty in every row (e.g. the shares of yes in a table of scales) are left out.
+ * columns empty in every row (e.g. the shares of yes in a table of scales) are left out.
  */
 export function csvColumns(rows: Row[]): [Row[], string[]] {
   const all = [...new Set(rows.flatMap((r) => Object.keys(r)))];
@@ -1071,7 +1068,7 @@ export function csvColumns(rows: Row[]): [Row[], string[]] {
   const numeric = bins.filter((c) => Number.isFinite(Number(c.slice(2)))).sort((a, b) => Number(a.slice(2)) - Number(b.slice(2)));
   const rest = bins.filter((c) => !numeric.includes(c));
   const known = FRONT.filter((c) => used.includes(c));
-  const other = used.filter((c) => !bins.includes(c) && !FRONT.includes(c) && c !== 'app_version');
+  const other = used.filter((c) => !bins.includes(c) && !FRONT.includes(c));
   const at = known.includes('field') ? known.indexOf('field') + 1 : known.length;
-  return [rows, [...known.slice(0, at), ...other, ...known.slice(at), ...numeric, ...rest, ...(used.includes('app_version') ? ['app_version'] : [])]];
+  return [rows, [...known.slice(0, at), ...other, ...known.slice(at), ...numeric, ...rest]];
 }

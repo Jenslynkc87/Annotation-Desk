@@ -43,7 +43,7 @@ const norm = (s: string | undefined) => (s ?? '').trim().toLowerCase();
 const byCode = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Recorded with each draw, so a later reader knows which rules made the sample from the seed. */
-export const SAMPLING_METHOD = 'Annotation Desk sampling method 3';
+export const SAMPLING_METHOD = 'sampling method 3';
 
 /** The strata columns in the order a draw uses them (method 3): by name, character by character, whatever order
  *  they were ticked and whatever order the metadata columns were added in. The sample dialog lists them so. */

@@ -278,7 +278,7 @@ export function RunsView() {
               </>
             ) : null}
             <dt>App version</dt>
-            <dd>{inspect.snapshot.appVersion}</dd>
+            <dd>{inspect.snapshot.appVersion || 'not recorded (imported from a backup)'}</dd>
           </dl>
           <p className="section-title" style={{ marginTop: 16 }}>Prompt (sent with each {words(inspect.snapshot.prompt).one})</p>
           <pre className="textblock">{effectiveTemplate(inspect.snapshot.prompt.userTemplate, inspect.snapshot.prompt.subject)}</pre>

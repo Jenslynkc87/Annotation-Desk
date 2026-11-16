@@ -11,6 +11,7 @@ import { isEntries, words } from '../subject';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
 import { dateStamp, nowIso, slug, yieldToPage } from '../util';
 import { buildBackup } from './backup';
+import { plainNotes, runForExport, softwareVersions, studyForExport } from './provenance';
 import { fillScript, requirementsTxt, SCRIPT_TEMPLATE, scriptValues } from './python';
 import {
   agreementForRun,
@@ -392,7 +393,7 @@ function settingsRows(study: Study, run: Run, runs: Run[]): Row[] {
   const p = run.snapshot.prompt;
   return [
     { setting: 'Study', value: study.name },
-    ...(study.description.trim() ? [{ setting: 'Study notes (e.g. how samples were drawn)', value: study.description.trim() }] : []),
+    ...(study.description.trim() ? [{ setting: 'Study notes (e.g. how samples were drawn)', value: plainNotes(study.description.trim()) }] : []),
     { setting: 'Run', value: `#${runName(run, runs)}${run.label ? ` (${run.label})` : ''}` },
     { setting: 'Started', value: run.createdAt },
     // (During Retry failed the run keeps its earlier finish time, which is no longer when it finished.)
@@ -413,8 +414,6 @@ function settingsRows(study: Study, run: Run, runs: Run[]): Row[] {
     { setting: `Prompt (sent with each ${p.subject === 'entries' ? 'entry' : 'text'})`, value: effectiveTemplate(p.userTemplate, p.subject) },
     { setting: 'System prompt', value: p.system || '(none)' },
     { setting: 'Output', value: p.outputMode === 'structured' ? JSON.stringify(run.snapshot.outputSchema) : 'plain text' },
-    { setting: 'Annotation Desk version (run)', value: run.snapshot.appVersion },
-    { setting: 'Annotation Desk version (this export)', value: __APP_VERSION__ },
   ];
 }
 
@@ -569,7 +568,9 @@ export async function buildResearchRepo(data: ExportData, opts: ResearchOptions)
   const finished = d.runs.filter((r) => d.results.some((x) => x.runId === r.id));
   const agreement = startAgreement(d, d.runs, opts.agreement, opts.onProgress);
 
-  await root.file('study.json', JSON.stringify({ ...d.study, exportedAt }, null, 2));
+  await root.file('study.json', JSON.stringify({ ...studyForExport(d.study), exportedAt }, null, 2));
+  // (The only file naming the app and its builds: a private record, never in the supplementary package.)
+  await root.file('software_versions.json', softwareVersions(d.runs, (r) => String(runName(r, d.runs)), exportedAt));
   // Without the request/response logs: they are under runs/ already, and each holds the full text again. (Export →
   // Study backup has them.) The results as stored, read from the database.
   await root.file('study-backup.json', () => buildBackup(d.study, d.docs, d.runs, false));
@@ -594,7 +595,7 @@ export async function buildResearchRepo(data: ExportData, opts: ResearchOptions)
   const folders = runFolders(d.runs);
   for (const run of d.runs) {
     const f = runsDir.folder(folders.get(run.id)!);
-    await f.file('run.json', JSON.stringify(run, null, 2));
+    await f.file('run.json', JSON.stringify(runForExport(run), null, 2));
     const rs = d.results.filter((r) => r.runId === run.id);
     await f.file('results_long.csv', () => toCsvBlobPaced(resultsLong(d.study, [run], d.docs, rs, { rationale: true, reasoning: true }, d.runs)));
     await f.file('results_wide.csv', () => toCsvBlobPaced(resultsWide(run, d.docs, d.runs, d.results, { text: false, rationale: true })));
@@ -703,11 +704,10 @@ function supplementaryMetadata(d: ExportData, run: Run, exportedAt: string) {
     voted.map((v) => [v.name, usable.filter((id) => isTie((views.get(id)?.results ?? []).filter((r) => r.status === 'ok').map((r) => r.values[v.name] ?? ''))).length]),
   );
   return {
-    software: { name: 'Annotation Desk', version: __APP_VERSION__, version_used_for_run: run.snapshot.appVersion },
     exported_at: exportedAt,
     study: d.study.name,
     // Notes kept with the study, e.g. how a validation sample was drawn (rule and seed).
-    study_notes: d.study.description.trim() || null,
+    study_notes: plainNotes(d.study.description.trim()) || null,
     run: {
       number: run.number,
       // As the tables and README name it ("5-20261022-221754Z" for runs that share a number), and its id.
@@ -963,7 +963,7 @@ function supplementaryReadme(d: ExportData, run: Run, meta: ReturnType<typeof su
   const lines = [
     `# ${d.study.name}: LLM annotation materials`,
     '',
-    `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported from Annotation Desk ${meta.software.version}${meta.software.version_used_for_run !== meta.software.version ? ` (the run was made with ${meta.software.version_used_for_run})` : ''} on ${meta.exported_at.slice(0, 10)}.` +
+    `Supplementary materials for the LLM-based annotation (run #${runName(run, d.runs)}${run.label ? `, "${run.label}"` : ''}), exported on ${meta.exported_at.slice(0, 10)}.` +
       // (Runs that share a number: given twice by an earlier version open in two tabs.)
       (sharesNumber(run, d.runs) ? ` Another run of the study has the same number (#${run.number}), given twice by an earlier version open in two tabs: this one is named by its number and when it started (UTC; \`run.started_at\` in metadata.json).` : ''),
     '',
@@ -1087,6 +1087,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
   const w = words(d.study.prompt);
   const rows: [string, string][] = [
     ['`study.json`', 'Current study settings (model, prompt, fields, options)'],
+    ['`software_versions.json`', 'Which build of the app made each run and wrote this export. The only file here that names the app: keep it private'],
     ['`study-backup.json`', `Backup (settings, ${w.many}, runs, results; without the request/response logs${opts.includeLogs ? ', which are under `runs/`' : ''}), re-importable via Studies → Import study backup`],
     ['`corpus/corpus.csv`, `corpus.jsonl`', `All ${w.many} with metadata`],
     ['`prompts/vN/`', 'Each prompt version: prompt, system prompt (if used), codebook, and for structured output the output schema and codebook.json'],
@@ -1123,7 +1124,7 @@ function researchReadme(d: ExportData, exportedAt: string, latest: Run | undefin
   return [
     `# ${d.study.name}: research repository`,
     '',
-    `Complete record of this annotation study, exported from Annotation Desk ${__APP_VERSION__} on ${exportedAt}.`,
+    `Complete record of this annotation study, exported on ${exportedAt}.`,
     '',
     `- ${d.docs.filter((x) => !x.removedAt).length.toLocaleString('en-US')} ${w.many}${removedNote(d.docs, w.many)}, ${d.runs.length} run(s), ${d.results.length.toLocaleString('en-US')} model responses.`,
     '- API keys are never stored or exported.',
@@ -1361,7 +1362,6 @@ export async function buildComparisonReport(
     texts_with_results: String((r === runA ? sentA : sentB).size),
     ...(removed ? { texts_removed_from_study_since: String(removedSince(r)) } : {}),
     annotations_per_text: String(r.snapshot.options.replicates),
-    app_version: r.snapshot.appVersion,
   });
   const sa = settings(runA);
   const sb = settings(runB);
@@ -1382,7 +1382,7 @@ export async function buildComparisonReport(
   }
 
   addSheet(wb, 'Notes', [
-    { note: `Exported from Annotation Desk ${__APP_VERSION__} on ${nowIso().slice(0, 10)}${runA.snapshot.appVersion === runB.snapshot.appVersion ? `; both runs were made with ${runA.snapshot.appVersion}` : `; the runs were made with ${runA.snapshot.appVersion} and ${runB.snapshot.appVersion}`}.` },
+    { note: `Exported on ${nowIso().slice(0, 10)}.` },
     { note: `First: ${name(runA)}. Second: ${name(runB)}. ${w.Many} compared: those with a usable value for the field in both runs. n_texts_in_both_runs: ${w.many} sent in both runs, including those whose request failed in one (no usable answer).` },
     ...unsentNote(runA, sentA),
     ...unsentNote(runB, sentB),

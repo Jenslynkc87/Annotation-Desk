@@ -81,7 +81,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     expect(meta.requests.retried).toBe(3);
     expect(meta.requests.retried_note).toContain('recorded for Retry failed only the number of requests planned (60)');
     expect(meta.tokens.note).toContain('token counts (which may be too low)');
-    expect(readme).toContain('Annotation Desk 0.1.0, used for the run, recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, at least 3 were sent; it also did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries.');
+    expect(readme).toContain('The app version used for the run recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, at least 3 were sent; it also did not keep the failed attempts that Retry failed replaced: their token use is missing from the token counts (which may be too low), and they are not counted as replaced by retries.');
     const [row] = runSummaryRows([run], results);
     expect(row.requests_retried).toBe(3);
     expect(String(row.notes)).toContain('counted from the stored answers, at least 3 were sent');
@@ -103,7 +103,7 @@ describe('retries of the published version (gap: legacy retry counts)', () => {
     // (The old retry's own answers were all replaced, before their request times were kept on the results (round
     // four, G22): its number is not known, only the total's lower bound.)
     expect(meta.requests.retried_note).toBe(
-      'Annotation Desk 0.1.0, used for the run, recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, the number sent is not known (no stored answer dates from it); with the run’s other retry, at least 60 in all.',
+      'The app version used for the run recorded for Retry failed only the number of requests planned (60), not the number sent: counted from the stored answers, the number sent is not known (no stored answer dates from it); with the run’s other retry, at least 60 in all.',
     );
   });
 
@@ -218,7 +218,7 @@ describe('runs that share a number (F85)', () => {
 });
 
 describe('comparison report (F86, F87)', () => {
-  it('carries the build id and the runs’ app versions; its text counts are those of the Notes', async () => {
+  it('names neither the app nor its builds; its text counts are those of the Notes', async () => {
     const docs = mkDocs(10);
     const a = mkRun('a', 1, docs.map((d) => d.id), stancePrompt, {}, 1, '0.1.0');
     const b = mkRun('b', 2, docs.map((d) => d.id), stancePrompt, { status: 'cancelled' });
@@ -226,13 +226,13 @@ describe('comparison report (F86, F87)', () => {
     // Two texts deleted from the study since.
     const report = await workbook(await buildComparisonReport(a, b, docs.slice(2), [a, b], results, 1));
     const runs = Object.fromEntries(report('Runs').map((r) => [r.setting, [r.first, r.second]]));
-    expect(runs.app_version).toEqual(['0.1.0', 'test']);
+    expect(runs.app_version).toBeUndefined();
     expect(runs.texts_in_run).toEqual(['8', '8']);
     expect(runs.texts_with_results).toEqual(['8', '4']);
     expect(runs.texts_removed_from_study_since).toEqual(['2', '2']);
     expect(runs.texts).toBeUndefined();
     const notes = report('Notes').map((r) => String(r.note));
-    expect(notes[0]).toMatch(/^Exported from Annotation Desk test on \d{4}-\d\d-\d\d; the runs were made with 0\.1\.0 and test\.$/);
+    expect(notes[0]).toMatch(/^Exported on \d{4}-\d\d-\d\d\.$/);
     expect(notes).toContain('Run #2 has no result for 4 of its 8 texts (e.g. the run was cancelled, stopped or not finished); they are not compared.');
   });
 });

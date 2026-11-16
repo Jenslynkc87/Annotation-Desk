@@ -591,7 +591,8 @@ export { runName, runTag, sharesNumber };
  * are not counted), or by Cancel or a failed save (counted as sent, with no answer).
  */
 export function retryNotes(run: Run, retry: RetriedRequests): { requests: string; tokens: string; both: string } {
-  const version = `Annotation Desk ${run.snapshot.appVersion}, used for the run,`;
+  // (Without the app's name or version: exports never name them, see provenance.ts.)
+  const version = 'The app version used for the run';
   const n = (k: number) => k.toLocaleString('en-US');
   // (With other retries, which recorded what they sent, also the total: a lower bound too. With an Oct 18–20 batch
   // retry, whose number is the one it recorded (below), the number planned is that of the others.)
@@ -666,7 +667,6 @@ export function runSummaryRows(runs: Run[], results: Result[]): Row[] {
       reasoning_tokens: sum('reasoningTokens'),
       cache_read_tokens: sum('cacheReadTokens'),
       cache_write_tokens: sum('cacheWriteTokens'),
-      app_version: r.snapshot.appVersion,
       error: r.error ?? '',
       notes: notes.both,
     };

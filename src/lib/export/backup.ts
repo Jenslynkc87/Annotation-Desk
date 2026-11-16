@@ -1,15 +1,21 @@
-// Full-fidelity study backup (re-importable into Annotation Desk).
+// Full-fidelity study backup (re-importable into Annotation Desk). It names neither the app nor its build (see
+// provenance.ts).
 import * as dbApi from '../db';
 import type { Doc, Result, ResultLog, Run, Study } from '../types';
 import { nowIso, uid, yieldToPage } from '../util';
+import { runForExport, studyForExport } from './provenance';
 
-export const BACKUP_FORMAT = 'annotation-desk-study';
+export const BACKUP_FORMAT = 'annotation-study-backup';
+/** The format name of backups written before November 16, 2026 (still imported). */
+const OLD_FORMAT = 'annotation-desk-study';
+const isBackupFormat = (f: unknown) => f === BACKUP_FORMAT || f === OLD_FORMAT;
 
 export interface StudyBackup {
-  format: typeof BACKUP_FORMAT;
+  format: typeof BACKUP_FORMAT | typeof OLD_FORMAT;
   version: 1;
   exportedAt: string;
-  appVersion: string;
+  /** Only in backups written before November 16, 2026. */
+  appVersion?: string;
   study: Study;
   docs: Doc[];
   runs: Run[];
@@ -37,7 +43,7 @@ async function* resultPagesForRun(runId: string, pageSize = 2000): AsyncGenerato
 /**
  * The backup as a file. It is one JSON document, written one record per line:
  *
- *   {"format":"annotation-desk-study",…,"study":{…},
+ *   {"format":"annotation-study-backup",…,"study":{…},
  *   "docs":[
  *   {…},
  *   {…}
@@ -49,7 +55,7 @@ async function* resultPagesForRun(runId: string, pageSize = 2000): AsyncGenerato
  * database, as stored.
  */
 export async function buildBackup(study: Study, docs: Doc[], runs: Run[], includeLogs: boolean): Promise<Blob> {
-  const head = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: nowIso(), appVersion: __APP_VERSION__, study });
+  const head = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: nowIso(), study: studyForExport(study) });
   const parts: BlobPart[] = [head.slice(0, -1) + ',\n'];
   const section = async (name: Section, write: (add: (item: unknown) => void) => Promise<void> | void, last: boolean) => {
     parts.push(`"${name}":[\n`);
@@ -74,7 +80,7 @@ export async function buildBackup(study: Study, docs: Doc[], runs: Run[], includ
     },
     false,
   );
-  await section('runs', (add) => runs.forEach(add), false);
+  await section('runs', (add) => runs.forEach((r) => add(runForExport(r))), false);
   await section(
     'results',
     async (add) => {
@@ -136,7 +142,7 @@ class Importer {
   study: Study | null = null;
 
   async start(b: Pick<StudyBackup, 'format' | 'study'>) {
-    if (b?.format !== BACKUP_FORMAT || !b.study) throw new Error('Not an Annotation Desk study backup.');
+    if (!isBackupFormat(b?.format) || !b.study) throw new Error('Not an Annotation Desk study backup.');
     // Marked until the whole file has been read: if the page is closed meanwhile, the next start removes it. (A mark
     // in the backup's own study is replaced by this one, and removed with it.)
     this.study = { ...b.study, id: this.studyId, name: `${b.study.name} (imported)`, updatedAt: nowIso(), importIncomplete: true };
@@ -206,7 +212,7 @@ export async function importBackup(file: Blob): Promise<Study> {
         head = null;
       }
     }
-    if (head?.format !== BACKUP_FORMAT || !head.study) {
+    if (!head || !isBackupFormat(head.format) || !head.study) {
       // One JSON document in any other layout (older backups are a single line): read it whole.
       const rest: string[] = [first.value];
       for await (const line of lines) rest.push(line);

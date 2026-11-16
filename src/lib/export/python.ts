@@ -65,7 +65,7 @@ export function pyLiteral(v: unknown, indent = 0): string {
 }
 
 export const SCRIPT_TEMPLATE = `"""
-LLM annotation script exported from Annotation Desk {{APP_VERSION}}.
+LLM annotation script.
 
 Study:  {{STUDY_NAME}}
 Run:    {{RUN_DESCRIPTION}}{{FALLBACK_NOTE}}
@@ -120,7 +120,7 @@ OUTPUT_SCHEMA = {{OUTPUT_SCHEMA}}
 # Fields written to results.csv.
 FIELDS = {{FIELDS}}
 
-# Remaining request settings, exactly as sent by Annotation Desk
+# Remaining request settings, exactly as sent in the original run
 # (token limit, effort / reasoning, thinking, temperature, caching key, ...).
 REQUEST_SETTINGS = {{REQUEST_SETTINGS}}
 
@@ -213,7 +213,7 @@ def call_model(client, body):
             "cache_read_tokens": u.cache_read_input_tokens or 0,
             "cache_write_tokens": u.cache_creation_input_tokens or 0,
         }
-        # A stream that ended before its last event has no stop reason: counted as cut off (as in Annotation Desk).
+        # A stream that ended before its last event has no stop reason: counted as cut off (as in the original run).
         stop = msg.stop_reason or "incomplete (stream ended early)"
         category = getattr(getattr(msg, "stop_details", None), "category", None)
         if stop == "refusal" and category:
@@ -246,7 +246,7 @@ def call_model(client, body):
 
 
 def as_text(v):
-    """Field value as text, written the way Annotation Desk writes it (3.0 -> "3", True -> "true")."""
+    """Field value as text, written the way the original results write it (3.0 -> "3", True -> "true")."""
     if v is None:
         return ""
     if isinstance(v, bool):
@@ -259,7 +259,7 @@ def as_text(v):
 
 
 def trim(s):
-    """Strip whitespace as Annotation Desk does (JavaScript's trim; Python's strip() keeps a byte-order mark, U+FEFF)."""
+    """Strip whitespace as the original run did (JavaScript's trim; Python's strip() keeps a byte-order mark, U+FEFF)."""
     return s.strip(" \\t\\n\\v\\f\\r\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a"
                    "\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff")
 
@@ -269,17 +269,17 @@ def reject_constant(name):
 
 
 def read_json(s):
-    """Read JSON as Annotation Desk does: NaN and Infinity, which Python would accept, are not valid JSON."""
+    """Read JSON as the original run did: NaN and Infinity, which Python would accept, are not valid JSON."""
     return json.loads(s, parse_constant=reject_constant)
 
 
 def parse_output(text):
-    # As in Annotation Desk: a whole answer in a \`\`\`json fence is read without the fence.
+    # As in the original run: a whole answer in a \`\`\`json fence is read without the fence.
     fenced = re.match(r"^\`\`\`(?:json)?\\s*([\\s\\S]*?)\\s*\`\`\`$", trim(text))
     # trim() also inside the fence: JavaScript's \\s includes the byte-order mark, Python's doesn't.
     cleaned = trim(fenced.group(1)) if fenced else trim(text)
     if OUTPUT_SCHEMA is None:
-        # As in Annotation Desk: an answer containing JSON ({"...) that can't be read counts as failed.
+        # As in the original run: an answer containing JSON ({"...) that can't be read counts as failed.
         if re.search(r'\\{\\s*"', text):
             try:
                 readable = isinstance(read_json(cleaned), dict)
@@ -298,7 +298,7 @@ def parse_output(text):
     if "rationale" in obj:
         values["rationale"] = as_text(obj["rationale"])
     missing = [f for f in FIELDS if f not in obj]
-    # As in Annotation Desk: a value the codebook (the schema) doesn't allow, e.g. 5 on -3..3 or null, is no label.
+    # As in the original run: a value the codebook (the schema) doesn't allow, e.g. 5 on -3..3 or null, is no label.
     props = (OUTPUT_SCHEMA or {}).get("properties", {})
     bad = []
     for f in FIELDS:
@@ -320,7 +320,7 @@ def parse_output(text):
 
 
 def in_enum(x, enum):
-    """Whether x is one of the allowed values, read as Annotation Desk reads them (case, spaces, a typed minus)."""
+    """Whether x is one of the allowed values, read as the original run read them (case, spaces, a typed minus)."""
     def norm(v):
         t = " ".join(str(v).replace("\u2212", "-").replace("\u2013", "-").lower().split())
         try:
@@ -375,10 +375,10 @@ def main():
     extra = ["rationale"] if OUTPUT_SCHEMA and "rationale" in OUTPUT_SCHEMA.get("properties", {}) else []
     own = ["doc_id", "replicate", "status", "parse_error", "error", "model_reported", "stop_reason", "input_tokens",
            "output_tokens", "cache_read_tokens", "cache_write_tokens", "latency_s", "completed_at"]
-    # As in Annotation Desk's exports: a field named like one of these columns is written as answer_<name>.
+    # As in the original results: a field named like one of these columns is written as answer_<name>.
     column_of = {f: "answer_" + f if f in own else f for f in FIELDS}
     columns = [*own[:3], *column_of.values(), *extra, *own[3:]]
-    # With a byte-order mark, like Annotation Desk's CSVs, so Excel reads letters such as æøå correctly.
+    # With a byte-order mark, like the original results' CSVs, so Excel reads letters such as æøå correctly.
     with open(args.out, "w", newline="", encoding="utf-8-sig") as out, open(args.log, "a", encoding="utf-8") as log:
         writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
@@ -395,7 +395,7 @@ def main():
                     values, parse_error = parse_output(text)
                     record.update({column_of.get(k, k): v for k, v in values.items()})
                     record.update(usage)
-                    # As in Annotation Desk: a cut-off, refused, empty or unreadable answer counts as failed. A cut-off,
+                    # As in the original run: a cut-off, refused, empty or unreadable answer counts as failed. A cut-off,
                     # refused or empty one is reported once, as such, not also as unreadable JSON.
                     incomplete = stop not in ("", "end_turn", "stop_sequence", "completed")
                     empty = not trim(text)
@@ -428,11 +428,9 @@ export function scriptValues(study: Study, run: Run, exportedAt: string, runs: R
   const p = run.snapshot.prompt;
   const fields = p.outputMode === 'structured' ? p.variables.map((v) => v.name) : ['response'];
   const provider = run.snapshot.model.provider;
-  const madeWith = run.snapshot.appVersion !== __APP_VERSION__ ? ` with Annotation Desk ${run.snapshot.appVersion}` : '';
   return {
-    APP_VERSION: __APP_VERSION__,
     STUDY_NAME: docLine(study.name),
-    RUN_DESCRIPTION: docLine(`#${runName(run, runs)}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}${madeWith}; exported ${exportedAt}`),
+    RUN_DESCRIPTION: docLine(`#${runName(run, runs)}${run.label ? ` (${run.label})` : ''}, started ${run.createdAt}; exported ${exportedAt}`),
     FALLBACK_NOTE:
       provider === 'anthropic' && run.snapshot.requestBase.fallbacks != null
         ? "\n        The original run used Anthropic's refusal fallback (a beta feature since\n        removed), which this script does not reproduce."

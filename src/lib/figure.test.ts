@@ -100,18 +100,18 @@ describe('PNG resolution', () => {
 describe('figure numbers', () => {
   it('gives one row per field with the summary and the texts at each value', () => {
     const s = scale([2, 5, 9, 12, 8, 4, 1]);
-    const [row] = summaryCsvRows([{ name: s.label, s }], { run: '#2', model: 'm', appVersion: 'v' });
-    expect(row).toMatchObject({ run: '#2', field: 'Nation & state', n: 41, 'n_-3': 2, n_0: 12, n_3: 1, share_below_0: Math.round((16 / 41) * 1e4) / 1e4, app_version: 'v' });
+    const [row] = summaryCsvRows([{ name: s.label, s }], { run: '#2', model: 'm' });
+    expect(row).toMatchObject({ run: '#2', field: 'Nation & state', n: 41, 'n_-3': 2, n_0: 12, n_3: 1, share_below_0: Math.round((16 / 41) * 1e4) / 1e4 });
     expect(row.mean).toBeCloseTo(s.mean!, 4);
   });
   it('names the group column after the metadata column in a split', () => {
     const s = scale([1, 1, 1, 1, 1, 1, 1]);
-    const [row] = summaryCsvRows([{ name: '1960s', s }], { run: '#2', model: 'm', appVersion: 'v', field: 'Nation', groupColumn: 'era' });
+    const [row] = summaryCsvRows([{ name: '1960s', s }], { run: '#2', model: 'm', field: 'Nation', groupColumn: 'era' });
     expect(row).toMatchObject({ field: 'Nation', era: '1960s' });
   });
   it('gives one row per bar for one field', () => {
     const s = scale([2, 0, 0, 0, 0, 0, 2]);
-    const rows = binCsvRows(s, { run: '#2', model: 'm', appVersion: 'v' });
+    const rows = binCsvRows(s, { run: '#2', model: 'm' });
     expect(rows.map((r) => [r.value, r.n, r.share])).toEqual([
       [-3, 2, 0.5],
       [-2, 0, 0],
@@ -134,12 +134,12 @@ describe('figure numbers in a split', () => {
         { name: 'a', s: s1 },
         { name: 'b', s: s2 },
       ],
-      { run: '#1', model: 'm', appVersion: 'v', field: 'F', groupColumn: 'era' },
+      { run: '#1', model: 'm', field: 'F', groupColumn: 'era' },
     );
     expect(rows[0]['n_0.5']).toBe(0);
     const [, cols] = csvColumns(rows);
     expect(cols.filter((c) => c.startsWith('n_') && c !== 'n_without_value' && c !== 'n_left_out')).toEqual(['n_-3', 'n_-2', 'n_-1', 'n_0', 'n_0.5', 'n_1', 'n_2', 'n_3']);
-    expect(cols[cols.length - 1]).toBe('app_version');
+    expect(cols).not.toContain('app_version');
     expect(cols).not.toContain('share_yes');
   });
 });
@@ -184,7 +184,7 @@ describe('over time', () => {
 
   it('gives the CSV the period bounds and the subset', () => {
     const s = scale([1, 1, 1, 1, 1, 1, 1]);
-    const [row] = summaryCsvRows([{ name: '1950–1954', s, from: 1950, to: 1955 }], { run: '#1', model: 'm', appVersion: 'v', field: 'F', groupColumn: 'year', subset: 'journal = AQ' });
+    const [row] = summaryCsvRows([{ name: '1950–1954', s, from: 1950, to: 1955 }], { run: '#1', model: 'm', field: 'F', groupColumn: 'year', subset: 'journal = AQ' });
     expect(row).toMatchObject({ subset: 'journal = AQ', year: '1950–1954', period_start: 1950, period_end_exclusive: 1955 });
   });
 });
@@ -225,7 +225,7 @@ describe('final check of the downloads (Nov 6)', () => {
         { name: 'B', s: s2 },
         { name: 'Flag', s: flag },
       ],
-      { study: 'S', run: '#1', model: 'm', promptVersion: 3, appVersion: 'v' },
+      { study: 'S', run: '#1', model: 'm', promptVersion: 3 },
     );
     expect(rows[0]).toMatchObject({ study: 'S', prompt_version: 3, scale_min: -3, scale_max: 3, 'n_0.5': 0 });
     // The flag: 0 and 1 are its own; −3, 0.5 and 3 aren't on its scale (blank, not 0).
@@ -239,13 +239,13 @@ describe('final check of the downloads (Nov 6)', () => {
 
   it('prefixes a group column named like one of the table’s own', () => {
     const s = scale([1, 1, 1, 1, 1, 1, 1]);
-    const [row] = summaryCsvRows([{ name: '7', s }], { run: '#1', model: 'm', appVersion: 'v', field: 'F', groupColumn: 'n' });
+    const [row] = summaryCsvRows([{ name: '7', s }], { run: '#1', model: 'm', field: 'F', groupColumn: 'n' });
     expect(row).toMatchObject({ group_n: '7', n: 7 });
   });
 
   it('gives one field’s CSV the field’s n and mean on every row', () => {
     const s = scale([2, 0, 0, 0, 0, 0, 2]);
-    const rows = binCsvRows(s, { study: 'S', run: '#2', model: 'm', promptVersion: 1, appVersion: 'v' });
+    const rows = binCsvRows(s, { study: 'S', run: '#2', model: 'm', promptVersion: 1 });
     expect(rows[0]).toMatchObject({ study: 'S', prompt_version: 1, field_n: 4, field_mean: 0 });
   });
 

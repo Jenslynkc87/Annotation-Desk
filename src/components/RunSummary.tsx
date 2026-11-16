@@ -112,13 +112,12 @@ export function RunSummary({
   const name = `run${runName(run, runs)}`;
   const shownLabel = shownSubset ? subsetLabel(shownSubset) : '';
   const about = (what: string) =>
-    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}${shownLabel ? `, ${w.many} with ${shownLabel}` : ''}. Annotation Desk ${__APP_VERSION__}, ${localDate()}.`;
+    `Study “${study.name || 'Untitled'}”, run #${runName(run, runs)} (${run.snapshot.model.model}, prompt v${run.snapshot.promptVersion}): ${what}${shownLabel ? `, ${w.many} with ${shownLabel}` : ''}. ${localDate()}.`;
   const csvMeta = {
     study: study.name || 'Untitled',
     run: `#${runName(run, runs)}`,
     model: run.snapshot.model.model,
     promptVersion: run.snapshot.promptVersion,
-    appVersion: __APP_VERSION__,
     ...(shownLabel ? { subset: shownLabel } : {}),
   };
   const file = (part: string) => `${fileSlug(study.name || 'study')}_${name}_${part}${shownLabel ? `_${fileSlug(shownLabel)}` : ''}`;

@@ -132,7 +132,7 @@ export const openaiAdapter: ProviderAdapter = {
       body.prompt_cache_options = { mode: 'explicit' };
     } else if (options.caching) {
       // Older models cache long prefixes automatically (cannot be turned off); a stable key helps hits.
-      body.prompt_cache_key = `annotation-desk-${promptHash}`;
+      body.prompt_cache_key = `prompt-${promptHash}`;
     }
     return body;
   },

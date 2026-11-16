@@ -275,18 +275,16 @@ describe('exported script', () => {
     expect(plain).not.toContain('refusal fallback');
   });
 
-  it('names the version that exported the script and, if different, the one that made the run', () => {
+  it('names neither the app nor its build (only when the run started and when it was exported)', () => {
     const { study, run } = makeRun('anthropic', promptPlain);
-    run.snapshot.appVersion = __APP_VERSION__;
-    const same = fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now'));
-    expect(same).toContain(`exported from Annotation Desk ${__APP_VERSION__}.\n`);
-    expect(same).toContain('started 2026-01-01T00:00:00Z; exported now');
-    run.snapshot.appVersion = '0.0.9';
-    const older = fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now'));
-    expect(older).toContain(`exported from Annotation Desk ${__APP_VERSION__}.\n`);
-    expect(older).toContain('started 2026-01-01T00:00:00Z with Annotation Desk 0.0.9; exported now');
+    run.snapshot.appVersion = '0.1.0+abc1234 (2026-11-09)';
+    const filled = fillScript(SCRIPT_TEMPLATE, scriptValues(study, run, 'now'));
+    for (const script of [filled, SCRIPT_TEMPLATE]) {
+      expect(script).not.toMatch(/Annotation Desk|annotation-desk|abc1234/i);
+    }
+    expect(filled).toContain('started 2026-01-01T00:00:00Z; exported now');
     // No resume: the usage text says what a new run does to earlier output.
-    expect(older).toContain('Each run starts from the\nfirst row and overwrites --out');
+    expect(filled).toContain('Each run starts from the\nfirst row and overwrites --out');
   });
 
   it('rebuilds the exact request for an entry (model-knowledge study)', () => {

@@ -191,7 +191,7 @@ export const retryUnderWay = (run: Run) => retryInProgress(run) || (run.status =
  * Build ids of versions before October 22, 2026 (the published one among them) are a bare version such as "0.1.0";
  * later ones add the commit ("0.1.0+3f2a9c1 (2026-10-22)").
  */
-const BARE_VERSION = /^\d+\.\d+\.\d+$/;
+export const BARE_VERSION = /^\d+\.\d+\.\d+$/;
 
 export interface RetryCount {
   at: string;
