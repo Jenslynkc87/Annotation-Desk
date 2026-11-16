@@ -149,6 +149,19 @@ describe('comparisonSentence', () => {
     const clear = comparisonSentence('race', 'A', 'B', { ...s, meanDifference: -0.012, ci: { meanDifference: [-0.02, -0.001] as [number, number] } }, 4);
     expect(clear).toContain('B scored on average 0.01 points lower than A (95% CI −0.02 to −0.001)');
   });
+
+  it('leaves out a statistic that cannot be computed instead of writing "—" (Nov 16)', () => {
+    const base = agreement(['1', '0', '-1', '1'], ['1', '0', '-1', '0'], 'ordinal', ['-1', '0', '1'], 1, { withIntervals: false });
+    const full = comparisonSentence('race', 'A', 'B', base, 4);
+    expect(full).toMatch(/linear-weighted κ = .*, linear-weighted Gwet's AC2 = .*, Krippendorff's α \(ordinal\) = /);
+    const noAc2 = comparisonSentence('race', 'A', 'B', { ...base, gwetAC2Linear: null, weightedKappaLinear: null }, 4);
+    expect(noAc2).not.toContain('—');
+    expect(noAc2).not.toContain('AC2');
+    expect(noAc2).toMatch(/; Krippendorff's α \(ordinal\) = [^;]* \(N = 4\)\./);
+    const nominal = agreement(['a', 'a', 'a'], ['a', 'a', 'a'], 'nominal', ['a', 'b'], 0, { withIntervals: false });
+    const text = comparisonSentence('kind', 'A', 'B', { ...nominal, cohenKappa: null, krippendorffAlpha: null }, 3);
+    expect(text).toBe('For kind, A and B gave the same label for 100.0% of texts (N = 3).');
+  });
 });
 
 describe('request and response logs in the supplementary package', () => {

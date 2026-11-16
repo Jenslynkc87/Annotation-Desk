@@ -36,7 +36,12 @@ export interface Job {
   total: number;
   done: number;
   failed: number;
+  /** Stops the requests under way at once (a second Cancel, a failed save, an unexpected error): their answers are lost. */
   abort: AbortController;
+  /** Cancel: no new requests are sent; those under way finish and are kept (their answers are paid for). */
+  cancel: AbortController;
+  /** Cancel was pressed and the requests under way are finishing (shown on the progress bar). */
+  finishing?: boolean;
 }
 
 export interface Toast {
@@ -1720,9 +1725,10 @@ type Retry = { at: string; before: Pick<Run, 'status' | 'error' | 'finishedAt'> 
 async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: string, retry?: Retry) {
   const { snapshot } = run;
   const adapter = provider(snapshot.model.provider);
-  const job: Job = { runId: run.id, total: tasks.length, done: 0, failed: 0, abort: new AbortController() };
+  const job: Job = { runId: run.id, total: tasks.length, done: 0, failed: 0, abort: new AbortController(), cancel: new AbortController() };
   set({ job });
   const signal = job.abort.signal;
+  const cancelled = job.cancel.signal;
   // Stopped because every request fails the same way: no further requests are sent; those under way finish and are kept.
   let stopping = false;
   // Requests answered (stored) so far, how many of them failed in a way that would hit every request, for which
@@ -1733,8 +1739,8 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
   const messages400 = new Set<string>();
   let connection = false;
   let next = 0;
-  // Requests whose sending began: a Cancel or a failed save stops those under way, which may have reached the
-  // provider (and be charged) without an answer being stored.
+  // Requests whose sending began: a second Cancel ("Stop now") or a failed save stops those under way, which may have
+  // reached the provider (and be charged) without an answer being stored. A first Cancel lets them finish.
   let began = 0;
   const worker = async () => {
     try {
@@ -1746,7 +1752,7 @@ async function sendTasks(run: Run, tasks: Task[], key: string, doneMessage: stri
     }
   };
   const sendSome = async () => {
-    while (next < tasks.length && !signal.aborted && !stopping) {
+    while (next < tasks.length && !signal.aborted && !cancelled.aborted && !stopping) {
       const t = tasks[next++];
       const requestedAt = nowIso();
       const started = performance.now();
@@ -1806,7 +1812,8 @@ async function finishTasks(run: Run, job: Job, doneMessage: string, how: { retry
   const signal = job.abort.signal;
   flushResults();
   const final = getState().job;
-  const stopped = signal.aborted || stopping;
+  // (Cancel pressed once every request had begun: all of them finished, so the run is complete.)
+  const stopped = signal.aborted || stopping || (job.cancel.signal.aborted && how.began < job.total);
   const stoppedByErrors = stopping || (signal.aborted && !!run.error);
   run.status = !stopped ? 'completed' : retry ? retry.before.status : stoppedByErrors ? 'failed' : 'cancelled';
   if (retry && stopped && !stoppedByErrors) run.error = retry.before.error;
@@ -1843,7 +1850,9 @@ async function finishTasks(run: Run, job: Job, doneMessage: string, how: { retry
   } else if (stoppedByErrors) {
     toast(run.error ?? 'Run failed', 'error', true);
   } else {
-    toast(`${retry ? `Retry in run ${runLabel(run)}` : `Run ${runLabel(run)}`} cancelled. Completed results were kept.`);
+    toast(
+      `${retry ? `Retry in run ${runLabel(run)}` : `Run ${runLabel(run)}`} cancelled. ${signal.aborted ? 'Completed results were kept; requests still under way were dropped.' : 'Completed results were kept, including those of the requests that were under way.'}`,
+    );
   }
 }
 
@@ -1978,8 +1987,19 @@ export async function retryFailed(runId: string) {
   await sendTasks(run, tasks, key, `Retry in run ${runLabel(run)} finished`, retry);
 }
 
+/**
+ * Cancel: the first press sends no new requests and lets those under way finish, so answers already paid for are kept.
+ * A second press ("Stop now") drops the requests still under way.
+ */
 export function cancelJob() {
-  state.job?.abort.abort();
+  const job = state.job;
+  if (!job) return;
+  if (!job.cancel.signal.aborted) {
+    job.cancel.abort();
+    set((s) => (s.job ? { job: { ...s.job, finishing: true } } : {}));
+  } else {
+    job.abort.abort();
+  }
 }
 
 /** A run's batch upload whose outcome is unknown (cut off, or marked as under way while no upload is going on). */

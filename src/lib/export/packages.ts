@@ -1255,7 +1255,7 @@ export async function buildComparisonReport(
     'Draft text',
     compared.map(({ f, all, nonZero }) => ({
       field: f.label,
-      draft_text: comparisonSentence(f.label, name(runA), name(runB), all, both.length, w) + (nonZero ? ' ' + nonZeroSentence(nonZero, w) : ''),
+      draft_text: [comparisonSentence(f.label, name(runA), name(runB), all, both.length, w), nonZero ? nonZeroSentence(nonZero, w) : ''].filter(Boolean).join(' '),
     })),
   );
 
@@ -1408,20 +1408,45 @@ const num2 = (x: number | null) => {
   return fixed(x, d).replace(/^-/, '−');
 };
 
-/** Draft sentence for a paper describing how well two runs agree on one field. */
+/** "κ = 0.61 [0.55, 0.67]", or nothing when the statistic can't be computed (e.g. no AC2 for a Number field). */
+function statPart(name: string, s: Agreement, k: CiStat): string[] {
+  const v = s[k] as number | null | undefined;
+  if (v === null || v === undefined) return [];
+  return [`${name} = ${num2(v)}${s.ci[k] ? ` [${num2(s.ci[k]![0])}, ${num2(s.ci[k]![1])}]` : ''}`];
+}
+
+/** "A, B and C". */
+function listed(parts: string[]): string {
+  return parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+}
+
+/**
+ * Draft sentence for a paper describing how well two runs agree on one field. A statistic that can't be computed is
+ * left out (never written as "—").
+ */
 export function comparisonSentence(label: string, a: string, b: string, s: Agreement, nBoth: number, w = words({})): string {
   if (!s.n) return `No ${w.many} had a usable value for ${label} in both runs.`;
   const ciP = (k: CiStat) => (s.ci[k] ? ` (95% CI ${pct(s.ci[k]![0])}–${pct(s.ci[k]![1])})` : '');
-  const ciN = (k: CiStat) => (s.ci[k] ? ` [${num2(s.ci[k]![0])}, ${num2(s.ci[k]![1])}]` : '');
   // (Sent: a request whose answer failed counts there too, so "annotated" would claim too much.)
   const n = `N = ${s.n.toLocaleString('en-US')}${s.n < nBoth ? ` of ${nBoth.toLocaleString('en-US')} ${w.many} sent in both runs` : ''}`;
+  const stats = (parts: string[]) => (parts.length ? `; ${parts.join(', ')} (${n}).` : ` (${n}).`);
   if (s.meanDifference === null) {
-    return `For ${label}, ${a} and ${b} gave the same label for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}; Cohen's κ = ${num2(s.cohenKappa)}${ciN('cohenKappa')}, Krippendorff's α = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+    const agree = s.percentAgreement !== null ? ` gave the same label for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}` : ` were compared`;
+    return `For ${label}, ${a} and ${b}${agree}${stats([...statPart("Cohen's κ", s, 'cohenKappa'), ...statPart("Krippendorff's α", s, 'krippendorffAlpha')])}`;
   }
   const within = s.tolerance > 0 && s.withinTolerance !== null ? ` and scores within ${s.tolerance} point${s.tolerance === 1 ? '' : 's'} for ${pct(s.withinTolerance)}${ciP('withinTolerance')}` : '';
-  const serious = ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of ${w.many}${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`;
-  const kappa = s.weightedKappaLinear !== null ? `linear-weighted κ = ${num2(s.weightedKappaLinear)}${ciN('weightedKappaLinear')}, ` : '';
-  const first = `For ${label}, ${a} and ${b} gave identical scores for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}${within}; ${kappa}linear-weighted Gwet's AC2 = ${num2(s.gwetAC2Linear)}${ciN('gwetAC2Linear')}, Krippendorff's α (${s.level}) = ${num2(s.krippendorffAlpha)}${ciN('krippendorffAlpha')} (${n}).`;
+  const serious =
+    s.largeDifference !== null
+      ? ` Scores differed by 2 or more points for ${pct(s.largeDifference)} of ${w.many}${s.oppositeDirection !== null ? ` and in direction for ${pct(s.oppositeDirection)}` : ''}.`
+      : s.oppositeDirection !== null
+        ? ` Scores differed in direction for ${pct(s.oppositeDirection)} of ${w.many}.`
+        : '';
+  const agree = s.percentAgreement !== null ? ` gave identical scores for ${pct(s.percentAgreement)} of ${w.many}${ciP('percentAgreement')}${within}` : ` were compared`;
+  const first = `For ${label}, ${a} and ${b}${agree}${stats([
+    ...statPart('linear-weighted κ', s, 'weightedKappaLinear'),
+    ...statPart("linear-weighted Gwet's AC2", s, 'gwetAC2Linear'),
+    ...statPart(`Krippendorff's α (${s.level})`, s, 'krippendorffAlpha'),
+  ])}`;
   const d = s.meanDifference;
   const ci = s.ci.meanDifference;
   const shift =
@@ -1434,7 +1459,12 @@ export function comparisonSentence(label: string, a: string, b: string, s: Agree
 /** The same figures on texts where at least one run gave a non-zero score. */
 function nonZeroSentence(s: Agreement, w: ReturnType<typeof words>): string {
   if (!s.n) return `No ${w.one} received a non-zero score from either run.`;
-  return `On the ${s.n.toLocaleString('en-US')} ${w.many} where at least one run gave a non-zero score, exact agreement was ${pct(s.percentAgreement)}, linear-weighted κ = ${num2(s.weightedKappaLinear)} and AC2 = ${num2(s.gwetAC2Linear)}.`;
+  const parts = [
+    ...(s.percentAgreement !== null ? [`exact agreement was ${pct(s.percentAgreement)}`] : []),
+    ...(s.weightedKappaLinear !== null ? [`linear-weighted κ = ${num2(s.weightedKappaLinear)}`] : []),
+    ...(s.gwetAC2Linear !== null && s.gwetAC2Linear !== undefined ? [`AC2 = ${num2(s.gwetAC2Linear)}`] : []),
+  ];
+  return parts.length ? `On the ${s.n.toLocaleString('en-US')} ${w.many} where at least one run gave a non-zero score, ${listed(parts)}.` : '';
 }
 
 /** Texts removed from the study but kept for the runs that used them, if any: said next to the study's own. */

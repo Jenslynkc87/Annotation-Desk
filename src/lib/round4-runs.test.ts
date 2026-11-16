@@ -457,7 +457,7 @@ describe('Retry failed after an upload of unknown outcome (G10)', () => {
 // ---------- 5. an immediate retry that is stopped ----------
 
 describe('an immediate Retry failed that is stopped (G13, G28)', () => {
-  it('stopped with Cancel: counts every request it began to send, answered or not', async () => {
+  it('stopped with Cancel, then Stop now: counts every request it began to send, answered or not', async () => {
     const ids = await freshStudy(8);
     const send = vi.spyOn(anthropicAdapter, 'send').mockResolvedValue(outcome('', 'refusal'));
     await store.startRun({ docIds: ids, scope: 'all' });
@@ -470,10 +470,49 @@ describe('an immediate Retry failed that is stopped (G13, G28)', () => {
     });
     const retry = store.retryFailed(runId);
     await vi.waitFor(() => expect([n, store.getState().job?.done]).toEqual([6, 2]));
+    // The first Cancel waits for the four under way; Stop now drops them.
+    store.cancelJob();
+    expect(store.getState().job?.finishing).toBe(true);
     store.cancelJob();
     await retry;
     expect(runById(runId).retries).toEqual([{ at: expect.any(String), requests: 6, counted: 'sent', unanswered: 4 }]);
     expect((await dbApi.getRun(runId))!.retries?.[0].requests).toBe(6);
+  });
+
+  it('Cancel sends no new requests and keeps the answers of those under way (Nov 16)', async () => {
+    const ids = await freshStudy(8);
+    const send = vi.spyOn(anthropicAdapter, 'send');
+    const held: (() => void)[] = [];
+    let n = 0;
+    send.mockImplementation(async () => {
+      if (++n <= 2) return outcome('fine');
+      return new Promise<CallOutcome>((resolve) => held.push(() => resolve(outcome('fine'))));
+    });
+    const run = store.startRun({ docIds: ids, scope: 'all' });
+    await vi.waitFor(() => expect([n, store.getState().job?.done]).toEqual([6, 2]));
+    store.cancelJob();
+    expect(store.getState().job?.finishing).toBe(true);
+    for (const r of held) r();
+    await run;
+    expect(n).toBe(6); // nothing new was sent after Cancel
+    const runId = lastRun().id;
+    expect(runById(runId).status).toBe('cancelled');
+    const ok = (await dbApi.getResultsForRun(runId)).filter((r) => r.status === 'ok');
+    expect(ok).toHaveLength(6); // the four under way were stored
+    expect(store.retryableCount(runById(runId), store.getState().results, store.getState().docs)).toBe(2);
+  });
+
+  it('Cancel once every request has begun: they all finish and the run is complete', async () => {
+    const ids = await freshStudy(3);
+    const send = vi.spyOn(anthropicAdapter, 'send');
+    const held: (() => void)[] = [];
+    send.mockImplementation(() => new Promise<CallOutcome>((resolve) => held.push(() => resolve(outcome('fine')))));
+    const run = store.startRun({ docIds: ids, scope: 'all' });
+    await vi.waitFor(() => expect(held).toHaveLength(3));
+    store.cancelJob();
+    for (const r of held) r();
+    await run;
+    expect(runById(lastRun().id).status).toBe('completed');
   });
 
   it('stopped because a result could not be saved: the same', async () => {
