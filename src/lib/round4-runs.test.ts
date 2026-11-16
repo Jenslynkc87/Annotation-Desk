@@ -462,6 +462,9 @@ describe('an immediate Retry failed that is stopped (G13, G28)', () => {
     const send = vi.spyOn(anthropicAdapter, 'send').mockResolvedValue(outcome('', 'refusal'));
     await store.startRun({ docIds: ids, scope: 'all' });
     const runId = lastRun().id;
+    // (A retry is counted from the stored answers requested at or after its start: let the clock move past the first
+    // run's requests, as it always has in use, or a fast machine stamps both in the same millisecond.)
+    await new Promise((r) => setTimeout(r, 5));
     // Two answers come back; four requests are still under way when Cancel is clicked.
     let n = 0;
     send.mockImplementation(async (_k, _b, _p, signal) => {
@@ -481,6 +484,9 @@ describe('an immediate Retry failed that is stopped (G13, G28)', () => {
     const send = vi.spyOn(anthropicAdapter, 'send').mockResolvedValue(outcome('', 'refusal'));
     await store.startRun({ docIds: ids, scope: 'all' });
     const runId = lastRun().id;
+    // (A retry is counted from the stored answers requested at or after its start: let the clock move past the first
+    // run's requests, as it always has in use, or a fast machine stamps both in the same millisecond.)
+    await new Promise((r) => setTimeout(r, 5));
     let n = 0;
     send.mockImplementation(async (_k, _b, _p, signal) => {
       if (++n <= 2) return outcome('fine');
