@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 import * as dbApi from './db';
 import { buildBackup, importBackup } from './export/backup';
 import { buildComparisonReport, buildExcel, buildResearchRepo, buildSupplementary } from './export/packages';
+import { matchLabels, resultsTable } from './import/labels';
+import type { ParsedTable } from './import/parse';
 import { openaiAdapter } from './providers/openai';
 import { DEFAULT_MODEL_SETTINGS, DEFAULT_PROMPT, DEFAULT_RUN_OPTIONS, type Doc, type PromptSpec, type Result, type Run, type Study } from './types';
 
@@ -227,5 +229,54 @@ describe('a lean public package (Nov 16, 2026)', () => {
     expect(readme).toContain('not included as a separate file, but `logs/requests.jsonl` holds every request with its full text');
     expect(readme).not.toContain('are not included in this package');
     expect((await build({ includeTexts: false, includeLogs: false })).read('README.md')).toContain('are not included in this package');
+  });
+});
+
+describe('the Excel workbook, leaner (Nov 16, 2026)', () => {
+  const headers = async (run: Run, rs: Result[], allRuns: Run[] = runs) => {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await (await buildExcel({ study, docs, runs: allRuns, results: rs }, run, { text: false, rationale: false })).arrayBuffer());
+    const out: Record<string, string[]> = {};
+    wb.eachSheet((ws) => (out[ws.name] = (ws.getRow(1).values as unknown[]).slice(1).map(String)));
+    return out;
+  };
+
+  it('By replicate: no run-wide constants (Settings gives them) and no column empty throughout; Results keeps n_ok and n_error', async () => {
+    const h = await headers(runs[0], results);
+    expect(h['By replicate']).toEqual([
+      'model_reported', 'doc_id', 'replicate', 'status', 'tone', 'tone_explanation', 'stop_reason', 'input_tokens', 'output_tokens', 'requested_at', 'completed_at', 'response_id',
+    ]);
+    expect(h.Results).toEqual(expect.arrayContaining(['n_ok', 'n_error']));
+  });
+
+  it('All runs: a column only when some run has a value in it', async () => {
+    expect((await headers(runs[0], results))['All runs']).not.toEqual(expect.arrayContaining(['label']));
+    const labelled = [{ ...runs[0], label: 'pilot' }, ...runs.slice(1)];
+    expect((await headers(labelled[0], results, labelled))['All runs']).toContain('label');
+    expect((await headers(runs[0], results))['All runs']).not.toContain('batch_id');
+  });
+});
+
+describe('a lean results table can’t be added as human labels (Nov 16, 2026)', () => {
+  const many: Doc[] = Array.from({ length: 30 }, (_, i) => ({ id: `L${i}`, studyId: 's', docId: `art_${i}`, text: `T${i}`, meta: { era: i % 2 ? 'early' : 'late' }, source: `art_${i}.md`, order: i, addedAt: '' }));
+  const p: PromptSpec = { ...DEFAULT_PROMPT, outputMode: 'structured', includeRationale: false, variables: [prompt.variables[0]] };
+  const run: Run = { ...mkRun('lean', 1, ''), docIds: many.map((d) => d.id), snapshot: { ...mkRun('lean', 1, '').snapshot, prompt: p } };
+  const score = (i: number) => String((i % 7) - 3);
+  const rs: Result[] = many.map((d, i) => ({ ...results[0], id: `lean:${d.id}`, runId: 'lean', docId: d.id, values: { tone: score(i) } }));
+  const sheet = (cols: string[], value: (c: string, i: number) => string): ParsedTable => ({
+    name: 'results.csv', columns: ['doc_id', ...cols], rows: many.map((d, i) => ({ doc_id: d.docId, ...Object.fromEntries(cols.map((c) => [c, value(c, i)])) })),
+  });
+  const judge = (t: ParsedTable) => {
+    const m = matchLabels(many, t, 'doc_id');
+    return resultsTable(t, [run], rs, m.updates, [p], 'doc_id', m.replaced);
+  };
+  const meta = (c: string, i: number) => (c === 'era' ? many[i].meta.era : score(i));
+
+  it('the public results.csv of a scores-only run (the run’s answers beside the texts’ own metadata): blocked, as a possible export', () => {
+    expect(judge(sheet(['tone', 'era'], meta))).toMatchObject({ columns: ['tone'], copied: ['tone'], sure: false });
+  });
+  it('a coder’s sheet is still accepted: labels in their own column, or differing from the model’s anywhere', () => {
+    expect(judge(sheet(['tone_gold', 'era'], meta)).columns).toEqual([]);
+    expect(judge(sheet(['tone', 'era'], (c, i) => (c === 'tone' && i === 4 ? '3' : meta(c, i)))).columns).toEqual([]);
   });
 });

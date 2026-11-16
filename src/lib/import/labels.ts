@@ -247,7 +247,11 @@ export function resultsTable(
   const timing = cols.includes('latency_ms') && cols.some((c) => c !== 'latency_ms' && TIMING.has(c));
   const strong = cols.filter((c) => EXPORT_COLUMNS.has(c) || agreement.has(c) || (timing && TIMING.has(c)));
   const shared = cols.filter((c) => SHARED_COLUMNS.has(c) && !strong.includes(c));
-  const likely = strong.length > 0 || shared.length >= 2;
+  // A lean results table (the public results.csv, the workbook's Results sheet, Nov 16, 2026) may have none of those:
+  // only a run's fields beside metadata columns the texts already have (`own`). Its short answers are compared too.
+  const rest = cols.filter((c) => !names.has(c));
+  const lean = !!own && cols.some((c) => names.has(c)) && rest.length > 0 && rest.every((c) => own.includes(c));
+  const likely = strong.length > 0 || shared.length >= 2 || lean;
   // Plain-text runs: the keys of the JSON answers (each its own column in the exports). Every sheet is checked and a
   // big study has tens of thousands of answers, so only the keys that matter are looked for (any key in a sheet that
   // looks like an export; otherwise explanations, which may be copied word for word), and only in answers that could
@@ -277,7 +281,7 @@ export function resultsTable(
   // Explanations are compared on any sheet; other answers (short labels a coder may share) only on one that looks
   // like an export.
   const { copied, sameAs } = copiedColumns(answers, runs, textRuns, results, matched, likely);
-  const exported = strong.length > 0 || copied.some(isWordy) || (shared.length >= 2 && copied.length > 0);
+  const exported = strong.length > 0 || copied.some(isWordy) || ((shared.length >= 2 || lean) && copied.length > 0);
   if (!exported) return { columns: [], answers: [], strong: [], copied: [], sameAs: {}, shared: [], sure: true, unknown: [] };
   const columns = [...answers, ...cols.filter((c) => strong.includes(c) || shared.includes(c))];
   // Columns that may hold answers the app doesn't know by name (a run not in this study, or a field renamed since);

@@ -378,11 +378,11 @@ export async function buildExcel(
   const wb = new ExcelJS.Workbook();
   const add = (name: string, rows: Row[]) => addSheet(wb, name, rows);
   add('Results', dropRedundantId(resultsWide(run, d.docs, d.runs, d.results, opts)));
-  add('By replicate', resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }, d.runs));
+  add('By replicate', publicLong(resultsLong(d.study, [run], d.docs, d.results.filter((r) => r.runId === run.id), { rationale: opts.rationale, reasoning: true }, d.runs)));
   const [agr] = await agreement();
   if (agr.length) add('Agreement', agreementRows(agr, runName(run, d.runs)));
   add('Settings', settingsRows(d.study, run, d.runs));
-  add('All runs', runSummaryRows(d.runs, d.results));
+  add('All runs', dropBlankColumns(runSummaryRows(d.runs, d.results)));
   await opts.onProgress?.('Writing the file');
   const out = await wb.xlsx.writeBuffer();
   return new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -687,12 +687,20 @@ function publicWide(run: Run, rows: Row[]): Row[] {
   });
 }
 
-/** One value on every row of a one-run table: metadata.json gives it once. (A field with such a name is answer_….) */
+/** Columns with no value in any row (a label, batch id, error or note no run has). */
+function dropBlankColumns(rows: Row[]): Row[] {
+  const blank = (v: unknown) => v === '' || v === null || v === undefined;
+  const keep = Object.keys(rows[0] ?? {}).filter((k) => rows.some((r) => !blank(r[k])));
+  return rows.map((r) => Object.fromEntries(keep.map((k) => [k, r[k]])));
+}
+
+/** One value on every row of a one-run table: metadata.json (the workbook: Settings) gives it once. (A field with such a name is answer_….) */
 const RUN_CONSTANTS = ['study', 'run', 'run_label', 'prompt_version', 'prompt_hash', 'provider', 'model_requested', 'latency_ms'];
 /** Left out when no row has a value (no error, no cache use, no reasoning tokens). */
-const BLANK_UNLESS_USED = ['parse_error', 'error', 'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens'];
+const BLANK_UNLESS_USED = ['reasoning_summary', 'parse_error', 'error', 'reasoning_tokens', 'cache_read_tokens', 'cache_write_tokens'];
 
-/** results_by_replicate.csv of the public package (response_id is kept: it names each answer at the provider). */
+/** results_by_replicate.csv of the public package, and the workbook's By replicate sheet, whose Settings sheet gives the
+ *  run's constants (response_id is kept: it names each answer at the provider). */
 function publicLong(rows: Row[]): Row[] {
   const unused = BLANK_UNLESS_USED.filter((c) => rows.every((r) => r[c] === '' || r[c] === 0 || r[c] === null || r[c] === undefined));
   const drop = new Set([...RUN_CONSTANTS, ...unused]);
