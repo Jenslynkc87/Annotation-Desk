@@ -16,7 +16,7 @@ export interface Price {
   output: number;
   /** USD per million tokens read from the prompt cache; defaults to 0.1 × input. */
   cacheRead?: number;
-  /** Higher prices for requests whose prompt is over `over` tokens (Claude Haiku 5.5). */
+  /** Higher prices for requests whose prompt is over `over` tokens (Claude Haiku 5.5, GPT-6.2). */
   long?: { over: number; input: number; output: number; cacheRead?: number };
 }
 
@@ -24,12 +24,12 @@ export interface Price {
 export const PRICE_SOURCES: Record<ProviderId, { url: string; checked: string; note?: string }> = {
   anthropic: { url: 'https://platform.claude.com/docs/en/about-claude/pricing', checked: 'November 9, 2026' },
   openai: {
-    url: 'https://openai.com/api/pricing/',
-    checked: 'October 2026',
-    note: "taken from third-party price trackers; OpenAI's own page could not be read automatically",
+    url: 'https://developers.openai.com/api/docs/pricing',
+    checked: 'November 17, 2026',
+    note: "GPT-6 Luna's price is from third-party price trackers",
   },
 };
-export const PRICES_AS_OF = 'October 2026';
+export const PRICES_AS_OF = 'November 2026';
 
 /** Built-in prices; a model id matches the longest key it starts with (so dated ids work). */
 const BUILT_IN: Record<string, Price> = {
@@ -51,8 +51,13 @@ const BUILT_IN: Record<string, Price> = {
   'claude-sonnet-4': { input: 3, output: 15 },
   'claude-haiku-5-5': { input: 0.1, output: 0.5, long: { over: 100_000, input: 0.5, output: 2.5 } },
   'claude-haiku-4-5': { input: 1, output: 5 },
-  'gpt-6-astra': { input: 10, output: 50 },
-  'gpt-6.1-sol': { input: 2, output: 10 },
+  // OpenAI: GPT-6.2 Astra/Sol, GPT-6 Astra and GPT-6.1 Sol checked on OpenAI's pricing and model pages
+  // (November 17, 2026). GPT-6.2: requests over 272K input tokens pay double input and cache rates and
+  // 1.5 times output.
+  'gpt-6.2-astra': { input: 8, output: 40, cacheRead: 0.4, long: { over: 272_000, input: 16, output: 60, cacheRead: 0.8 } },
+  'gpt-6.2-sol': { input: 2, output: 10, cacheRead: 0.1, long: { over: 272_000, input: 4, output: 15, cacheRead: 0.2 } },
+  'gpt-6-astra': { input: 10, output: 50, cacheRead: 1 },
+  'gpt-6.1-sol': { input: 2, output: 10, cacheRead: 0.1 },
   'gpt-6-sol': { input: 2, output: 10 },
   'gpt-6-luna': { input: 0.1, output: 0.5 },
 };

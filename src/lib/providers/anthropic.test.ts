@@ -22,7 +22,7 @@ describe('adaptive thinking', () => {
 import { supportsExplicitCaching } from './openai';
 describe('OpenAI explicit caching', () => {
   it('applies to GPT-5.6 and later only', () => {
-    for (const m of ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.6-sol']) expect(supportsExplicitCaching(m), m).toBe(true);
+    for (const m of ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6.1-sol', 'gpt-6-luna', 'gpt-6-astra', 'gpt-5.6-sol']) expect(supportsExplicitCaching(m), m).toBe(true);
     for (const m of ['gpt-5.5', 'gpt-5', 'gpt-4.1', 'o3', 'gpt-mock-1']) expect(supportsExplicitCaching(m), m).toBe(false);
   });
 });

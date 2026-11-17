@@ -19,6 +19,14 @@ describe('pricing', () => {
     expect(builtInPrice('some-other-model')).toBeUndefined();
   });
 
+  it('knows GPT-6.2 Astra and Sol (OpenAI pricing page, November 17, 2026)', () => {
+    expect(builtInPrice('gpt-6.2-astra')).toMatchObject({ input: 8, output: 40, cacheRead: 0.4 });
+    expect(builtInPrice('gpt-6.2-astra')?.long).toEqual({ over: 272_000, input: 16, output: 60, cacheRead: 0.8 });
+    expect(builtInPrice('gpt-6.2-sol')).toMatchObject({ input: 2, output: 10, cacheRead: 0.1 });
+    expect(builtInPrice('gpt-6.1-sol')).toEqual({ input: 2, output: 10, cacheRead: 0.1 });
+    expect(builtInPrice('gpt-6-astra')?.input).toBe(10);
+  });
+
   it('uses about 30% more tokens per character on the newer Claude tokenizer', () => {
     expect(charsPerToken('claude-opus-5-5')).toBe(3.1);
     expect(charsPerToken('claude-opus-4-7')).toBe(3.1);

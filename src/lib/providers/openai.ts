@@ -20,9 +20,12 @@ export function supportsExplicitCaching(model: string): boolean {
 
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
-/** Current text models per OpenAI's model overview (checked October 2026). Shown before a key is added
- *  and used to label/order the list loaded from the user's account. */
+/** Current text models per OpenAI's model pages (GPT-6.2 checked November 17, 2026; the others October 2026).
+ *  Shown before a key is added and used to label/order the list loaded from the user's account.
+ *  GPT-6.2 Astra and Sol reject reasoning effort `none` (their model pages). */
 export const KNOWN_OPENAI_MODELS: ModelInfo[] = [
+  { id: 'gpt-6.2-astra', label: 'GPT-6.2 Astra', description: "OpenAI's frontier model (November 2026), for the hardest tasks; cheaper than GPT-6 Astra.", effortLevels: ALL_EFFORTS },
+  { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol', description: 'Efficient and versatile (November 2026); same price as GPT-6.1 Sol.', effortLevels: ALL_EFFORTS },
   { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: "OpenAI's most capable model, built for complex reasoning; the most expensive.", effortLevels: ALL_EFFORTS },
   { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', description: 'Near-flagship performance at lower cost; a balanced default for annotation.', effortLevels: ALL_EFFORTS },
   { id: 'gpt-6-luna', label: 'GPT-6 Luna', description: "OpenAI's most efficient model, for focused, high-volume tasks.", effortLevels: ['none', ...ALL_EFFORTS] },
