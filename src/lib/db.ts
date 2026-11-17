@@ -102,6 +102,10 @@ export async function reassignDocs(studyId: string, pairs: [string, string][]): 
         await tx.objectStore('logs').put({ ...l, id: rename(l.id) });
       }
       run.docIds = run.docIds.map((d) => (d === from ? to : d));
+      if (run.metaSent?.[from]) {
+        run.metaSent[to] = run.metaSent[from];
+        delete run.metaSent[from];
+      }
       if (run.batch) run.batch.map = Object.fromEntries(Object.entries(run.batch.map).map(([k, [d, rep]]) => [k, [d === from ? to : d, rep] as [string, number]]));
       changed = true;
     }

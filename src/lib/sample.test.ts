@@ -42,8 +42,10 @@ describe('stratified sample', () => {
     expect(s.ids).toContain('rare');
     expect(s.ids).toHaveLength(20);
   });
-  it('draws the same whatever order the strata boxes were ticked (method 3), and can still redraw method 2', () => {
-    expect(SAMPLING_METHOD).toBe('sampling method 3');
+  it('draws the same whatever order the strata boxes were ticked (methods 3 and 4), and can still redraw method 2', () => {
+    // (Method 4, Nov 17, 2026, keeps strata with coinciding names apart; here none coincide, so it draws as 3.)
+    expect(SAMPLING_METHOD).toBe('sampling method 4');
+    expect(drawStratifiedSample(docs, { ...opts, method: 3 })).toEqual(r);
     expect(orderStrata(['journal', 'era'])).toEqual(['era', 'journal']);
     const ticked = drawStratifiedSample(docs, { ...opts, strata: ['journal', 'era'] });
     expect(ticked.ids).toEqual(r.ids);

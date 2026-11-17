@@ -76,11 +76,14 @@ export function comparableLabel(field: Variable | ComparableField | undefined, p
     const cats = new Set(field.type === 'boolean' ? ['false', 'true'] : field.values.map((x) => normalizeLabel(x)).filter(Boolean));
     const codes = [...cats].map(toNumber);
     if (field.type === 'category' && cats.size >= 2 && codes.every(Number.isFinite)) {
-      // Categories that are all numbers (e.g. codes 1 to 5) are judged on their range, as in `agreement`: a value
-      // between two codes is compared, a number off the range (e.g. 99) is not.
+      // Categories that are all numbers (e.g. codes 1 to 5) are judged as in `agreement`: a value between two whole
+      // codes (a 1.5) is compared; a number off the range (e.g. 99), or a whole number that is no code (2 where the
+      // codes are 1 and 3), is not.
       const [lo, hi] = [Math.min(...codes), Math.max(...codes)];
       const inRange = (v: string) => Number.isFinite(toNumber(v)) && toNumber(v) >= lo - 1e-9 && toNumber(v) <= hi + 1e-9;
-      fits = (v) => inRange(v) || (v.includes(' | ') && v.split(' | ').every(inRange));
+      const isCode = (v: string) => Number.isFinite(toNumber(v)) && codes.some((c) => Math.abs(c - toNumber(v)) < 1e-9);
+      const code = (v: string) => inRange(v) && (isCode(v) || !Number.isInteger(toNumber(v)));
+      fits = (v) => code(v) || (v.includes(' | ') && v.split(' | ').every(isCode));
       onNumbers = true;
     } else if (cats.size >= 2) fits = (v) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));
   }

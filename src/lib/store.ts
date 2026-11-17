@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { buildingFor, waitForDownload } from './background';
 import * as dbApi from './db';
 import { sortAddition, type NewItem } from './dedupe';
-import { buildOutputSchema, effectiveTemplate, parseModelOutput, renderMessageParts } from './prompt';
+import { asSent, buildOutputSchema, effectiveTemplate, parseModelOutput, promptMetaColumns, renderMessageParts } from './prompt';
 import { describeApiError, isConnectionError, isPermanentError, provider } from './providers';
 import { rejectsTemperature } from './providers/anthropic';
 import type { BatchLine, BatchStatus, CallOutcome, ListedBatch, ModelInfo } from './providers/types';
@@ -1161,6 +1161,12 @@ async function prepareRun(st: Study, req: RunRequest, key: string): Promise<{ ru
     error: null,
     ...(st.prompt.outputMode === 'text' && st.scoreScale ? { scoreScale: st.scoreScale } : {}),
   };
+  // A prompt that inserts metadata: the values sent, kept with the run (see `asSent`).
+  const used = promptMetaColumns(snapshot.prompt.userTemplate, snapshot.prompt.subject);
+  if (used.length) {
+    const wanted = new Set(req.docIds);
+    run.metaSent = Object.fromEntries(state.docs.filter((d) => wanted.has(d.id)).map((d) => [d.id, Object.fromEntries(used.map((c) => [c, d.meta[c] ?? '']))]));
+  }
   const tasks = buildTasks(run, () => true);
 
   if (batch) {
@@ -1677,7 +1683,7 @@ function buildTasks(run: Run, include: (docId: string, replicate: number) => boo
   for (const id of run.docIds) {
     const doc = docsById.get(id);
     if (!doc) continue;
-    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, doc, snapshot.prompt.subject), snapshot.options, snapshot.model.model);
+    const part = adapter.buildRequestPart(renderMessageParts(snapshot.prompt.userTemplate, asSent(run, doc), snapshot.prompt.subject), snapshot.options, snapshot.model.model);
     for (let r = 1; r <= snapshot.options.replicates; r++) if (include(doc.id, r)) tasks.push({ doc, replicate: r, part });
   }
   return tasks;
@@ -2536,7 +2542,7 @@ async function storeBatchResults(run: Run, lines: BatchLine[], requestedAt: stri
       const doc = docsById.get(ref[0]) ?? ({ id: ref[0] } as Doc);
       const result = makeResult(run, doc, ref[1], requestedAt, line.ok ? line.outcome : null, line.ok ? null : line.error, null, completedAt);
       const part = docsById.has(ref[0])
-        ? adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, doc, run.snapshot.prompt.subject), run.snapshot.options, run.snapshot.model.model)
+        ? adapter.buildRequestPart(renderMessageParts(run.snapshot.prompt.userTemplate, asSent(run, doc), run.snapshot.prompt.subject), run.snapshot.options, run.snapshot.model.model)
         : { note: 'text deleted from the study before its answer was collected' };
       const log: ResultLog = {
         id: result.id,

@@ -13,7 +13,7 @@ export function SampleDialog({ onClose }: { onClose: () => void }) {
   const columns = useMemo(() => [...new Set(docs.flatMap((d) => Object.keys(d.meta)))], [docs]);
   const valuesOf = (c: string) => [...new Set(docs.map((d) => d.meta[c] ?? '').filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   // Columns that group texts (era, journal, …): a few distinct values, not one per text. Listed (and the ticked
-  // strata kept) in the fixed order a draw uses, whatever order they are ticked (sampling method 3).
+  // strata kept) in the fixed order a draw uses, whatever order they are ticked (sampling methods 3 and 4).
   const groupColumns = orderStrata(columns.filter((c) => c !== 'file' && valuesOf(c).length >= 2 && valuesOf(c).length <= 200));
   const [size, setSize] = useState(100);
   const [strata, setStrata] = useState<string[]>([]);

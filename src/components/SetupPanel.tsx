@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react';
-import { invalidPlaceholders, RATIONALE_KEY, renderMessageParts, templatePlaceholders, toNumber, uniqueKey } from '../lib/prompt';
+import { invalidPlaceholders, lookAlikeValues, RATIONALE_KEY, renderMessageParts, templatePlaceholders, toNumber, uniqueKey } from '../lib/prompt';
 import { FALLBACK_ANTHROPIC_MODELS, rejectsTemperature } from '../lib/providers/anthropic';
 import { KNOWN_OPENAI_MODELS, supportsExplicitCaching } from '../lib/providers/openai';
 import { effortChoices as effortChoicesFor, pickEffort, PROVIDERS, provider } from '../lib/providers';
@@ -425,7 +425,7 @@ export function SetupPanel({ onOpenKeys }: { onOpenKeys: () => void }) {
             <input type="checkbox" checked={o.storeInLogs !== false} onChange={(e) => updateStudy((s) => void (s.options.storeInLogs = e.target.checked))} />
             <span>
               Show requests in OpenAI's logs
-              <div className="hint">Lets you inspect them on platform.openai.com. OpenAI keeps stored requests for a limited time; turn off for confidential texts.</div>
+              <div className="hint">Saves requests and answers in your OpenAI account, where you can inspect them on platform.openai.com. Turning this off doesn't stop OpenAI from keeping them: your organization's API data retention still applies (by default up to 30 days, for abuse monitoring).</div>
             </span>
           </label>
         )}
@@ -652,6 +652,14 @@ function VariableEditor() {
               )}
             </div>
             {v.type === 'ordinal' && v.values.some((x) => x.trim() && !Number.isInteger(toNumber(x))) && <div className="hint err">Ordinal values must be whole numbers.</div>}
+            {v.type === 'category' && lookAlikeValues(v.values).length > 0 && (
+              <div className="hint err">
+                {lookAlikeValues(v.values)
+                  .map((g) => g.map((x) => `“${x}”`).join(' and '))
+                  .join('; ')}{' '}
+                count as the same value in the statistics (capitals, extra spaces and numbers written differently, such as 01 and 1, are read alike). Give each category a clearly different value.
+              </div>
+            )}
             <input className="input" aria-label="Field description" placeholder="Description for the model (optional)" value={v.description} onChange={(e) => upd(i, (x) => void (x.description = e.target.value))} />
           </div>
         );

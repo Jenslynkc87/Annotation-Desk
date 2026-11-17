@@ -132,6 +132,12 @@ export interface Run {
   mode: 'sync' | 'batch';
   scope: string; // human-readable description, e.g. "Random sample of 10"
   docIds: string[]; // internal doc ids included
+  /**
+   * Runs from Nov 17, 2026 whose prompt inserts metadata ({{meta.year}}): those columns' values per text (internal
+   * doc id) as the run first sent them. Retries and the collected batch logs use them, so a metadata edit made after
+   * the run started doesn't change its requests; the public package's data/corpus.csv gives them for the script.
+   */
+  metaSent?: Record<string, Record<string, string>>;
   status: RunStatus;
   snapshot: RunSnapshot;
   batch: null | {

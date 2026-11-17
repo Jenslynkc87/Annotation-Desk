@@ -16,9 +16,11 @@ export interface SampleOptions {
    */
   markedAs?: { column: string; value: string } | null;
   seed: number;
-  /** 3 (the default) takes the strata columns in the fixed order of `orderStrata`; 2 takes them in the order
-   *  given (as they were ticked), to redraw a sample recorded with method 2. */
-  method?: 2 | 3;
+  /** 4 (the default, Nov 17, 2026) keeps strata apart whose values only read alike when joined ("a · b" and "c"
+   *  vs "a" and "b · c"; a blank vs a literal "(none)"); otherwise it draws exactly as 3, which (like 2) merged
+   *  them. 3 and 4 take the strata columns in the fixed order of `orderStrata`; 2 takes them in the order given
+   *  (as they were ticked). Pass 2 or 3 to redraw a sample recorded with that method. */
+  method?: 2 | 3 | 4;
 }
 
 export interface Stratum {
@@ -43,9 +45,9 @@ const norm = (s: string | undefined) => (s ?? '').trim().toLowerCase();
 const byCode = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Recorded with each draw, so a later reader knows which rules made the sample from the seed. */
-export const SAMPLING_METHOD = 'sampling method 3';
+export const SAMPLING_METHOD = 'sampling method 4';
 
-/** The strata columns in the order a draw uses them (method 3): by name, character by character, whatever order
+/** The strata columns in the order a draw uses them (methods 3 and 4): by name, character by character, whatever order
  *  they were ticked and whatever order the metadata columns were added in. The sample dialog lists them so. */
 export const orderStrata = (strata: string[]) => [...strata].sort(byCode);
 
@@ -62,7 +64,7 @@ export function heldValue(d: Doc, markedAs: { column: string; value: string }): 
  * Proportional allocation (largest remainder), at least one text per stratum when the sample is large
  * enough; within each stratum a seeded shuffle of the texts in file-name order, so the same seed, corpus and
  * strata columns always give the same sample, whatever the import order, the order the columns were ticked or
- * the browser (method 3: strata columns ordered by name; method 2, October 2026, took them in the order they
+ * the browser (method 4: as 3, with strata whose joined names coincide kept apart; method 3: strata columns ordered by name; method 2, October 2026, took them in the order they
  * were ticked; method 1, before that, sorted by the browser's language and ranked remainders before the
  * minimum of one). Eligible: every text except those left out by `exclude` and, with `markedAs` (the dialog always
  * gives it, since October 24, 2026), those already marked with another value in the sample's column; the note
@@ -80,12 +82,19 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
     return !held;
   });
   const taken = [...takenBy].map(([value, n]) => ({ value, n })).sort((a, b) => b.n - a.n || byCode(a.value, b.value));
+  // Each stratum is named by its values joined ("1950s · AQ"; a blank one "(none)"). Up to method 3 that name was also
+  // what grouped the texts, so values that join alike fell into one stratum; method 4 groups by the values themselves
+  // and orders by the name first, so where no names coincide it draws exactly as method 3.
   const groups = new Map<string, Doc[]>();
+  const nameOf = new Map<string, string>();
   for (const d of eligible) {
-    const key = strata.map((c) => d.meta[c]?.trim() || '(none)').join(' · ') || 'all';
+    const name = strata.map((c) => d.meta[c]?.trim() || '(none)').join(' · ') || 'all';
+    const key = (o.method ?? 4) >= 4 ? JSON.stringify(strata.map((c) => d.meta[c]?.trim() ?? '')) : name;
+    nameOf.set(key, name);
     groups.set(key, [...(groups.get(key) ?? []), d]);
   }
-  const keys = [...groups.keys()].sort(byCode);
+  const byName = (a: string, b: string) => byCode(nameOf.get(a)!, nameOf.get(b)!) || byCode(a, b);
+  const keys = [...groups.keys()].sort(byName);
   const size = Math.min(Math.max(0, Math.round(o.size)), eligible.length);
   const n = (k: string) => groups.get(k)!.length;
   const quota = new Map(keys.map((k) => [k, (size * n(k)) / Math.max(1, eligible.length)]));
@@ -95,7 +104,7 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
   // Too few: add to the strata furthest below their share (a stratum raised to one is not). Too many (from the
   // minimum of one): take from the largest.
   const short = (k: string) => quota.get(k)! - take.get(k)!;
-  const byRemainder = [...keys].sort((a, b) => short(b) - short(a) || byCode(a, b));
+  const byRemainder = [...keys].sort((a, b) => short(b) - short(a) || byName(a, b));
   // Round after round in this order until the total is right (each round changes at least one stratum, or ends).
   for (let moved = true; total() < size && moved; ) {
     moved = false;
@@ -104,7 +113,7 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
       if (take.get(k)! < n(k)) take.set(k, take.get(k)! + 1), (moved = true);
     }
   }
-  const bySize = [...keys].sort((a, b) => take.get(b)! - take.get(a)! || byCode(a, b));
+  const bySize = [...keys].sort((a, b) => take.get(b)! - take.get(a)! || byName(a, b));
   for (let moved = true; total() > size && moved; ) {
     moved = false;
     for (const k of bySize) {
@@ -122,7 +131,7 @@ export function drawStratifiedSample(docs: Doc[], o: SampleOptions): SampleResul
     }
     ids.push(...items.slice(0, take.get(k)!).map((d) => d.id));
   }
-  return { ids, strata: keys.map((k) => ({ key: k, available: n(k), drawn: take.get(k)! })), eligible: eligible.length, taken };
+  return { ids, strata: keys.map((k) => ({ key: nameOf.get(k)!, available: n(k), drawn: take.get(k)! })), eligible: eligible.length, taken };
 }
 
 type Words = { one: string; many: string };

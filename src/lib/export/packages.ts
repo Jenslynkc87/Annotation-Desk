@@ -4,7 +4,7 @@ import { logPagesForRun } from '../db';
 import { fixed, fmtStat } from '../metrics';
 import { combineFields, comparableFields, fieldValue, scoreKeep } from '../compare';
 import { agreement, BOOTSTRAP_RESAMPLES, type Agreement, type CiStat } from '../metrics';
-import { buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from '../prompt';
+import { asSent, buildOutputSchema, effectiveTemplate, flattenJsonResponse, isExplanationKey, normalizeLabel, TEXT_RESPONSE_KEY, toNumber } from '../prompt';
 import { linearTrend } from '../summary';
 import { buildDocViews, offScaleLeftOut, replacedAttempts, retriedRequests, retryInProgress, retryUnderWay, runInProgress, runOrder, type RetriedRequests } from '../view';
 import { thinkingLabel } from '../providers/anthropic';
@@ -664,7 +664,8 @@ export async function buildSupplementary(data: ExportData, run: Run, opts: Suppl
   // All texts: the run's texts with a label count as labelled even without a usable answer (as in Excel).
   const [agr] = await agreement();
   if (agr.length) await res.file('agreement.csv', () => toCsvBlobPaced(agreementRows(agr, runName(run, d.runs))));
-  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(publicCorpus(corpusRows(runDocs, true, keepMeta), runDocs)));
+  // (Columns the prompt inserts: the values the run sent, so annotate.py rebuilds the requests as sent.)
+  if (opts.includeTexts) await root.folder('data').file('corpus.csv', () => toCsvBlobPaced(publicCorpus(corpusRows(runDocs.map((x) => asSent(run, x)), true, keepMeta), runDocs)));
   if (opts.includeLogs) await addRunLogs(root.folder('logs'), run, runDocs, rs);
   await scriptFiles(root.folder('scripts'), d.study, run, exportedAt, d.runs);
   await root.file('README.md', () => supplementaryReadme(d, run, meta, agr, opts));

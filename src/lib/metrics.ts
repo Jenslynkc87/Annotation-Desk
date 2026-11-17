@@ -573,7 +573,12 @@ export function agreement(
     if (allowedNums.length >= 2) leftOut.range = [lo, hi];
     const onScale = (v: string) => isNum(v) && Number(v) >= lo - 1e-9 && Number(v) <= hi + 1e-9;
     // (A tie of scale points, from a majority vote of numeric categories, is a category of its own at the nominal level.)
-    fits = level === 'nominal' ? (v: string) => onScale(v) || (v.includes(' | ') && v.split(' | ').every(onScale)) : onScale;
+    // Category codes that are numbers (nominal): a whole number between two codes that is no code itself (a coder's 2
+    // where the codes are 1 and 3) is left out, as a word that is no category is; a value between two whole codes (a
+    // 1.5 median of runs compared at the nominal level) is still compared, as a disagreement.
+    const isCode = (v: string) => allowedNums.some((p) => Math.abs(p - Number(v)) < 1e-9);
+    const code = (v: string) => onScale(v) && (isCode(v) || !Number.isInteger(Number(v)));
+    fits = level === 'nominal' ? (v: string) => code(v) || (v.includes(' | ') && v.split(' | ').every(isCode)) : onScale;
   } else if (new Set(allowed).size >= 2) {
     const cats = new Set(allowed);
     fits = (v: string) => cats.has(v) || (v.includes(' | ') && v.split(' | ').every((x) => cats.has(x)));

@@ -3,6 +3,7 @@ import { endBackground, setBackgroundProgress, startBackground, useBackground, t
 import { buildBackup } from '../lib/export/backup';
 import { agreementData, agreementHere, buildExcel, buildResearchRepo, buildSupplementary, publicMetaColumns, type AgreementFor, type ExportData } from '../lib/export/packages';
 import { labelPairs } from '../lib/export/tables';
+import { promptMetaColumns } from '../lib/prompt';
 import type { AgreementJob, AgreementMessage } from '../lib/report.worker';
 import { batchChecksDone, currentStudy, getState, isBusy, toast, useStore, withRemoved } from '../lib/store';
 import { dateStamp, download, errorMessage, fmtDateTime, slug } from '../lib/util';
@@ -133,6 +134,8 @@ export function ExportView() {
     }
   };
   const shownMeta = choices.supp?.metaColumns ?? allMeta.filter((c) => !leftOut.includes(c));
+  // Columns the chosen run's prompt inserts ({{meta.year}}): the script needs them in data/corpus.csv.
+  const promptUses = run ? promptMetaColumns(run.snapshot.prompt.userTemplate, run.snapshot.prompt.subject) : [];
 
   const go = async (kind: BackgroundKind, label: string, fn: () => Promise<void>, picked: BuildChoices = {}) => {
     // A download that reads the stored results and logs as it goes waits for a run or Retry failed being sent, so it
@@ -347,6 +350,13 @@ export function ExportView() {
                     <span>{c}</span>
                   </label>
                 ))}
+                {promptUses.some((c) => allMeta.includes(c) && !shownMeta.includes(c)) && (
+                  <div className="hint err">
+                    This run's prompt inserts {promptUses.filter((c) => allMeta.includes(c) && !shownMeta.includes(c)).join(', ')}. Without{' '}
+                    {promptUses.filter((c) => allMeta.includes(c) && !shownMeta.includes(c)).length === 1 ? 'that column' : 'those columns'}, the script in
+                    the package can't rebuild the requests as they were sent.
+                  </div>
+                )}
               </div>
             </details>
           )}

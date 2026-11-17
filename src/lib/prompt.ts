@@ -1,4 +1,4 @@
-import type { Doc, PromptSpec, Variable } from './types';
+import type { Doc, PromptSpec, Run, Variable } from './types';
 
 export const RATIONALE_KEY = 'rationale';
 export const TEXT_RESPONSE_KEY = 'response';
@@ -55,6 +55,21 @@ function fillPlaceholders(template: string, doc: Pick<Doc, 'docId' | 'text' | 'm
 
 export function templatePlaceholders(template: string): string[] {
   return [...template.matchAll(PLACEHOLDER)].map((m) => m[1]);
+}
+
+/** The metadata columns a prompt inserts ({{meta.year}} → year), in the order first used. */
+export function promptMetaColumns(prompt: string, subject?: PromptSpec['subject']): string[] {
+  return [...new Set(templatePlaceholders(effectiveTemplate(prompt, subject)).filter((k) => k.startsWith('meta.')).map((k) => k.slice(5)))];
+}
+
+/**
+ * A text as its run sends it: with the metadata values the run first sent (`Run.metaSent`), so a later edit of a
+ * column the prompt inserts doesn't change a retry or what a collected batch's log says was sent. (Runs before
+ * Nov 17, 2026, and prompts without {{meta.…}}: the text as it is.)
+ */
+export function asSent(run: Pick<Run, 'metaSent'>, doc: Doc): Doc {
+  const sent = run.metaSent?.[doc.id];
+  return sent ? { ...doc, meta: { ...doc.meta, ...sent } } : doc;
 }
 
 /** {{...}} markers that can't be filled in (e.g. a name with brackets); they are sent as written. */
@@ -248,18 +263,26 @@ function fitsField(v: Variable, x: unknown): boolean {
 
 /**
  * For free-text runs whose answer happens to be a JSON object: one column per leaf, nested keys joined
- * with "_" (e.g. race_ethnicity_negative). Returns null when the answer is not a JSON object.
+ * with "_" (e.g. race_ethnicity_negative). Returns null when the answer is not a JSON object. Two leaves that
+ * end up with one name ({"stance": {"score": -3}, "stance_score": 3}) and differ leave that column blank, so
+ * neither value silently stands for the other (the answer itself is kept as it came).
  */
 export function flattenJsonResponse(raw: string | undefined): Record<string, string> | null {
   const obj = raw ? jsonObjectIn(raw) : null;
   if (!obj) return null;
   const out: Record<string, string> = {};
+  const clash = new Set<string>();
   const walk = (v: unknown, key: string) => {
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, key ? `${key}_${k}` : k);
-    } else out[key] = valueToString(v);
+    } else {
+      const value = valueToString(v);
+      if (Object.prototype.hasOwnProperty.call(out, key) && out[key] !== value) clash.add(key);
+      out[key] = value;
+    }
   };
   walk(obj, '');
+  for (const k of clash) out[k] = '';
   return out;
 }
 
@@ -292,6 +315,20 @@ export function isExplanationKey(k: string): boolean {
  */
 export function isProseField(p: Pick<PromptSpec, 'variables'>, f: string): boolean {
   return p.variables.find((v) => v.name === f)?.type === 'text' || isExplanationKey(f);
+}
+
+/**
+ * Category values the statistics would read as one (`normalizeLabel`: "01" and "1", "Essay" and "essay"), in
+ * groups of two or more, as written. The codebook editor warns about them: votes, agreement and charts would merge them.
+ */
+export function lookAlikeValues(values: string[]): string[][] {
+  const groups = new Map<string, string[]>();
+  for (const v of values.map((x) => x.trim()).filter(Boolean)) {
+    const k = normalizeLabel(v);
+    const g = groups.get(k) ?? groups.set(k, []).get(k)!;
+    if (!g.includes(v)) g.push(v);
+  }
+  return [...groups.values()].filter((g) => g.length > 1);
 }
 
 /** Canonical form for comparing labels across sources (gold columns, runs).

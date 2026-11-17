@@ -181,7 +181,8 @@ class Importer {
         const batch = r.batch
           ? { ...r.batch, map: Object.fromEntries(Object.entries(r.batch.map).map(([k, [d, rep]]) => [k, [this.docMap.get(d) ?? d, rep] as [string, number]])) }
           : null;
-        await dbApi.putRun({ ...r, id, studyId, docIds: r.docIds.map((d) => this.docMap.get(d) ?? d), batch });
+        const metaSent = r.metaSent ? Object.fromEntries(Object.entries(r.metaSent).map(([d, v]) => [this.docMap.get(d) ?? d, v])) : undefined;
+        await dbApi.putRun({ ...r, id, studyId, docIds: r.docIds.map((d) => this.docMap.get(d) ?? d), batch, ...(metaSent ? { metaSent } : {}) });
       }
     } else if (section === 'results') {
       await dbApi.putMany(
